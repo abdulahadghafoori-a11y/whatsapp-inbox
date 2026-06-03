@@ -1,0 +1,12 @@
+# Copy to:  %USERPROFILE%\.cloudflared\config.yml
+# Replace tunnel UUID, credentials path, and hostname.
+
+tunnel: YOUR_TUNNEL_UUID_HERE
+credentials-file: C:\Users\YOUR_USER\.cloudflared\YOUR_TUNNEL_UUID.json
+
+ingress:
+  # Public HTTPS hostname -> local Fastify API
+  - hostname: inbox-dev.yourdomain.com
+    service: http://localhost:3001
+  # Required catch-all
+  - service: http_status:404

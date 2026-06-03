@@ -1,0 +1,68 @@
+{
+  "expo": {
+    "name": "Sales Inbox",
+    "slug": "whatsapp-sales-inbox",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "salesinbox",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.example.salesinbox",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Take photos to send to customers.",
+        "NSPhotoLibraryUsageDescription": "Attach photos and videos to messages.",
+        "NSMicrophoneUsageDescription": "Record voice messages."
+      }
+    },
+    "android": {
+      "softwareKeyboardLayoutMode": "resize",
+      "package": "com.example.salesinbox",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "permissions": [
+        "CAMERA",
+        "READ_MEDIA_IMAGES",
+        "READ_MEDIA_VIDEO",
+        "RECORD_AUDIO",
+        "POST_NOTIFICATIONS"
+      ]
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Attach photos to messages.",
+          "cameraPermission": "Take photos to send."
+        }
+      ],
+      "expo-document-picker",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#25D366"
+        }
+      ],
+      "expo-asset",
+      "expo-audio",
+      "expo-video"
+    ],
+    "extra": {
+      "router": {
+        "origin": false
+      }
+    }
+  }
+}

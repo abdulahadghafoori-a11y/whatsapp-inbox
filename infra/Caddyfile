@@ -1,0 +1,13 @@
+# Caddy reverse proxy with automatic HTTPS.
+# Replace your-domain.com with your real domain (DNS A record -> server IP).
+your-domain.com {
+	reverse_proxy localhost:3001
+
+	# Give the webhook a little more headroom for bursts.
+	@webhook path /api/webhook/*
+	handle @webhook {
+		reverse_proxy localhost:3001
+	}
+
+	encode gzip
+}
