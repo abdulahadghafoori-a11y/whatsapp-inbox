@@ -4,16 +4,19 @@ import {
   Text,
   Pressable,
   PanResponder,
+  ActivityIndicator,
   type LayoutChangeEvent,
 } from 'react-native'
 import { useGlobalAudioStore } from '@/stores/globalAudioStore'
 import { useAudioDuration } from '@/hooks/useAudioDuration'
 import { getAudioDuration } from '@/lib/audioDurationCache'
+import { resolveUploadUri } from '@/lib/uploadUri'
 import { PlaybackSpeedButton } from '@/components/PlaybackSpeedButton'
 import { formatDuration } from '@/lib/format'
 
 const MIN_WIDTH = 268
 const WAVE_BARS = 36
+const PLAY_SIZE = 38
 
 const BAR_HEIGHTS = Array.from({ length: WAVE_BARS }, (_, i) => {
   const n = (Math.sin(i * 0.55) + Math.sin(i * 0.17)) * 0.5 + 0.5
@@ -25,11 +28,13 @@ export function AudioPlayer({
   messageId,
   conversationId,
   variant = 'inbound',
+  resolvePlaybackUri,
 }: {
   uri: string
   messageId: string
   conversationId: string
   variant?: 'inbound' | 'outbound'
+  resolvePlaybackUri?: () => Promise<string | null>
 }) {
   const track = useGlobalAudioStore((s) => s.track)
   const engagedSession = useGlobalAudioStore((s) => s.engagedSession)
@@ -41,7 +46,7 @@ export function AudioPlayer({
 
   const session = engagedSession?.messageId === messageId ? engagedSession : null
   const isActive = track?.messageId === messageId
-  const probedDurationMs = useAudioDuration(uri, messageId, !isActive && !session)
+  const probedDurationMs = useAudioDuration(uri, messageId, !isActive)
 
   const trackRef = useRef<View>(null)
   const trackWidthRef = useRef(0)
@@ -49,6 +54,7 @@ export function AudioPlayer({
   const durationMsRef = useRef(0)
   const [scrubbing, setScrubbing] = useState(false)
   const [scrubRatio, setScrubRatio] = useState(0)
+  const [resolving, setResolving] = useState(false)
 
   const playBg = variant === 'outbound' ? 'bg-wa-dark' : 'bg-wa-teal'
   const waveActive = variant === 'outbound' ? 'bg-wa-dark/75' : 'bg-wa-teal'
@@ -71,8 +77,7 @@ export function AudioPlayer({
         : 0
 
   const isPlaying = isActive && (wantPlaying || playback.isPlaying)
-  const loading = isActive && wantPlaying && !playback.isLoaded && durationMs <= 0
-  const hasStarted = !!session || isPlaying || positionMs > 300
+  const loading = resolving || (isActive && wantPlaying && !playback.isLoaded)
 
   durationMsRef.current = durationMs
 
@@ -80,18 +85,32 @@ export function AudioPlayer({
   const displayProgress = scrubbing ? scrubRatio : playbackProgress
 
   const timeLabel = useMemo(() => {
-    if (loading) return '…'
+    if (loading && durationMs <= 0) return '…'
     if (durationMs <= 0) return '--:--'
-    if (hasStarted || positionMs > 0) return formatDuration(positionMs / 1000)
+    if (positionMs > 300 || (isPlaying && positionMs > 0)) {
+      return formatDuration(positionMs / 1000)
+    }
     return formatDuration(durationMs / 1000)
-  }, [loading, durationMs, positionMs, hasStarted])
+  }, [loading, durationMs, positionMs, isPlaying])
 
-  function onToggle() {
+  async function onToggle() {
     if (isPlaying) {
       pause()
       return
     }
-    toggle({ uri, messageId, conversationId, variant })
+    setResolving(true)
+    try {
+      let playUri: string | null = null
+      if (resolvePlaybackUri) {
+        const resolved = await resolvePlaybackUri()
+        if (resolved) playUri = resolveUploadUri(resolved)
+      }
+      if (!playUri && uri) playUri = resolveUploadUri(uri)
+      if (!playUri) return
+      toggle({ uri: playUri, messageId, conversationId, variant })
+    } finally {
+      setResolving(false)
+    }
   }
 
   function ratioFromPageX(pageX: number) {
@@ -111,7 +130,7 @@ export function AudioPlayer({
       onMoveShouldSetPanResponder: () => durationMsRef.current > 0,
       onPanResponderGrant: (evt) => {
         if (!session && !isActive) {
-          toggle({ uri, messageId, conversationId, variant })
+          void onToggle()
         }
         setScrubbing(true)
         setScrubFromPageX(evt.nativeEvent.pageX)
@@ -122,7 +141,7 @@ export function AudioPlayer({
       onPanResponderRelease: (evt) => {
         const ratio = ratioFromPageX(evt.nativeEvent.pageX)
         setScrubbing(false)
-        if (!session && !isActive) toggle({ uri, messageId, conversationId, variant })
+        if (!session && !isActive) void onToggle()
         seekRatio(ratio)
       },
       onPanResponderTerminate: (evt) => {
@@ -147,16 +166,17 @@ export function AudioPlayer({
       className="w-full flex-row items-center gap-2.5"
     >
       <Pressable
-        onPress={onToggle}
+        onPress={() => void onToggle()}
         disabled={loading}
         accessibilityRole="button"
         accessibilityLabel={isPlaying ? 'Pause' : 'Play'}
-        className={`h-9 w-9 shrink-0 items-center justify-center rounded-full ${playBg}`}
+        className={`shrink-0 items-center justify-center rounded-full ${playBg}`}
+        style={{ width: PLAY_SIZE, height: PLAY_SIZE, borderRadius: PLAY_SIZE / 2 }}
       >
         {loading ? (
-          <Text className="text-xs text-white">…</Text>
+          <ActivityIndicator color="#fff" size="small" />
         ) : (
-          <Text className="ml-0.5 text-[13px] text-white">{isPlaying ? '❚❚' : '▶'}</Text>
+          <Text className="ml-0.5 text-[15px] text-white">{isPlaying ? '❚❚' : '▶'}</Text>
         )}
       </Pressable>
 

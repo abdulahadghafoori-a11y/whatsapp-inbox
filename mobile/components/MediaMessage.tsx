@@ -1,26 +1,26 @@
-import { useState, type ReactNode } from 'react'
+import { useCallback, useState, type ReactNode } from 'react'
 import {
   View,
   Text,
   Pressable,
-  Modal,
   ActivityIndicator,
-  Dimensions,
   Alert,
   StyleSheet,
 } from 'react-native'
-import { Image } from 'expo-image'
-import { useMediaUrl } from '@/hooks/useMedia'
 import { api } from '@/services/api'
 import { openDocumentFromUrl } from '@/lib/openDocument'
+import { BUBBLE_MEDIA_MAX_WIDTH } from '@/lib/chatMediaLayout'
+import { useMessageMedia } from '@/hooks/useMessageMedia'
+import { resolvePlaybackUri } from '@/lib/mediaPlayback'
 import { DocumentIcon } from '@/components/ChatIcons'
 import { AudioPlayer } from './AudioPlayer'
-import { ChatVideo } from './ChatVideo'
+import { ChatVideoMedia } from './ChatVideoMedia'
+import { ChatImageMedia } from './ChatImageMedia'
+import { MediaFullscreenViewer } from './MediaFullscreenViewer'
+import { VideoFullscreenViewer } from './VideoFullscreenViewer'
 import type { Message } from '@/types'
 
-const { width: SCREEN_W } = Dimensions.get('window')
-const IMAGE_SIZE = Math.min(SCREEN_W * 0.62, 240)
-const STICKER_SIZE = 144
+const FALLBACK_MEDIA_HEIGHT = Math.round(BUBBLE_MEDIA_MAX_WIDTH * 0.75)
 
 function MediaPlaceholder({
   children,
@@ -44,21 +44,32 @@ function MediaPlaceholder({
 export function MediaMessage({
   message,
   variant = 'inbound',
+  contactName,
+  onReplyQuotePress,
 }: {
   message: Message
   variant?: 'inbound' | 'outbound'
+  contactName?: string
+  onReplyQuotePress?: (messageId: string) => void
 }) {
   const localPreview = message.localPreviewUri
   const pending = message.mediaStatus === 'pending'
-  const failed = message.mediaStatus === 'failed'
-  const hasRemoteKey = !!message.mediaUrl && !pending && !failed
-  const { data: url, isLoading, isError } = useMediaUrl(hasRemoteKey ? message.mediaUrl : null)
-  // Prefer S3 presigned URL once uploaded; local file is only for in-flight uploads.
-  const displayUrl = hasRemoteKey ? url ?? localPreview : localPreview
-  const [fullScreen, setFullScreen] = useState(false)
+  const mediaDownloadFailed = message.mediaStatus === 'failed' && !message.mediaUrl
+  const uploading =
+    variant === 'outbound' && message.status === 'pending' && !!localPreview
+
+  const { displayUrl, playbackUrl, remoteUrl, isLoading, isError } = useMessageMedia(message)
+
+  const resolveUri = useCallback(
+    () => resolvePlaybackUri(message, remoteUrl),
+    [message, remoteUrl],
+  )
+
+  const [imageFullScreen, setImageFullScreen] = useState(false)
+  const [videoFullScreen, setVideoFullScreen] = useState(false)
+  const [videoPlaybackUrl, setVideoPlaybackUrl] = useState<string | null>(null)
   const [retrying, setRetrying] = useState(false)
   const [openingDoc, setOpeningDoc] = useState(false)
-  const [imageError, setImageError] = useState(false)
 
   async function retryDownload() {
     if (retrying) return
@@ -72,9 +83,9 @@ export function MediaMessage({
     }
   }
 
-  if (pending && !localPreview) {
+  if (pending && !localPreview && !displayUrl) {
     return (
-      <MediaPlaceholder minHeight={message.type === 'audio' ? 48 : 140}>
+      <MediaPlaceholder minHeight={message.type === 'audio' ? 40 : 140}>
         <ActivityIndicator color="#128C7E" />
         <Text className="mt-2 text-sm text-neutral-500">
           {retrying ? 'Retrying…' : 'Downloading…'}
@@ -89,9 +100,9 @@ export function MediaMessage({
     )
   }
 
-  if (failed && !localPreview) {
+  if (mediaDownloadFailed && !localPreview && !displayUrl) {
     return (
-      <MediaPlaceholder minHeight={message.type === 'audio' ? 48 : 140}>
+      <MediaPlaceholder minHeight={message.type === 'audio' ? 40 : 140}>
         <Text className="text-sm font-medium text-red-600">Media unavailable</Text>
         <Pressable
           onPress={() => void retryDownload()}
@@ -108,9 +119,9 @@ export function MediaMessage({
     )
   }
 
-  if (!displayUrl && (isLoading || hasRemoteKey)) {
+  if (!displayUrl && isLoading) {
     return (
-      <MediaPlaceholder minHeight={message.type === 'audio' ? 48 : IMAGE_SIZE}>
+      <MediaPlaceholder minHeight={message.type === 'audio' ? 40 : FALLBACK_MEDIA_HEIGHT}>
         <ActivityIndicator color="#128C7E" />
       </MediaPlaceholder>
     )
@@ -118,44 +129,37 @@ export function MediaMessage({
 
   if (!displayUrl && isError) {
     return (
-      <MediaPlaceholder minHeight={IMAGE_SIZE}>
+      <MediaPlaceholder minHeight={FALLBACK_MEDIA_HEIGHT}>
         <Text className="text-sm text-red-600">Could not load media</Text>
       </MediaPlaceholder>
     )
   }
 
   if (message.type === 'image' || message.type === 'sticker') {
-    const size = message.type === 'sticker' ? STICKER_SIZE : IMAGE_SIZE
-    if (!displayUrl || imageError) {
+    if (!displayUrl) {
       return (
-        <MediaPlaceholder minHeight={size} minWidth={size}>
+        <MediaPlaceholder minHeight={FALLBACK_MEDIA_HEIGHT}>
           <Text className="text-sm text-neutral-500">Photo unavailable</Text>
         </MediaPlaceholder>
       )
     }
+    const sticker = message.type === 'sticker'
     return (
       <>
-        <Pressable onPress={() => setFullScreen(true)} style={styles.imageWrap}>
-          <Image
-            source={{ uri: displayUrl }}
-            style={{ width: size, height: size, borderRadius: 12 }}
-            contentFit="cover"
-            transition={150}
-            onError={() => setImageError(true)}
-          />
-        </Pressable>
-        <Modal visible={fullScreen} transparent onRequestClose={() => setFullScreen(false)}>
-          <Pressable
-            onPress={() => setFullScreen(false)}
-            className="flex-1 items-center justify-center bg-black"
-          >
-            <Image
-              source={{ uri: displayUrl }}
-              style={{ width: SCREEN_W, height: SCREEN_W }}
-              contentFit="contain"
-            />
-          </Pressable>
-        </Modal>
+        <ChatImageMedia
+          uri={displayUrl}
+          sticker={sticker}
+          uploading={uploading}
+          onPress={() => setImageFullScreen(true)}
+        />
+        <MediaFullscreenViewer
+          visible={imageFullScreen}
+          uri={displayUrl}
+          onClose={() => setImageFullScreen(false)}
+          replyTo={message.replyTo}
+          contactName={contactName}
+          onReplyQuotePress={onReplyQuotePress}
+        />
       </>
     )
   }
@@ -168,7 +172,33 @@ export function MediaMessage({
         </MediaPlaceholder>
       )
     }
-    return <ChatVideo url={displayUrl} />
+    const openVideo = async () => {
+      const local = await resolvePlaybackUri(message, remoteUrl)
+      setVideoPlaybackUrl(local ?? displayUrl)
+      setVideoFullScreen(true)
+    }
+
+    return (
+      <>
+        <ChatVideoMedia
+          uri={displayUrl}
+          messageId={message.id}
+          uploading={uploading}
+          onPress={() => void openVideo()}
+        />
+        <VideoFullscreenViewer
+          visible={videoFullScreen}
+          url={videoPlaybackUrl ?? displayUrl}
+          onClose={() => {
+            setVideoFullScreen(false)
+            setVideoPlaybackUrl(null)
+          }}
+          replyTo={message.replyTo}
+          contactName={contactName}
+          onReplyQuotePress={onReplyQuotePress}
+        />
+      </>
+    )
   }
 
   if (message.type === 'audio') {
@@ -181,10 +211,11 @@ export function MediaMessage({
     }
     return (
       <AudioPlayer
-        uri={displayUrl}
+        uri={playbackUrl ?? displayUrl}
         messageId={message.id}
         conversationId={message.conversationId}
         variant={variant}
+        resolvePlaybackUri={resolveUri}
       />
     )
   }
@@ -193,17 +224,17 @@ export function MediaMessage({
     if (openingDoc) return
     setOpeningDoc(true)
     try {
-      if (localPreview) {
+      if (displayUrl && (displayUrl.startsWith('file://') || displayUrl.startsWith('/'))) {
         const { openLocalDocument } = await import('@/lib/openDocument')
         await openLocalDocument(
-          localPreview,
+          displayUrl,
           message.mediaMimeType ?? 'application/octet-stream',
         )
         return
       }
-      if (!url) return
+      if (!remoteUrl && !displayUrl) return
       await openDocumentFromUrl(
-        url,
+        displayUrl ?? remoteUrl!,
         message.mediaFilename ?? 'document',
         message.mediaMimeType,
       )
@@ -236,10 +267,3 @@ export function MediaMessage({
     </Pressable>
   )
 }
-
-const styles = StyleSheet.create({
-  imageWrap: {
-    overflow: 'hidden',
-    borderRadius: 12,
-  },
-})

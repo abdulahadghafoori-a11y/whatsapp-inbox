@@ -12,7 +12,9 @@ import { ToastProvider } from '@/components/Toast'
 import { SocketBridge } from '@/components/SocketBridge'
 import { GlobalAudioHost } from '@/components/GlobalAudioHost'
 import { OfflineSyncBridge } from '@/components/OfflineSyncBridge'
+import { MediaCacheBridge } from '@/components/MediaCacheBridge'
 import { queryPersister, queryClient, shouldDehydrateQuery } from '@/lib/queryClient'
+import { modalPresentationOptions, stackTransitionOptions } from '@/lib/navigation'
 
 function AuthGate() {
   const router = useRouter()
@@ -56,14 +58,20 @@ function AuthGate() {
     <>
       {accessToken ? <SocketBridge /> : null}
       {accessToken ? <OfflineSyncBridge /> : null}
+      {accessToken ? <MediaCacheBridge /> : null}
       {accessToken ? <GlobalAudioHost /> : null}
-      <Stack screenOptions={{ headerShown: false }}>
+      <Stack screenOptions={{ headerShown: false, animation: 'fade', animationDuration: 200 }}>
         <Stack.Screen name="index" options={{ headerShown: false }} />
         <Stack.Screen name="(auth)" />
-        <Stack.Screen name="(tabs)" />
+        <Stack.Screen name="(tabs)" options={{ animation: 'fade' }} />
+        <Stack.Screen name="conversation" options={stackTransitionOptions} />
         <Stack.Screen
           name="settings"
-          options={{ headerShown: true, title: 'Settings', presentation: 'modal' }}
+          options={{
+            headerShown: true,
+            title: 'Settings',
+            ...modalPresentationOptions,
+          }}
         />
       </Stack>
       {!isHydrated ? (

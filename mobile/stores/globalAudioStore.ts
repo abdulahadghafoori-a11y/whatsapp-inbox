@@ -139,7 +139,7 @@ export const useGlobalAudioStore = create<GlobalAudioState>((set, get) => ({
     const resume = resumeFromSession
       ? {
           isPlaying: false,
-          isLoaded: true,
+          isLoaded: false,
           durationMs: resumeFromSession.durationMs,
           positionMs: atEnd ? 0 : resumeFromSession.positionMs,
           didJustFinish: false,

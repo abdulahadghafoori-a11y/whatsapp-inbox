@@ -1,30 +1,34 @@
 import { memo } from 'react'
-import { View, Text, Pressable } from 'react-native'
+import { View, Text, Pressable, ActivityIndicator } from 'react-native'
 import { MediaMessage } from './MediaMessage'
+import { LocationMessage } from './LocationMessage'
 import { StatusTicks } from './StatusTicks'
 import { RetryIcon } from './ChatIcons'
+import { ReplyQuoteBlock } from './ReplyQuoteBlock'
 import { formatTime } from '@/lib/format'
 import type { Message } from '@/types'
 
-function replySnippet(m: Message['replyTo']): string {
-  if (!m) return ''
-  if (m.deletedAt) return 'Message deleted'
-  if (m.body) return m.body
-  return `[${m.type}]`
-}
-
 function MessageBubbleBase({
   message,
+  contactName,
   onRetry,
   onLongPress,
+  onReplyQuotePress,
+  highlight,
 }: {
   message: Message
+  contactName: string
   onRetry?: (m: Message) => void
   onLongPress?: (m: Message) => void
+  onReplyQuotePress?: (messageId: string) => void
+  highlight?: boolean
 }) {
   const outbound = message.direction === 'outbound'
-  const isMedia = message.type !== 'text'
+  const isLocation = message.type === 'location'
+  const isMedia = message.type !== 'text' && !isLocation
   const isAudio = message.type === 'audio'
+  const isVisualMedia =
+    message.type === 'image' || message.type === 'video' || message.type === 'sticker'
   const deleted = !!message.deletedAt
   const failed = outbound && message.status === 'failed'
   const sending = outbound && message.status === 'pending'
@@ -34,6 +38,12 @@ function MessageBubbleBase({
   const isQueuedOffline = message.id.startsWith('pending-text-')
   const isUploadingMedia = message.id.startsWith('pending-media-')
   const tickStatus = isUploadingMedia ? 'pending' : message.status
+  const showSendingBanner =
+    sending &&
+    !isQueuedOffline &&
+    !isUploadingMedia &&
+    message.type !== 'text' &&
+    (!isVisualMedia || isLocation)
 
   const bubbleClass = failed || stalePending
     ? 'rounded-2xl rounded-br-md border border-[#e8b4b4] bg-[#f5d5d5] shadow-sm'
@@ -45,7 +55,7 @@ function MessageBubbleBase({
 
   if (deleted) {
     return (
-      <View className={`my-1 px-3 ${outbound ? 'items-end' : 'items-start'}`}>
+      <View className={`my-0.5 px-1.5 ${outbound ? 'items-end' : 'items-start'}`}>
         <View className="max-w-[85%] rounded-2xl bg-neutral-100 px-3 py-2">
           <Text className="text-sm italic text-neutral-500">Message deleted</Text>
         </View>
@@ -54,7 +64,7 @@ function MessageBubbleBase({
   }
 
   return (
-    <View className={`my-1 flex-row px-3 ${outbound ? 'justify-end' : 'justify-start'}`}>
+    <View className={`my-0.5 flex-row px-1.5 ${outbound ? 'justify-end' : 'justify-start'}`}>
       {showRetry && onRetry ? (
         <Pressable
           onPress={() => onRetry(message)}
@@ -69,29 +79,52 @@ function MessageBubbleBase({
       <Pressable
         onLongPress={() => onLongPress?.(message)}
         delayLongPress={280}
-        className={`${bubbleClass} ${isAudio ? 'min-w-[280px] max-w-[92%] px-2.5 py-1.5' : 'max-w-[85%] px-3 py-2.5'}`}
+        style={highlight ? { opacity: 1 } : undefined}
+        className={`${bubbleClass} ${
+          highlight ? 'border-2 border-wa-teal/50' : ''
+        } ${
+          isAudio
+            ? 'min-w-[260px] max-w-[94%] px-2 py-1.5'
+            : isLocation
+              ? 'max-w-[94%] p-1'
+              : isVisualMedia && !message.body
+                ? 'max-w-[94%] p-1'
+                : 'max-w-[90%] px-2.5 py-2'
+        }`}
       >
         {message.replyTo ? (
-          <View className="mb-2 border-l-2 border-wa-teal/60 pl-2">
-            <Text numberOfLines={2} className="text-xs text-neutral-500">
-              {replySnippet(message.replyTo)}
-            </Text>
-          </View>
+          <ReplyQuoteBlock
+            reply={message.replyTo}
+            contactName={contactName}
+            isOutboundBubble={outbound}
+            onPress={onReplyQuotePress}
+          />
         ) : null}
 
-        {isMedia && (
+        {isLocation ? <LocationMessage message={message} /> : null}
+
+        {isMedia ? (
           <MediaMessage
             message={message}
             variant={outbound ? 'outbound' : 'inbound'}
+            contactName={contactName}
+            onReplyQuotePress={onReplyQuotePress}
           />
-        )}
+        ) : null}
 
-        {message.body ? (
+        {message.body && !isLocation ? (
           <Text
             className={`text-[15px] leading-[21px] text-neutral-900 ${isMedia ? 'mt-2' : ''}`}
           >
             {message.body}
           </Text>
+        ) : null}
+
+        {showSendingBanner ? (
+          <View className="mb-1.5 flex-row items-center justify-end gap-2 rounded-xl bg-wa-teal/12 px-3 py-2">
+            <ActivityIndicator size="small" color="#128C7E" />
+            <Text className="text-[13px] font-semibold text-wa-teal">Sending…</Text>
+          </View>
         ) : null}
 
         <View

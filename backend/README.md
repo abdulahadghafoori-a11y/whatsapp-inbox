@@ -97,6 +97,21 @@ Backoff: 1m → 5m → 30m, then `failed`. Types: `send_whatsapp_message`,
 Inbound media uses a single `download_media` job (WhatsApp → S3 → `media_ready`);
 no binaries are stored in the jobs table.
 
+## Outbound media (WhatsApp-aligned)
+
+All uploads go through `prepareOutboundMedia` before Cloud API upload:
+
+| Type | Server processing | Limit |
+|------|-------------------|-------|
+| Image | EXIF rotate, resize (1600px), JPEG/PNG re-encode | 5MB |
+| Sticker | WebP, 512px | 500KB |
+| Video | H.264 + AAC MP4, adaptive bitrate/scale | 16MB, 16 min |
+| Audio (voice) | FFmpeg → OGG Opus (voice flag) | 16MB |
+| Document | Filename sanitize, blocked executables | 100MB |
+
+Multipart accepts up to 100MB (documents); images/videos are compressed when needed.
+Requires `ffmpeg-static` on the server for audio and video.
+
 ## Deployment (single instance)
 
 Hetzner CX21, Ubuntu 22.04, Caddy (TLS), PM2 with `instances: 1` (required for the

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   View,
   Text,
-  FlatList,
   TextInput,
   Pressable,
   KeyboardAvoidingView as RNKeyboardAvoidingView,
@@ -12,22 +11,46 @@ import {
   ScrollView,
   StyleSheet,
   Keyboard,
+  InteractionManager,
 } from 'react-native'
-import { runOnJS, runOnUI } from 'react-native-reanimated'
+import { FlatList } from 'react-native-gesture-handler'
+import type Swipeable from 'react-native-gesture-handler/Swipeable'
+import Animated, {
+  runOnJS,
+  runOnUI,
+  useAnimatedRef,
+  useAnimatedScrollHandler,
+  useSharedValue,
+} from 'react-native-reanimated'
 import { KeyboardAvoidingView, useReanimatedKeyboardAnimation } from 'react-native-keyboard-controller'
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
-import { useFocusEffect, useIsFocused } from '@react-navigation/native'
-import { useLocalSearchParams, useNavigation, useRouter } from 'expo-router'
+import { useIsFocused } from '@react-navigation/native'
+import { useLocalSearchParams, useRouter } from 'expo-router'
 import * as ImagePicker from 'expo-image-picker'
 import * as DocumentPicker from 'expo-document-picker'
-import { MessageBubble } from '@/components/MessageBubble'
-import { MessageActionsSheet } from '@/components/MessageActionsSheet'
-import { MessagingBanner } from '@/components/MessagingBanner'
+import {
+  MessageActionsOverlay,
+  type MessageAnchor,
+} from '@/components/MessageActionsOverlay'
+import { ForwardMessageSheet } from '@/components/ForwardMessageSheet'
+import { SwipeableMessageBubble } from '@/components/SwipeableMessageBubble'
+import { ReplyQuoteBlock } from '@/components/ReplyQuoteBlock'
+import { messageToReplyPreview } from '@/lib/replyPreview'
+import { MessagingWindowTimer } from '@/components/MessagingWindowTimer'
+import { messagingWindowState, showUnderHeaderBar } from '@/lib/messagingWindow'
 import { AttachIcon, CloseIcon, KeyboardIcon, MicIcon, SendIcon } from '@/components/ChatIcons'
 import { AttachPanel, ATTACH_TRAY_HEIGHT } from '@/components/AttachMenu'
 import { MediaPreviewSheet, type PendingMedia } from '@/components/MediaPreviewSheet'
+import {
+  LocationPickerSheet,
+  type PendingLocation,
+} from '@/components/LocationPickerSheet'
+import type { MessageLocation } from '@/lib/messageLocation'
+import { VoiceRecordingWaveform } from '@/components/VoiceRecordingWaveform'
+import { QueryError } from '@/components/QueryState'
 import { useToast } from '@/components/Toast'
 import { messageTypeFromMime, normalizeUploadMime } from '@/lib/mediaMime'
+import { assertMediaUploadable } from '@/lib/waMediaLimits'
 import {
   useConversation,
   useMessages,
@@ -38,8 +61,8 @@ import {
   useTemplates,
   useMarkRead,
   useUpdateConversation,
-  useEditMessage,
-  useDeleteMessage,
+  useSendLocation,
+  useForwardMessage,
   isNetworkError,
   type WaTemplate,
 } from '@/hooks/useConversations'
@@ -53,28 +76,39 @@ import {
   type VoiceRecording,
 } from '@/lib/voiceRecording'
 import { formatDuration } from '@/lib/format'
+import { prepareMediaFileForUpload } from '@/lib/prepareUpload'
 import { resolveUploadUri } from '@/lib/uploadUri'
 import {
   playWaFeedback,
   playWaFeedbackAsync,
   warmWaFeedbackSounds,
 } from '@/lib/waFeedbackSounds'
+import { ChatScrollScrubber } from '@/components/ChatScrollScrubber'
+import { ScrollToLatestButton } from '@/components/ScrollToLatestButton'
 import type { Message } from '@/types'
+
+const ReanimatedFlatList = Animated.createAnimatedComponent(
+  FlatList,
+) as typeof FlatList<Message>
 
 export default function ChatScreen() {
   const { id } = useLocalSearchParams<{ id: string }>()
   const conversationId = id as string
   const router = useRouter()
-  const navigation = useNavigation()
   const isFocused = useIsFocused()
   const insets = useSafeAreaInsets()
   const toast = useToast()
 
   const { data: conversation } = useConversation(conversationId)
-  const { data: messagesData, isPending: messagesPending } = useMessages(conversationId)
+  const {
+    data: messagesData,
+    isPending: messagesPending,
+    isError: messagesError,
+    error: messagesFetchError,
+    refetch: refetchMessages,
+  } = useMessages(conversationId)
   const sendText = useSendText(conversationId)
-  const editMessage = useEditMessage(conversationId)
-  const deleteMessage = useDeleteMessage(conversationId)
+  const sendLocation = useSendLocation(conversationId)
   const sendMedia = useSendMedia(conversationId)
   const resendMessage = useResendMessage(conversationId)
   const markRead = useMarkRead()
@@ -83,9 +117,10 @@ export default function ChatScreen() {
   const [draft, setDraft] = useState('')
   const [replyTo, setReplyTo] = useState<Message | null>(null)
   const [actionMessage, setActionMessage] = useState<Message | null>(null)
+  const [actionAnchor, setActionAnchor] = useState<MessageAnchor | null>(null)
   const [actionsOpen, setActionsOpen] = useState(false)
-  const [editTarget, setEditTarget] = useState<Message | null>(null)
-  const [editDraft, setEditDraft] = useState('')
+  const [forwardMessage, setForwardMessage] = useState<Message | null>(null)
+  const forwardMutation = useForwardMessage()
   const [attachMenuOpen, setAttachMenuOpen] = useState(false)
   const [attachPanelHeight, setAttachPanelHeight] = useState(ATTACH_TRAY_HEIGHT)
   const [keyboardVisible, setKeyboardVisible] = useState(false)
@@ -96,13 +131,27 @@ export default function ChatScreen() {
   const [templateOpen, setTemplateOpen] = useState(false)
   const [attribOpen, setAttribOpen] = useState(false)
   const [pendingMedia, setPendingMedia] = useState<PendingMedia | null>(null)
+  const [pendingLocation, setPendingLocation] = useState<PendingLocation | null>(null)
   const [recordingOpen, setRecordingOpen] = useState(false)
   const [micReady, setMicReady] = useState(false)
   const [recordingMs, setRecordingMs] = useState(0)
   const recordingTimer = useRef<ReturnType<typeof setInterval> | null>(null)
   const recordingStartedAt = useRef<number>(0)
   const voiceRecorder = useRef<VoiceRecording | null>(null)
+  const [voiceRecorderLive, setVoiceRecorderLive] = useState<VoiceRecording | null>(null)
   const voiceStartInFlight = useRef(false)
+  const messagesListRef = useAnimatedRef<FlatList<Message>>()
+  const scrollY = useSharedValue(0)
+  const maxScrollY = useSharedValue(0)
+  const [scrubVisible, setScrubVisible] = useState(false)
+  const [showScrollFab, setShowScrollFab] = useState(false)
+  const scrubHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const scrubbingRef = useRef(false)
+  const [listContentHeight, setListContentHeight] = useState(0)
+  const [listViewportHeight, setListViewportHeight] = useState(0)
+  const [listScrubbing, setListScrubbing] = useState(false)
+  const [highlightMessageId, setHighlightMessageId] = useState<string | null>(null)
+  const openMessageSwipeRef = useRef<Swipeable | null>(null)
   const retriedFailedMedia = useRef(new Set<string>())
   const draftInputRef = useRef<TextInput>(null)
   const pendingKeyboardFocus = useRef(false)
@@ -121,16 +170,6 @@ export default function ChatScreen() {
       hideSub.remove()
     }
   }, [])
-
-  useFocusEffect(
-    useCallback(() => {
-      const tab = navigation.getParent()
-      tab?.setOptions({ tabBarStyle: { display: 'none' } })
-      return () => {
-        tab?.setOptions({ tabBarStyle: undefined })
-      }
-    }, [navigation]),
-  )
 
   function openAttachMenu() {
     runOnUI(() => {
@@ -162,6 +201,18 @@ export default function ChatScreen() {
     draftInputRef.current?.focus()
   }
 
+  const onMessageSwipeOpen = useCallback((messageId: string, ref: Swipeable | null) => {
+    if (openMessageSwipeRef.current && openMessageSwipeRef.current !== ref) {
+      openMessageSwipeRef.current.close()
+    }
+    openMessageSwipeRef.current = ref
+  }, [])
+
+  const onReplyToMessage = useCallback((m: Message) => {
+    setReplyTo(m)
+    focusComposer()
+  }, [])
+
   /** + when idle/typing; keyboard icon only while the attach tray is open. */
   const showKeyboardIcon = attachMenuOpen
 
@@ -173,12 +224,9 @@ export default function ChatScreen() {
     }
   }
 
-  /** Wait for attach tray spring to settle before opening system pickers. */
-  function runAttachAction(action: () => void | Promise<void>, delayMs = 380) {
-    closeAttachMenu()
-    setTimeout(() => {
-      void action()
-    }, delayMs)
+  /** Run attach action without closing the tray (menu stays open). */
+  function runAttachAction(action: () => void | Promise<void>) {
+    void action()
   }
 
   // Re-queue downloads that failed earlier (e.g. DNS issues on the server).
@@ -193,7 +241,13 @@ export default function ChatScreen() {
   }, [isFocused, messagesData?.messages])
 
   useEffect(() => {
-    void warmWaFeedbackSounds()
+    if (!conversationId) return
+    const task = InteractionManager.runAfterInteractions(() => {
+      void warmWaFeedbackSounds()
+      void markRead.mutateAsync(conversationId).catch(() => undefined)
+    })
+    return () => task.cancel()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId])
 
   useEffect(() => {
@@ -212,6 +266,7 @@ export default function ChatScreen() {
     setRecordingOpen(false)
     setMicReady(false)
     setRecordingMs(0)
+    setVoiceRecorderLive(null)
     recordingStartedAt.current = 0
   }
 
@@ -225,66 +280,159 @@ export default function ChatScreen() {
     }, 250)
   }
 
-  useEffect(() => {
-    if (conversationId) void markRead.mutateAsync(conversationId).catch(() => undefined)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conversationId])
-
   // Inverted list wants newest first; API returns oldest-first.
   const inverted = useMemo(
     () => (messagesData?.messages ?? []).slice().reverse(),
     [messagesData],
   )
 
+  const bumpScrubVisible = useCallback(() => {
+    setScrubVisible(true)
+    if (scrubHideTimer.current) clearTimeout(scrubHideTimer.current)
+    scrubHideTimer.current = setTimeout(() => {
+      if (!scrubbingRef.current) setScrubVisible(false)
+    }, 900)
+  }, [])
+
+  const updateScrollFab = useCallback((offsetY: number) => {
+    setShowScrollFab(offsetY > 72)
+  }, [])
+
+  useEffect(() => {
+    maxScrollY.value = Math.max(0, listContentHeight - listViewportHeight)
+  }, [listContentHeight, listViewportHeight, maxScrollY])
+
+  const scrollHandler = useAnimatedScrollHandler({
+    onScroll: (e) => {
+      scrollY.value = e.contentOffset.y
+      runOnJS(bumpScrubVisible)()
+      runOnJS(updateScrollFab)(e.contentOffset.y)
+    },
+    onBeginDrag: () => {
+      runOnJS(bumpScrubVisible)()
+    },
+  })
+
+  const scrollToLatest = useCallback(() => {
+    setShowScrollFab(false)
+    requestAnimationFrame(() => {
+      messagesListRef.current?.scrollToOffset({ offset: 0, animated: true })
+    })
+  }, [])
+
+  const scrollToQuotedMessage = useCallback(
+    (messageId: string) => {
+      const index = inverted.findIndex((m) => m.id === messageId)
+      if (index < 0) {
+        toast.show('Original message is not in this chat', 'error')
+        return
+      }
+      messagesListRef.current?.scrollToIndex({
+        index,
+        animated: true,
+        viewPosition: 0.5,
+      })
+      setHighlightMessageId(messageId)
+      setTimeout(() => setHighlightMessageId(null), 2200)
+    },
+    [inverted, toast],
+  )
+
   const canSendSession = conversation?.canSendSession ?? conversation?.isWindowOpen ?? false
   const needsTemplate = conversation?.needsTemplateForReply ?? !canSendSession
   const contactName = conversation?.contact?.name || conversation?.contact?.waId || 'Chat'
 
-  async function onSendText() {
+  function onSendText() {
     const body = draft.trim()
     if (!body) return
-    const replyToMessageId = replyTo?.id
+    const savedReply = replyTo
+    const replyToMessageId = savedReply?.id
+    const replyToPreview = savedReply ? messageToReplyPreview(savedReply) : undefined
     setDraft('')
     setReplyTo(null)
-    try {
-      const msg = await sendText.mutateAsync({ body, replyToMessageId })
-      if (msg.id.startsWith('pending-text-')) {
-        toast.show('Offline — message will send when you are back online')
-      } else {
-        void playWaFeedback('send')
-      }
-    } catch (err) {
-      if (isNetworkError(err)) {
-        toast.show('Offline — message queued')
-      } else {
-        toast.show(apiErrorMessage(err), 'error')
-        setDraft(body)
-        if (replyToMessageId && replyTo) setReplyTo(replyTo)
-      }
-    }
+    scrollToLatest()
+    sendText.mutate(
+      { body, replyToMessageId, replyToPreview },
+      {
+        onSuccess: (msg) => {
+          scrollToLatest()
+          if (msg.id.startsWith('pending-text-')) {
+            toast.show('Offline — message will send when you are back online')
+          } else {
+            void playWaFeedback('send')
+          }
+        },
+        onError: (err) => {
+          if (isNetworkError(err)) {
+            toast.show('Offline — message queued')
+            scrollToLatest()
+          } else {
+            toast.show(apiErrorMessage(err), 'error')
+            setDraft(body)
+            if (savedReply) setReplyTo(savedReply)
+          }
+        },
+      },
+    )
   }
 
-  async function onConfirmEdit() {
-    if (!editTarget) return
-    const body = editDraft.trim()
-    if (!body) return
+  async function onForwardToConversations(targetIds: string[]) {
+    if (!forwardMessage || targetIds.length === 0) return
     try {
-      await editMessage.mutateAsync({ messageId: editTarget.id, body })
-      setEditTarget(null)
-      setEditDraft('')
-      toast.show('Message updated in inbox')
+      const result = await forwardMutation.mutateAsync({
+        messageId: forwardMessage.id,
+        targetConversationIds: targetIds,
+      })
+      setForwardMessage(null)
+      if (result.okCount === targetIds.length) {
+        toast.show(
+          `Forwarded to ${result.okCount} chat${result.okCount === 1 ? '' : 's'}`,
+        )
+      } else if (result.okCount > 0) {
+        toast.show(`Sent to ${result.okCount} of ${targetIds.length} chats`, 'error')
+      } else {
+        toast.show('Could not forward message', 'error')
+      }
     } catch (err) {
       toast.show(apiErrorMessage(err), 'error')
     }
   }
 
-  async function onConfirmDelete(m: Message) {
-    try {
-      await deleteMessage.mutateAsync(m.id)
-      toast.show('Message deleted')
-    } catch (err) {
-      toast.show(apiErrorMessage(err), 'error')
-    }
+  function openLocationPreview() {
+    setPendingLocation({ loading: true })
+  }
+
+  function cancelPendingLocation() {
+    setPendingLocation(null)
+  }
+
+  function confirmPendingLocation(loc: MessageLocation & { name?: string }) {
+    const savedReply = replyTo
+    const replyToMessageId = savedReply?.id
+    const replyToPreview = savedReply ? messageToReplyPreview(savedReply) : undefined
+    setPendingLocation(null)
+    if (replyToMessageId) setReplyTo(null)
+    scrollToLatest()
+    sendLocation.mutate(
+      {
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+        name: loc.name,
+        address: loc.address ?? undefined,
+        replyToMessageId,
+        replyToPreview,
+      },
+      {
+        onSuccess: () => {
+          scrollToLatest()
+          void playWaFeedback('send')
+        },
+        onError: (err) => {
+          toast.show(apiErrorMessage(err), 'error')
+          if (savedReply) setReplyTo(savedReply)
+        },
+      },
+    )
   }
 
   async function pickImage(fromCamera: boolean) {
@@ -297,20 +445,27 @@ export default function ChatScreen() {
         return
       }
       const result = fromCamera
-        ? await ImagePicker.launchCameraAsync({ quality: 0.8 })
+        ? await ImagePicker.launchCameraAsync({
+            mediaTypes: ['images', 'videos'],
+            quality: 0.8,
+            videoQuality: ImagePicker.UIImagePickerControllerQualityType.Medium,
+            exif: false,
+          })
         : await ImagePicker.launchImageLibraryAsync({
             quality: 0.8,
+            videoQuality: ImagePicker.UIImagePickerControllerQualityType.Medium,
             mediaTypes: ['images', 'videos'],
           })
       if (result.canceled || !result.assets?.[0]) return
       const asset = result.assets[0]
       const name = asset.fileName ?? `photo-${Date.now()}.jpg`
       const mimeType = normalizeUploadMime(asset.mimeType ?? 'image/jpeg', name)
+      const prepared = await prepareMediaFileForUpload(asset.uri, name, mimeType)
       setPendingMedia({
-        uri: asset.uri,
-        name,
-        mimeType,
-        type: messageTypeFromMime(mimeType),
+        uri: prepared.uri,
+        name: prepared.name,
+        mimeType: prepared.mimeType,
+        type: messageTypeFromMime(prepared.mimeType),
       })
     } catch (err) {
       toast.show(err instanceof Error ? err.message : 'Could not open picker', 'error')
@@ -331,8 +486,10 @@ export default function ChatScreen() {
         return
       }
       const mimeType = normalizeUploadMime(a.mimeType ?? 'application/octet-stream', a.name)
+      const uri = resolveUploadUri(a.uri)
+      await assertMediaUploadable(uri, mimeType, a.name)
       setPendingMedia({
-        uri: resolveUploadUri(a.uri),
+        uri,
         name: a.name || `document-${Date.now()}`,
         mimeType,
         type: 'document',
@@ -349,16 +506,25 @@ export default function ChatScreen() {
     caption?: string,
   ) {
     const normalized = normalizeUploadMime(mimeType, name)
+    const savedReply = replyTo
+    const replyToMessageId = savedReply?.id
+    const replyToPreview = savedReply ? messageToReplyPreview(savedReply) : undefined
+    if (replyToMessageId) setReplyTo(null)
+    scrollToLatest()
     try {
       await sendMedia.mutateAsync({
         uri: resolveUploadUri(uri),
         name,
         mimeType: normalized,
         caption,
+        replyToMessageId,
+        replyToPreview,
       })
       setPendingMedia(null)
+      scrollToLatest()
     } catch (err) {
       toast.show(apiErrorMessage(err), 'error')
+      if (savedReply) setReplyTo(savedReply)
       throw err
     }
   }
@@ -399,11 +565,30 @@ export default function ChatScreen() {
 
   function confirmPendingMedia(caption?: string) {
     if (!pendingMedia) return
-    void uploadAsset(
-      pendingMedia.uri,
-      pendingMedia.name,
-      pendingMedia.mimeType,
-      caption,
+    const { uri, name, mimeType } = pendingMedia
+    const normalized = normalizeUploadMime(mimeType, name)
+    const savedReply = replyTo
+    const replyToMessageId = savedReply?.id
+    const replyToPreview = savedReply ? messageToReplyPreview(savedReply) : undefined
+    setPendingMedia(null)
+    if (replyToMessageId) setReplyTo(null)
+    scrollToLatest()
+    sendMedia.mutate(
+      {
+        uri: resolveUploadUri(uri),
+        name,
+        mimeType: normalized,
+        caption,
+        replyToMessageId,
+        replyToPreview,
+      },
+      {
+        onSuccess: () => scrollToLatest(),
+        onError: (err) => {
+          toast.show(apiErrorMessage(err), 'error')
+          if (savedReply) setReplyTo(savedReply)
+        },
+      },
     )
   }
 
@@ -415,6 +600,7 @@ export default function ChatScreen() {
       await playWaFeedbackAsync('recordStart')
       const rec = await startVoiceRecording()
       voiceRecorder.current = rec
+      setVoiceRecorderLive(rec)
       setMicReady(true)
     } catch (err) {
       clearRecordingUi()
@@ -496,14 +682,15 @@ export default function ChatScreen() {
         >
           <Text className="text-xl leading-none text-white">‹</Text>
         </Pressable>
-        <View className="flex-1">
+        <View className="min-w-0 flex-1 justify-center">
           <Text numberOfLines={1} className="text-[17px] font-semibold text-white">
             {contactName}
           </Text>
-          <Text numberOfLines={1} className="text-xs text-white/75">
-            {conversation?.contact?.waId} · {conversation?.status ?? '—'}
+          <Text numberOfLines={1} className="mt-0.5 text-xs text-white/75">
+            {conversation?.status ?? '—'}
           </Text>
         </View>
+        {conversation ? <MessagingWindowTimer conversation={conversation} variant="header" /> : null}
         <Pressable
           onPress={() => setMenuOpen(true)}
           hitSlop={10}
@@ -513,7 +700,11 @@ export default function ChatScreen() {
         </Pressable>
       </View>
 
-      <MessagingBanner conversation={conversation} />
+      {(() => {
+        const windowState = conversation ? messagingWindowState(conversation) : null
+        if (!windowState || !showUnderHeaderBar(windowState)) return null
+        return <MessagingWindowTimer conversation={conversation} variant="banner" />
+      })()}
 
       <KeyboardAvoidingView
         style={{ flex: 1 }}
@@ -521,28 +712,75 @@ export default function ChatScreen() {
         keyboardVerticalOffset={0}
       >
         <View className="min-h-0 flex-1">
-          {showMessagesLoader ? (
+          {messagesError ? (
+            <QueryError
+              message={`${apiErrorMessage(messagesFetchError)}. Check that the backend is running and EXPO_PUBLIC_API_URL in mobile/.env matches your PC IP (same Wi‑Fi as the phone).`}
+              onRetry={() => void refetchMessages()}
+            />
+          ) : showMessagesLoader ? (
             <View className="flex-1 items-center justify-center">
               <ActivityIndicator color="#128C7E" />
             </View>
           ) : (
-            <FlatList
+            <View className="min-h-0 flex-1" onLayout={(e) => setListViewportHeight(e.nativeEvent.layout.height)}>
+            <ReanimatedFlatList
+              ref={messagesListRef}
               data={inverted}
               inverted
+              scrollEnabled={!listScrubbing}
               keyExtractor={(m) => m.id}
               keyboardShouldPersistTaps="handled"
+              directionalLockEnabled
+              showsVerticalScrollIndicator={false}
+              onContentSizeChange={(_w, h) => setListContentHeight(h)}
+              onScroll={scrollHandler}
+              scrollEventThrottle={16}
+              onScrollToIndexFailed={({ index }) => {
+                messagesListRef.current?.scrollToOffset({
+                  offset: Math.max(0, index * 72),
+                  animated: true,
+                })
+              }}
               renderItem={({ item }: { item: Message }) => (
-                <MessageBubble
+                <SwipeableMessageBubble
                   message={item}
+                  contactName={contactName}
+                  onReply={onReplyToMessage}
+                  onReplyQuotePress={scrollToQuotedMessage}
+                  highlight={highlightMessageId === item.id}
+                  onSwipeOpen={onMessageSwipeOpen}
                   onRetry={(m) => void onRetryMessage(m)}
-                  onLongPress={(m) => {
+                  onLongPress={(m, anchor) => {
                     setActionMessage(m)
+                    setActionAnchor(anchor)
                     setActionsOpen(true)
                   }}
                 />
               )}
-              contentContainerStyle={{ paddingVertical: 8 }}
+              contentContainerStyle={{ paddingVertical: 6, paddingHorizontal: 6 }}
             />
+            <ScrollToLatestButton
+              visible={showScrollFab && !recordingOpen}
+              onPress={scrollToLatest}
+              bottomInset={12}
+            />
+            <ChatScrollScrubber
+              listRef={messagesListRef}
+              messages={inverted}
+              contentHeight={listContentHeight}
+              viewportHeight={listViewportHeight}
+              scrollY={scrollY}
+              maxOffset={maxScrollY}
+              visible={scrubVisible}
+              onScrollActivity={bumpScrubVisible}
+              onScrollOffset={updateScrollFab}
+              onScrubbingChange={(scrubbing) => {
+                scrubbingRef.current = scrubbing
+                setListScrubbing(scrubbing)
+                if (scrubbing) setScrubVisible(true)
+              }}
+            />
+            </View>
           )}
           {attachMenuOpen ? (
             <Pressable
@@ -571,13 +809,14 @@ export default function ChatScreen() {
                 >
                   <CloseIcon />
                 </Pressable>
-                <View className="h-11 flex-1 flex-row items-center gap-2 rounded-2xl bg-red-50 px-4">
-                  <View className="h-2.5 w-2.5 rounded-full bg-red-500" />
-                  <Text className="text-base font-semibold tabular-nums text-neutral-800">
+                <View className="h-11 flex-1 flex-row items-center gap-2 rounded-2xl bg-neutral-100 px-3">
+                  <View className="h-2.5 w-2.5 shrink-0 rounded-full bg-red-500" />
+                  <VoiceRecordingWaveform
+                    recorder={voiceRecorderLive}
+                    active={micReady}
+                  />
+                  <Text className="shrink-0 text-sm font-medium tabular-nums text-neutral-700">
                     {formatDuration(recordingMs / 1000)}
-                  </Text>
-                  <Text className="text-sm text-neutral-500">
-                    {micReady ? 'Recording voice…' : 'Starting microphone…'}
                   </Text>
                 </View>
                 <Pressable
@@ -601,13 +840,12 @@ export default function ChatScreen() {
             >
               {replyTo ? (
                 <View className="flex-row items-center gap-2 border-b border-neutral-100 px-3 py-2">
-                  <View className="flex-1 border-l-2 border-wa-teal pl-2">
-                    <Text className="text-xs font-semibold text-wa-teal">Replying</Text>
-                    <Text numberOfLines={2} className="text-sm text-neutral-600">
-                      {replyTo.deletedAt
-                        ? 'Message deleted'
-                        : replyTo.body || `[${replyTo.type}]`}
-                    </Text>
+                  <View className="flex-1">
+                    <ReplyQuoteBlock
+                      reply={messageToReplyPreview(replyTo)}
+                      contactName={contactName}
+                      isOutboundBubble={false}
+                    />
                   </View>
                   <Pressable onPress={() => setReplyTo(null)} hitSlop={8}>
                     <Text className="text-lg text-neutral-400">✕</Text>
@@ -694,58 +932,33 @@ export default function ChatScreen() {
             onCamera={() => runAttachAction(() => pickImage(true))}
             onGallery={() => runAttachAction(() => pickImage(false))}
             onDocument={() => runAttachAction(() => pickDocument())}
+            onLocation={() => runAttachAction(() => void openLocationPreview())}
           />
         </View>
       </KeyboardAvoidingView>
 
-      <MessageActionsSheet
+      <MessageActionsOverlay
         message={actionMessage}
+        anchor={actionAnchor}
+        contactName={contactName}
         visible={actionsOpen}
-        onClose={() => setActionsOpen(false)}
-        onReply={(m) => setReplyTo(m)}
-        onEdit={(m) => {
-          setEditTarget(m)
-          setEditDraft(m.body ?? '')
+        onClose={() => {
+          setActionsOpen(false)
+          setActionAnchor(null)
         }}
-        onDelete={(m) => void onConfirmDelete(m)}
+        onReply={onReplyToMessage}
+        onForward={(m) => setForwardMessage(m)}
       />
 
-      <Modal
-        visible={!!editTarget}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setEditTarget(null)}
-      >
-        <RNKeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          className="flex-1 justify-end bg-black/40"
-        >
-          <View className="rounded-t-2xl bg-white px-4 pb-8 pt-4">
-            <Text className="mb-2 text-base font-semibold text-neutral-900">Edit message</Text>
-            <TextInput
-              value={editDraft}
-              onChangeText={setEditDraft}
-              multiline
-              className="min-h-[100px] rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2 text-[15px] text-neutral-900"
-            />
-            <View className="mt-3 flex-row gap-2">
-              <Pressable
-                onPress={() => setEditTarget(null)}
-                className="flex-1 rounded-xl bg-neutral-100 py-3"
-              >
-                <Text className="text-center font-medium text-neutral-700">Cancel</Text>
-              </Pressable>
-              <Pressable
-                onPress={() => void onConfirmEdit()}
-                disabled={editMessage.isPending}
-                className="flex-1 rounded-xl bg-wa-teal py-3"
-              >
-                <Text className="text-center font-medium text-white">Save</Text>
-              </Pressable>
-            </View>
-          </View>
-        </RNKeyboardAvoidingView>
-      </Modal>
+      <ForwardMessageSheet
+        open={forwardMessage != null}
+        message={forwardMessage}
+        contactName={contactName}
+        currentConversationId={conversationId}
+        forwarding={forwardMutation.isPending}
+        onClose={() => setForwardMessage(null)}
+        onForward={(ids) => void onForwardToConversations(ids)}
+      />
 
       <OverflowMenu
         open={menuOpen}
@@ -789,9 +1002,16 @@ export default function ChatScreen() {
 
       <MediaPreviewSheet
         media={previewMedia}
-        sending={sendMedia.isPending}
         onCancel={() => setPendingMedia(null)}
         onSend={(caption) => confirmPendingMedia(caption)}
+      />
+
+      <LocationPickerSheet
+        open={pendingLocation != null}
+        sending={sendLocation.isPending}
+        onCancel={cancelPendingLocation}
+        onSend={confirmPendingLocation}
+        onPermissionDenied={() => toast.show('Location permission denied', 'error')}
       />
     </SafeAreaView>
   )

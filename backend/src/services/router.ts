@@ -5,6 +5,7 @@ import { db } from '../db/index.js'
 import { conversations, teamMembers, conversationEvents, type Conversation } from '../db/schema.js'
 import { config } from '../config.js'
 import { enqueueJob } from './jobs.js'
+import { emitConversationAssigned } from './socket-events.js'
 
 /** Stable 0..99 bucket from a UUID string (deterministic, no DB round-trip). */
 function bucket(id: string): number {
@@ -77,10 +78,7 @@ export async function routeConversation(
     payload: { isAI },
   })
 
-  io.to(`agent:${assignTo}`).emit('conversation_assigned', {
-    conversationId: conversation.id,
-  })
-  io.emit('inbox_updated', { conversationId: conversation.id })
+  emitConversationAssigned(io, conversation.id, assignTo)
 
   if (isAI) {
     await enqueueJob('ai_agent_reply', {

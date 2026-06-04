@@ -1,20 +1,30 @@
 import { useEffect } from 'react'
 import { useQueryClient, type InfiniteData } from '@tanstack/react-query'
 import { connectSocket, disconnectSocket, getSocket } from '@/lib/socket'
-import { patchConversationUnreadCount } from '@/hooks/useConversations'
+import {
+  patchConversationLastMessageStatus,
+  patchConversationUnreadCount,
+} from '@/hooks/useConversations'
 import { normalizeConversation } from '@/lib/conversation'
 import { normalizeMessage } from '@/lib/normalizeMessage'
 import { upsertMessage } from '@/lib/messageCache'
+import { syncMessageMedia } from '@/lib/messageMediaSync'
 import { mergeMessageStatus, normalizeMessageStatus } from '@/lib/messageStatus'
 import { playWaFeedbackAsync } from '@/lib/waFeedbackSounds'
 import { useAuthStore } from '@/stores/authStore'
 import type {
+  Agent,
   ConversationDetail,
   ConversationListItem,
   ConversationsResponse,
   Message,
   MessagesResponse,
 } from '@/types'
+
+interface TeamResponse {
+  members: Agent[]
+  aiAgents: { id: string; name: string }[]
+}
 
 type MessageStatusPayload = {
   conversationId?: string
@@ -98,6 +108,10 @@ function patchInboxForNewMessage(
         ...c,
         lastMessageAt: message.sentAt,
         lastMessagePreview: messagePreview(message),
+        lastMessageId: message.id,
+        lastMessageDirection: message.direction,
+        lastMessageStatus: message.status,
+        lastMessageType: message.type,
         unreadCount:
           message.direction === 'inbound' ? c.unreadCount + 1 : c.unreadCount,
         ...(messaging ?? {}),
@@ -188,6 +202,10 @@ export function useSocketSync() {
         { queryKey: ['conversations'] },
         (old) => patchInboxForNewMessage(old, conversationId, message, messaging),
       )
+
+      if (normalized.mediaUrl || normalized.localPreviewUri) {
+        void syncMessageMedia(normalized)
+      }
     }
 
     const onMessageStatus = (payload: MessageStatusPayload) => {
@@ -200,12 +218,24 @@ export function useSocketSync() {
           ['messages', payload.conversationId],
           patch,
         )
-        return
+        const normalizedStatus = normalizeMessageStatus(payload.status)
+        if (payload.messageId && normalizedStatus) {
+          queryClient.setQueriesData<InfiniteData<ConversationsResponse>>(
+            { queryKey: ['conversations'] },
+            (old) =>
+              patchConversationLastMessageStatus(
+                old,
+                payload.conversationId!,
+                payload.messageId!,
+                normalizedStatus,
+              ),
+          )
+        }
       }
 
-      if (!payload.messageId && !payload.waMessageId) return
-
-      queryClient.setQueriesData<MessagesResponse>({ queryKey: ['messages'] }, patch)
+      if (payload.messageId || payload.waMessageId) {
+        queryClient.setQueriesData<MessagesResponse>({ queryKey: ['messages'] }, patch)
+      }
     }
 
     const onMediaReady = ({
@@ -230,6 +260,12 @@ export function useSocketSync() {
       }
 
       void queryClient.invalidateQueries({ queryKey: ['media', mediaUrl] })
+
+      if (conversationId) {
+        const data = queryClient.getQueryData<MessagesResponse>(['messages', conversationId])
+        const msg = data?.messages.find((m) => m.id === messageId)
+        if (msg) void syncMessageMedia({ ...msg, mediaUrl, mediaStatus: 'uploaded' })
+      }
     }
 
     const onMediaFailed = ({
@@ -259,16 +295,23 @@ export function useSocketSync() {
       conversationId: string
       message: Message
     }) => {
-      queryClient.setQueryData<MessagesResponse>(
-        ['messages', conversationId],
-        (old) => {
-          if (!old) return old
-          return {
-            ...old,
-            messages: old.messages.map((m) => (m.id === message.id ? message : m)),
-          }
-        },
-      )
+      const normalized = normalizeMessage(message as Message & Record<string, unknown>)
+      const patch = (old: MessagesResponse | undefined) => {
+        if (!old) return old
+        return {
+          ...old,
+          messages: old.messages.map((m) =>
+            m.id === normalized.id
+              ? {
+                  ...normalized,
+                  localPreviewUri: normalized.localPreviewUri ?? m.localPreviewUri,
+                }
+              : m,
+          ),
+        }
+      }
+      queryClient.setQueryData<MessagesResponse>(['messages', conversationId], patch)
+      queryClient.setQueriesData<MessagesResponse>({ queryKey: ['messages'] }, patch)
     }
 
     const onMessageDeleted = ({
@@ -278,22 +321,47 @@ export function useSocketSync() {
       conversationId: string
       messageId: string
     }) => {
-      queryClient.setQueryData<MessagesResponse>(
-        ['messages', conversationId],
-        (old) => {
-          if (!old) return old
-          return {
-            ...old,
-            messages: old.messages.map((m) =>
-              m.id === messageId
-                ? { ...m, deletedAt: new Date().toISOString(), body: null }
-                : m,
-            ),
-          }
-        },
-      )
+      const patch = (old: MessagesResponse | undefined) => {
+        if (!old) return old
+        return {
+          ...old,
+          messages: old.messages.map((m) =>
+            m.id === messageId
+              ? { ...m, deletedAt: new Date().toISOString(), body: null }
+              : m,
+          ),
+        }
+      }
+      queryClient.setQueryData<MessagesResponse>(['messages', conversationId], patch)
+      queryClient.setQueriesData<MessagesResponse>({ queryKey: ['messages'] }, patch)
     }
 
+    const patchTeamPresence = (agentId: string, isOnline: boolean) => {
+      queryClient.setQueryData<TeamResponse>(['team'], (old) => {
+        if (!old) return old
+        return {
+          ...old,
+          members: old.members.map((m) =>
+            m.id === agentId ? { ...m, isOnline } : m,
+          ),
+        }
+      })
+    }
+
+    const onAgentOnline = ({ agentId }: { agentId: string }) => {
+      patchTeamPresence(agentId, true)
+    }
+
+    const onAgentOffline = ({ agentId }: { agentId: string }) => {
+      patchTeamPresence(agentId, false)
+    }
+
+    const onReconnect = () => {
+      void queryClient.invalidateQueries({ queryKey: ['conversations'] })
+      void queryClient.invalidateQueries({ queryKey: ['team'] })
+    }
+
+    socket.on('connect', onReconnect)
     socket.on('new_message', onNewMessage)
     socket.on('message_status', onMessageStatus)
     socket.on('message_updated', onMessageUpdated)
@@ -303,8 +371,11 @@ export function useSocketSync() {
     socket.on('conversation_updated', refreshInbox)
     socket.on('conversation_assigned', refreshInbox)
     socket.on('inbox_updated', onInboxUpdated)
+    socket.on('agent_online', onAgentOnline)
+    socket.on('agent_offline', onAgentOffline)
 
     return () => {
+      socket.off('connect', onReconnect)
       socket.off('new_message', onNewMessage)
       socket.off('message_status', onMessageStatus)
       socket.off('message_updated', onMessageUpdated)
@@ -314,6 +385,8 @@ export function useSocketSync() {
       socket.off('conversation_updated', refreshInbox)
       socket.off('conversation_assigned', refreshInbox)
       socket.off('inbox_updated', onInboxUpdated)
+      socket.off('agent_online', onAgentOnline)
+      socket.off('agent_offline', onAgentOffline)
     }
   }, [accessToken, queryClient])
 

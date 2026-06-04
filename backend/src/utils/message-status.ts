@@ -46,3 +46,12 @@ export function shouldUpgradeStatus(
   const curRank = RANK[cur] ?? 0
   return RANK[incoming] > curRank
 }
+
+/** Meta `played` is voice-only; map anything else to `read` for storage. */
+export function normalizeStatusForMessageType(
+  messageType: string,
+  incoming: StoredMessageStatus,
+): StoredMessageStatus {
+  if (incoming === 'played' && messageType !== 'audio') return 'read'
+  return incoming
+}

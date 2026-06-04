@@ -32,6 +32,11 @@ export function normalizeWhatsAppMime(mime: string, filename: string): string {
     return 'audio/mp4'
   }
 
+  if (lower.startsWith('video/')) {
+    if (lower === 'video/quicktime' || ext.endsWith('.mov')) return 'video/mp4'
+    return lower
+  }
+
   if (lower === 'application/octet-stream' || !lower) {
     if (ext.endsWith('.3gp') || ext.endsWith('.amr')) return 'audio/amr'
     if (ext.endsWith('.m4a')) return 'audio/mp4'
@@ -39,6 +44,7 @@ export function normalizeWhatsAppMime(mime: string, filename: string): string {
     if (ext.endsWith('.jpg') || ext.endsWith('.jpeg')) return 'image/jpeg'
     if (ext.endsWith('.png')) return 'image/png'
     if (ext.endsWith('.webp')) return 'image/webp'
+    if (ext.endsWith('.mp4') || ext.endsWith('.mov')) return 'video/mp4'
     if (ext.endsWith('.pdf')) return 'application/pdf'
   }
 

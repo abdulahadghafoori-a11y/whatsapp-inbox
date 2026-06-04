@@ -9,7 +9,11 @@ export function getSocket(): Socket {
   if (socket) return socket
   socket = io(SOCKET_URL, {
     autoConnect: false,
-    transports: ['websocket'],
+    transports: ['websocket', 'polling'],
+    reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 1000,
+    reconnectionDelayMax: 8000,
     auth: { token: useAuthStore.getState().accessToken },
   })
   return socket
@@ -26,8 +30,10 @@ export function connectSocket() {
 export function reauthSocket() {
   if (!socket) return
   socket.auth = { token: useAuthStore.getState().accessToken }
-  socket.disconnect()
-  socket.connect()
+  if (socket.connected) {
+    socket.disconnect()
+    socket.connect()
+  }
 }
 
 export function disconnectSocket() {

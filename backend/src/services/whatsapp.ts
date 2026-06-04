@@ -97,14 +97,24 @@ export interface WhatsAppService {
     body: string,
     opts?: { replyToWaMessageId?: string },
   ): Promise<{ message_id: string }>
-  deleteMessage(log: FastifyBaseLogger, waMessageId: string): Promise<void>
+  sendLocationMessage(
+    log: FastifyBaseLogger,
+    to: string,
+    location: {
+      latitude: number
+      longitude: number
+      name?: string
+      address?: string
+    },
+    opts?: { replyToWaMessageId?: string },
+  ): Promise<{ message_id: string }>
   sendMediaMessage(
     log: FastifyBaseLogger,
     to: string,
     type: string,
     mediaId: string,
     caption?: string,
-    opts?: { voice?: boolean },
+    opts?: { voice?: boolean; replyToWaMessageId?: string },
   ): Promise<{ message_id: string }>
   sendTemplateMessage(
     log: FastifyBaseLogger,
@@ -140,8 +150,23 @@ export const whatsapp: WhatsAppService = {
     return { message_id: res.messages?.[0]?.id ?? '' }
   },
 
-  async deleteMessage(log, waMessageId) {
-    await call(log, 'DELETE', `/${PHONE}/messages?message_id=${encodeURIComponent(waMessageId)}`)
+  async sendLocationMessage(log, to, location, opts) {
+    const res = await call<WaSendResponse>(log, 'POST', `/${PHONE}/messages`, {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to,
+      type: 'location',
+      location: {
+        latitude: location.latitude,
+        longitude: location.longitude,
+        ...(location.name ? { name: location.name } : {}),
+        ...(location.address ? { address: location.address } : {}),
+      },
+      ...(opts?.replyToWaMessageId
+        ? { context: { message_id: opts.replyToWaMessageId } }
+        : {}),
+    })
+    return { message_id: res.messages?.[0]?.id ?? '' }
   },
 
   async sendMediaMessage(log, to, type, mediaId, caption, opts) {
@@ -158,6 +183,9 @@ export const whatsapp: WhatsAppService = {
       to,
       type,
       [type]: media,
+      ...(opts?.replyToWaMessageId
+        ? { context: { message_id: opts.replyToWaMessageId } }
+        : {}),
     })
     return { message_id: res.messages?.[0]?.id ?? '' }
   },

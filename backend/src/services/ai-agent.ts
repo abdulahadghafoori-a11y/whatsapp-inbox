@@ -12,6 +12,7 @@ import {
 } from '../db/schema.js'
 import { config } from '../config.js'
 import { createOutboundText } from './outbound.js'
+import { emitConversationUpdated } from './socket-events.js'
 import { routeConversation } from './router.js'
 
 const client = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY })
@@ -102,10 +103,7 @@ respond with exactly: ESCALATE:<reason>`
       payload: { reason },
     })
 
-    io.emit('inbox_updated', { conversationId: job.conversationId })
-    io.to(`conversation:${job.conversationId}`).emit('conversation_updated', {
-      conversationId: job.conversationId,
-    })
+    emitConversationUpdated(io, job.conversationId)
 
     // Refetch the (now-unassigned, human_only) row before re-routing to a human.
     const fresh = await db.query.conversations.findFirst({

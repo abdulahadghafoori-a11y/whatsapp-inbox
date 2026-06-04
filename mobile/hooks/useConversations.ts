@@ -16,9 +16,17 @@ import { messageTypeFromMime, normalizeUploadMime } from '@/lib/mediaMime'
 import { patchMessageStatus, upsertMessage } from '@/lib/messageCache'
 import { playWaFeedback, playWaFeedbackAsync } from '@/lib/waFeedbackSounds'
 import { normalizeMessage, normalizeMessagesResponse } from '@/lib/normalizeMessage'
-import { prepareUploadFile, readPreparedAudioBase64 } from '@/lib/prepareUpload'
+import { prepareMediaFileForUpload, readPreparedAudioBase64 } from '@/lib/prepareUpload'
+import { assertMediaUploadable } from '@/lib/waMediaLimits'
+import { syncMessageMedia } from '@/lib/messageMediaSync'
+import { hashMediaFile } from '@/lib/mediaContentHash'
+import {
+  rememberContentHashS3Key,
+  getS3KeyForContentHash,
+} from '@/lib/messageMediaCache'
 import type {
   ConversationDetail,
+  ConversationListItem,
   ConversationsResponse,
   Message,
   MessagesResponse,
@@ -37,6 +45,64 @@ export function patchConversationUnreadCount(
       conversations: page.conversations.map((c) =>
         c.id === conversationId ? { ...c, unreadCount } : c,
       ),
+    })),
+  }
+}
+
+function sortInboxConversations(list: ConversationListItem[]) {
+  return [...list].sort((a, b) => {
+    const pinA = a.pinnedAt ? 1 : 0
+    const pinB = b.pinnedAt ? 1 : 0
+    if (pinA !== pinB) return pinB - pinA
+    const tA = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0
+    const tB = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0
+    return tB - tA
+  })
+}
+
+export function patchConversationPin(
+  data: InfiniteData<ConversationsResponse> | undefined,
+  conversation: ConversationListItem,
+): InfiniteData<ConversationsResponse> | undefined {
+  if (!data) return data
+  let found = false
+  const pages = data.pages.map((page) => {
+    const conversations = page.conversations.map((c) => {
+      if (c.id !== conversation.id) return c
+      found = true
+      return normalizeConversation({ ...c, ...conversation })
+    })
+    return { ...page, conversations: sortInboxConversations(conversations) }
+  })
+  if (!found && pages[0]) {
+    pages[0] = {
+      ...pages[0],
+      conversations: sortInboxConversations([
+        normalizeConversation(conversation),
+        ...pages[0].conversations,
+      ]),
+    }
+  }
+  return { ...data, pages }
+}
+
+export function patchConversationLastMessageStatus(
+  data: InfiniteData<ConversationsResponse> | undefined,
+  conversationId: string,
+  messageId: string,
+  status: Message['status'],
+): InfiniteData<ConversationsResponse> | undefined {
+  if (!data) return data
+  return {
+    ...data,
+    pages: data.pages.map((page) => ({
+      ...page,
+      conversations: page.conversations.map((c) => {
+        if (c.id !== conversationId) return c
+        if (c.lastMessageId && c.lastMessageId !== messageId) return c
+        if (c.lastMessageDirection !== 'outbound') return c
+        return { ...c, lastMessageStatus: status }
+      }),
     })),
   }
 }
@@ -103,6 +169,7 @@ function patchMessageInCache(
 }
 
 export function useMessages(conversationId: string) {
+  const qc = useQueryClient()
   return useQuery({
     queryKey: ['messages', conversationId],
     placeholderData: keepPreviousData,
@@ -112,19 +179,82 @@ export function useMessages(conversationId: string) {
       const res = await api.get<MessagesResponse>(
         `/conversations/${conversationId}/messages`,
       )
-      return normalizeMessagesResponse(
+      const incoming = normalizeMessagesResponse(
         res.data as { messages: (Message & Record<string, unknown>)[]; nextCursor: string | null },
       )
+      const previous = qc.getQueryData<MessagesResponse>(['messages', conversationId])
+      if (!previous?.messages.length) return incoming
+
+      const localById = new Map(
+        previous.messages
+          .filter((m) => m.localPreviewUri)
+          .map((m) => [m.id, m.localPreviewUri!]),
+      )
+      if (localById.size === 0) return incoming
+
+      return {
+        ...incoming,
+        messages: incoming.messages.map((m) => ({
+          ...m,
+          localPreviewUri: m.localPreviewUri ?? localById.get(m.id),
+        })),
+      }
     },
     enabled: !!conversationId,
   })
 }
 
-export type SendTextInput = { body: string; replyToMessageId?: string }
+export type SendTextInput = {
+  body: string
+  replyToMessageId?: string
+  /** Optimistic reply quote in the thread. */
+  replyToPreview?: Message['replyTo']
+}
+
+export type SendLocationInput = {
+  latitude: number
+  longitude: number
+  name?: string
+  address?: string
+  replyToMessageId?: string
+  replyToPreview?: Message['replyTo']
+}
 
 export function useSendText(conversationId: string) {
   const qc = useQueryClient()
   return useMutation({
+    onMutate: async (input) => {
+      const previous = qc.getQueryData<MessagesResponse>(['messages', conversationId])
+      const optimisticId = `pending-text-${Date.now()}`
+      const optimistic: Message = {
+        id: optimisticId,
+        conversationId,
+        waMessageId: null,
+        sentBy: null,
+        direction: 'outbound',
+        type: 'text',
+        body: input.body,
+        mediaUrl: null,
+        mediaMimeType: null,
+        mediaFilename: null,
+        mediaStatus: 'uploaded',
+        status: 'pending',
+        errorMessage: null,
+        replyToMessageId: input.replyToMessageId ?? null,
+        replyTo: input.replyToPreview ?? null,
+        sentAt: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+      }
+      qc.setQueryData<MessagesResponse>(['messages', conversationId], (old) =>
+        upsertMessage(old, optimistic),
+      )
+      return { previous, optimisticId }
+    },
+    onError: (_err, _input, ctx) => {
+      if (ctx?.previous) {
+        qc.setQueryData(['messages', conversationId], ctx.previous)
+      }
+    },
     mutationFn: async (input: SendTextInput) => {
       const queueLocal = () =>
         enqueueTextSend({
@@ -146,54 +276,101 @@ export function useSendText(conversationId: string) {
           },
           { headers: { 'Content-Type': 'application/json' } },
         )
-        return res.data.message
+        return normalizeMessage(res.data.message as Message & Record<string, unknown>)
       } catch (err) {
         if (isNetworkError(err)) return queueLocal()
         throw err
       }
     },
-    onSuccess: (message) => {
+    onSuccess: (message, _input, ctx) => {
       qc.setQueryData<MessagesResponse>(['messages', conversationId], (old) =>
-        patchMessageInCache(old, message),
+        upsertMessage(old, message, { removeId: ctx?.optimisticId }),
       )
     },
   })
 }
 
-export function useEditMessage(conversationId: string) {
-  const qc = useQueryClient()
+export function useForwardMessage() {
   return useMutation({
-    mutationFn: async ({ messageId, body }: { messageId: string; body: string }) => {
-      const res = await api.patch<{ message: Message }>(`/messages/${messageId}`, { body })
-      return res.data.message
-    },
-    onSuccess: (message) => {
-      qc.setQueryData<MessagesResponse>(['messages', conversationId], (old) =>
-        patchMessageInCache(old, message),
-      )
-    },
-  })
-}
-
-export function useDeleteMessage(conversationId: string) {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: async (messageId: string) => {
-      await api.delete(`/messages/${messageId}`)
-      return messageId
-    },
-    onSuccess: (messageId) => {
-      qc.setQueryData<MessagesResponse>(['messages', conversationId], (old) => {
-        if (!old) return old
-        return {
-          ...old,
-          messages: old.messages.map((m) =>
-            m.id === messageId
-              ? { ...m, deletedAt: new Date().toISOString(), body: null }
-              : m,
-          ),
-        }
+    mutationFn: async ({
+      messageId,
+      targetConversationIds,
+    }: {
+      messageId: string
+      targetConversationIds: string[]
+    }) => {
+      const res = await api.post<{
+        okCount: number
+        results: Array<{ conversationId: string; ok: boolean; error?: string }>
+      }>('/conversations/forward-batch', { messageId, targetConversationIds }, {
+        timeout: 180_000,
       })
+      return res.data
+    },
+  })
+}
+
+export function useSendLocation(conversationId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    onMutate: async (input) => {
+      const previous = qc.getQueryData<MessagesResponse>(['messages', conversationId])
+      const optimisticId = `pending-location-${Date.now()}`
+      const metadata = {
+        latitude: input.latitude,
+        longitude: input.longitude,
+        ...(input.name ? { name: input.name } : {}),
+        ...(input.address ? { address: input.address } : {}),
+      }
+      const optimistic: Message = {
+        id: optimisticId,
+        conversationId,
+        waMessageId: null,
+        sentBy: null,
+        direction: 'outbound',
+        type: 'location',
+        body: null,
+        mediaUrl: null,
+        mediaMimeType: null,
+        mediaFilename: null,
+        mediaStatus: null,
+        status: 'pending',
+        errorMessage: null,
+        replyToMessageId: input.replyToMessageId ?? null,
+        replyTo: input.replyToPreview ?? null,
+        metadata,
+        sentAt: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+      }
+      qc.setQueryData<MessagesResponse>(['messages', conversationId], (old) =>
+        upsertMessage(old, optimistic),
+      )
+      return { previous, optimisticId }
+    },
+    onError: (_err, _input, ctx) => {
+      if (ctx?.previous) {
+        qc.setQueryData(['messages', conversationId], ctx.previous)
+      }
+    },
+    mutationFn: async (input: SendLocationInput) => {
+      const res = await api.post<{ message: Message }>(
+        `/conversations/${conversationId}/messages`,
+        {
+          type: 'location' as const,
+          latitude: input.latitude,
+          longitude: input.longitude,
+          ...(input.name ? { name: input.name } : {}),
+          ...(input.address ? { address: input.address } : {}),
+          ...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {}),
+        },
+        { headers: { 'Content-Type': 'application/json' } },
+      )
+      return normalizeMessage(res.data.message as Message & Record<string, unknown>)
+    },
+    onSuccess: (message, _input, ctx) => {
+      qc.setQueryData<MessagesResponse>(['messages', conversationId], (old) =>
+        upsertMessage(old, message, { removeId: ctx?.optimisticId }),
+      )
     },
   })
 }
@@ -237,11 +414,39 @@ export function useMarkUnread() {
   })
 }
 
+export function usePinConversation() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async ({
+      conversationId,
+      pinned,
+    }: {
+      conversationId: string
+      pinned: boolean
+    }) => {
+      const res = await api.patch<{ conversation: ConversationDetail }>(
+        `/conversations/${conversationId}`,
+        { pinned },
+      )
+      return normalizeConversation(res.data.conversation)
+    },
+    onSuccess: (conversation) => {
+      qc.setQueryData(['conversation', conversation.id], conversation)
+      qc.setQueriesData<InfiniteData<ConversationsResponse>>(
+        { queryKey: ['conversations'] },
+        (old) => patchConversationPin(old, conversation),
+      )
+    },
+  })
+}
+
 export interface MediaUpload {
   uri: string
   name: string
   mimeType: string
   caption?: string
+  replyToMessageId?: string
+  replyToPreview?: Message['replyTo']
   /** Retry in place: update this message to pending instead of adding a new bubble. */
   replaceMessageId?: string
 }
@@ -266,6 +471,8 @@ function buildOptimisticMediaMessage(
     mediaStatus: 'uploaded',
     status: 'pending',
     errorMessage: null,
+    replyToMessageId: media.replyToMessageId ?? null,
+    replyTo: media.replyToPreview ?? null,
     sentAt: new Date().toISOString(),
     createdAt: new Date().toISOString(),
     localPreviewUri: media.uri,
@@ -288,14 +495,45 @@ export function useSendMedia(conversationId: string) {
             mimeType: normalizeUploadMime(audio.mimeType, audio.name),
             data: audio.data,
             ...(media.caption ? { caption: media.caption } : {}),
+            ...(media.replyToMessageId
+              ? { replyToMessageId: media.replyToMessageId }
+              : {}),
           },
           { timeout: 120_000 },
         )
         return normalizeMessage(res.data.message as Message & Record<string, unknown>)
       }
 
-      const prepared = await prepareUploadFile(media.uri, media.name, media.mimeType)
+      await assertMediaUploadable(media.uri, mimeHint, media.name)
+      const prepared = await prepareMediaFileForUpload(media.uri, media.name, media.mimeType)
       const mimeType = normalizeUploadMime(prepared.mimeType, prepared.name)
+      const contentHash = await hashMediaFile(prepared.uri)
+      if (contentHash) {
+        const reuseS3Key = await getS3KeyForContentHash(contentHash)
+        if (reuseS3Key) {
+          const res = await api.post<{ message: Message }>(
+            `/conversations/${conversationId}/messages`,
+            {
+              type: 'media_reuse' as const,
+              reuseS3Key,
+              filename: prepared.name,
+              mimeType,
+              ...(media.caption ? { caption: media.caption } : {}),
+              ...(media.replyToMessageId
+                ? { replyToMessageId: media.replyToMessageId }
+                : {}),
+            },
+            { timeout: 120_000 },
+          )
+          const message = normalizeMessage(
+            res.data.message as Message & Record<string, unknown>,
+          )
+          if (message.mediaUrl) {
+            await rememberContentHashS3Key(contentHash, message.mediaUrl)
+          }
+          return message
+        }
+      }
       const form = new FormData()
       form.append('file', {
         uri: prepared.uri,
@@ -303,12 +541,19 @@ export function useSendMedia(conversationId: string) {
         type: mimeType,
       } as unknown as Blob)
       if (media.caption) form.append('caption', media.caption)
+      if (media.replyToMessageId) {
+        form.append('replyToMessageId', media.replyToMessageId)
+      }
       const res = await api.post<{ message: Message }>(
         `/conversations/${conversationId}/messages`,
         form,
         { timeout: 120_000 },
       )
-      return normalizeMessage(res.data.message as Message & Record<string, unknown>)
+      const message = normalizeMessage(res.data.message as Message & Record<string, unknown>)
+      if (contentHash && message.mediaUrl) {
+        await rememberContentHashS3Key(contentHash, message.mediaUrl)
+      }
+      return message
     },
     onMutate: async (media) => {
       const mime = normalizeUploadMime(media.mimeType, media.name)
@@ -365,6 +610,9 @@ export function useSendMedia(conversationId: string) {
       })
       if (message.mediaUrl) {
         void qc.invalidateQueries({ queryKey: ['media', message.mediaUrl] })
+      }
+      if (message.type !== 'text' && message.type !== 'location') {
+        void syncMessageMedia(message)
       }
       scheduleMessageSync(qc, conversationId)
     },

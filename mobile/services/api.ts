@@ -4,6 +4,7 @@ import axios, {
   type InternalAxiosRequestConfig,
 } from 'axios'
 import { useAuthStore } from '@/stores/authStore'
+import { reauthSocket } from '@/lib/socket'
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:3001'
 
@@ -38,6 +39,7 @@ async function refreshAccessToken(): Promise<string | null> {
       refreshToken: string
     }
     await useAuthStore.getState().setTokens(accessToken, newRefresh)
+    reauthSocket()
     return accessToken
   } catch {
     await useAuthStore.getState().clear()

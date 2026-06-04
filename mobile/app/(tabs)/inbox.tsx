@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   View,
   Text,
@@ -7,6 +7,7 @@ import {
   Pressable,
   RefreshControl,
   ActivityIndicator,
+  StyleSheet,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { useRouter, useFocusEffect } from 'expo-router'
@@ -18,11 +19,13 @@ import {
   useConversations,
   useMarkRead,
   useMarkUnread,
+  usePinConversation,
   type InboxFilter,
 } from '@/hooks/useConversations'
 import { apiErrorMessage } from '@/services/api'
 import type { ConversationListItem } from '@/types'
 import type Swipeable from 'react-native-gesture-handler/Swipeable'
+import { registerInboxScrollToTop } from '@/lib/inboxScroll'
 
 const FILTERS: { key: InboxFilter; label: string }[] = [
   { key: 'all', label: 'All' },
@@ -31,22 +34,47 @@ const FILTERS: { key: InboxFilter; label: string }[] = [
   { key: 'mine', label: 'Mine' },
 ]
 
+/** NativeWind: no className on Pressable here — breaks React Navigation context (see nativewind#1712). */
+const filterStyles = StyleSheet.create({
+  pill: {
+    borderRadius: 9999,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    backgroundColor: '#f5f5f5',
+  },
+  pillActive: {
+    backgroundColor: '#128C7E',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  label: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#525252',
+  },
+  labelActive: {
+    color: '#ffffff',
+  },
+})
+
 export default function InboxScreen() {
   const router = useRouter()
   const queryClient = useQueryClient()
   const toast = useToast()
   const markRead = useMarkRead()
   const markUnread = useMarkUnread()
+  const pinConversation = usePinConversation()
   const openSwipeRef = useRef<Swipeable | null>(null)
+  const listRef = useRef<FlatList<ConversationListItem>>(null)
   const [filter, setFilter] = useState<InboxFilter>('all')
   const [search, setSearch] = useState('')
   const [refreshing, setRefreshing] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
-  const [listInstance, setListInstance] = useState(0)
-
   const canLoadMore = useRef(false)
   const endReachedBusy = useRef(false)
-  const returningFromChat = useRef(false)
 
   const {
     data,
@@ -73,10 +101,8 @@ export default function InboxScreen() {
       endReachedBusy.current = false
       setRefreshing(false)
       setLoadingMore(false)
-      if (returningFromChat.current) {
-        returningFromChat.current = false
-        setListInstance((n) => n + 1)
-      }
+      openSwipeRef.current?.close()
+      openSwipeRef.current = null
 
       return () => {
         canLoadMore.current = false
@@ -86,6 +112,14 @@ export default function InboxScreen() {
       }
     }, [queryKey, queryClient]),
   )
+
+  useEffect(() => {
+    registerInboxScrollToTop(() => {
+      openSwipeRef.current?.close()
+      listRef.current?.scrollToOffset({ offset: 0, animated: true })
+    })
+    return () => registerInboxScrollToTop(null)
+  }, [])
 
   async function onPullRefresh() {
     if (refreshing) return
@@ -113,6 +147,14 @@ export default function InboxScreen() {
     }
   }
 
+  async function onTogglePin(conversationId: string, pinned: boolean) {
+    try {
+      await pinConversation.mutateAsync({ conversationId, pinned })
+    } catch (err) {
+      toast.show(apiErrorMessage(err), 'error')
+    }
+  }
+
   async function loadMore() {
     if (!hasNextPage || loadingMore || endReachedBusy.current) return
     endReachedBusy.current = true
@@ -127,14 +169,14 @@ export default function InboxScreen() {
 
   return (
     <SafeAreaView className="flex-1 bg-neutral-50" edges={['top']}>
-      <View className="bg-wa-teal px-4 pb-4 pt-2 shadow-sm">
-        <Text className="text-[22px] font-bold tracking-tight text-white">Inbox</Text>
-        <View className="mt-3 rounded-2xl bg-white px-4 shadow-sm">
+      <View className="bg-wa-teal px-4 pb-4 pt-2">
+        <Text className="text-[24px] font-bold tracking-tight text-white">Inbox</Text>
+        <View className="mt-3 rounded-2xl bg-white px-4">
           <TextInput
             placeholder="Search name or number"
             value={search}
             onChangeText={setSearch}
-            className="py-3 text-[15px] text-neutral-900"
+            className="py-3.5 text-[16px] text-neutral-900"
             placeholderTextColor="#9ca3af"
             returnKeyType="search"
             clearButtonMode="while-editing"
@@ -149,9 +191,9 @@ export default function InboxScreen() {
             <Pressable
               key={f.key}
               onPress={() => setFilter(f.key)}
-              className={`rounded-full px-4 py-2 ${active ? 'bg-wa-teal shadow-sm' : 'bg-neutral-100'}`}
+              style={[filterStyles.pill, active ? filterStyles.pillActive : null]}
             >
-              <Text className={`text-sm font-semibold ${active ? 'text-white' : 'text-neutral-600'}`}>
+              <Text style={[filterStyles.label, active ? filterStyles.labelActive : null]}>
                 {f.label}
               </Text>
             </Pressable>
@@ -168,18 +210,20 @@ export default function InboxScreen() {
         <SkeletonList />
       ) : (
         <FlatList
-          key={`${filter}-${search}-${listInstance}`}
+          ref={listRef}
+          key={`${filter}-${search}`}
           data={conversations}
           keyExtractor={(item) => item.id}
           renderItem={({ item }: { item: ConversationListItem }) => (
             <SwipeableConversationItem
               conversation={item}
               onPress={(id) => {
-                returningFromChat.current = true
-                router.push(`/(tabs)/inbox/${id}`)
+                openSwipeRef.current?.close()
+                router.push(`/conversation/${id}`)
               }}
               onMarkRead={(id) => void onToggleRead(id, true)}
               onMarkUnread={(id) => void onToggleRead(id, false)}
+              onTogglePin={(id, pinned) => void onTogglePin(id, pinned)}
               onSwipeOpen={onSwipeOpen}
             />
           )}

@@ -42,8 +42,8 @@ export const errors = {
     ),
   whatsappApi: (message: string, details?: unknown) =>
     new AppError('WHATSAPP_API_ERROR', message, 502, details),
-  mediaTooLarge: () =>
-    new AppError('MEDIA_TOO_LARGE', 'File exceeds the 50MB limit.', 413),
+  mediaTooLarge: (message = 'File exceeds the size limit for WhatsApp.') =>
+    new AppError('MEDIA_TOO_LARGE', message, 413),
   invalidSignature: () =>
     new AppError('INVALID_SIGNATURE', 'Webhook signature mismatch.', 403),
   tokenRevoked: () =>

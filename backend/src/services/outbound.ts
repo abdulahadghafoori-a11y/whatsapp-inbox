@@ -4,7 +4,8 @@ import { db } from '../db/index.js'
 import { conversations, messages, type Message } from '../db/schema.js'
 import { enqueueJob, type JobPayloads } from './jobs.js'
 import { tryActivateCtwaFep, loadMessagingPayload } from './ctwa-fep.js'
-import { emitNewMessage } from './socket-events.js'
+import { conversationPreviewFromMessage } from '../utils/conversation-preview.js'
+import { emitMessageStatus, emitNewMessage } from './socket-events.js'
 
 interface OutboundTextArgs {
   conversationId: string
@@ -26,11 +27,26 @@ interface OutboundMediaArgs {
   caption?: string
   sentBy: string | null
   voiceNote?: boolean
+  replyToMessageId?: string
+  replyToWaMessageId?: string
 }
 
 function preview(type: string, body?: string | null): string {
   if (type === 'text') return (body ?? '').slice(0, 120)
+  if (type === 'location') return '📍 Location'
   return `[${type}]`
+}
+
+interface OutboundLocationArgs {
+  conversationId: string
+  to: string
+  latitude: number
+  longitude: number
+  name?: string
+  address?: string
+  sentBy: string | null
+  replyToMessageId?: string
+  replyToWaMessageId?: string
 }
 
 async function finalize(io: SocketIOServer, conversationId: string, message: Message) {
@@ -41,6 +57,7 @@ async function finalize(io: SocketIOServer, conversationId: string, message: Mes
     .set({
       lastMessageAt: new Date(),
       lastMessagePreview: preview(message.type, message.body),
+      ...conversationPreviewFromMessage(message),
     })
     .where(eq(conversations.id, conversationId))
 
@@ -79,6 +96,43 @@ export async function createOutboundText(
   return message
 }
 
+export async function createOutboundLocation(
+  io: SocketIOServer,
+  args: OutboundLocationArgs,
+): Promise<Message> {
+  const metadata = {
+    latitude: args.latitude,
+    longitude: args.longitude,
+    ...(args.name ? { name: args.name } : {}),
+    ...(args.address ? { address: args.address } : {}),
+  }
+  const [message] = await db
+    .insert(messages)
+    .values({
+      conversationId: args.conversationId,
+      sentBy: args.sentBy,
+      direction: 'outbound',
+      type: 'location',
+      body: null,
+      status: 'pending',
+      metadata,
+      replyToMessageId: args.replyToMessageId ?? null,
+    })
+    .returning()
+
+  await enqueueJob('send_whatsapp_message', {
+    to: args.to,
+    type: 'location',
+    conversationId: args.conversationId,
+    messageId: message.id,
+    location: metadata,
+    replyToWaMessageId: args.replyToWaMessageId,
+  })
+
+  await finalize(io, args.conversationId, message)
+  return message
+}
+
 /** Persist an outbound media message (already uploaded to WA + S3) and queue delivery. */
 export async function createOutboundMedia(
   io: SocketIOServer,
@@ -97,6 +151,7 @@ export async function createOutboundMedia(
       mediaFilename: args.filename,
       mediaStatus: 'uploaded',
       status: 'pending',
+      replyToMessageId: args.replyToMessageId ?? null,
     })
     .returning()
 
@@ -108,6 +163,7 @@ export async function createOutboundMedia(
     mediaId: args.mediaId,
     caption: args.caption,
     voiceNote: args.voiceNote,
+    replyToWaMessageId: args.replyToWaMessageId,
   })
 
   await finalize(io, args.conversationId, message)
@@ -149,7 +205,7 @@ export async function resendOutboundMessage(
     })
   }
 
-  io.to(`conversation:${message.conversationId}`).emit('message_status', {
+  emitMessageStatus(io, {
     conversationId: message.conversationId,
     messageId: message.id,
     status: 'pending',

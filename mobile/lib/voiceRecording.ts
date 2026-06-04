@@ -26,10 +26,12 @@ export async function startVoiceRecording(): Promise<VoiceRecording> {
   })
 
   // Android: 3GP/AMR (WhatsApp-native). iOS: standard AAC m4a — do not override preset options.
-  const preset =
-    Platform.OS === 'android' ? RecordingPresets.LOW_QUALITY : RecordingPresets.HIGH_QUALITY
+  const preset = {
+    ...(Platform.OS === 'android' ? RecordingPresets.LOW_QUALITY : RecordingPresets.HIGH_QUALITY),
+    isMeteringEnabled: true,
+  }
   const recorder = new AudioModule.AudioRecorder(preset)
-  await recorder.prepareToRecordAsync()
+  await recorder.prepareToRecordAsync(preset)
   recorder.record()
   return recorder
 }

@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { and, desc, eq, ilike, lt, or } from 'drizzle-orm'
+import { and, desc, eq, ilike, lt, or, sql } from 'drizzle-orm'
 import { db } from '../db/index.js'
 import {
   conversations,
@@ -11,104 +11,70 @@ import {
   type Conversation,
 } from '../db/schema.js'
 import { errors } from '../utils/errors.js'
-import { emitNewMessage } from '../services/socket-events.js'
+import {
+  emitConversationAssigned,
+  emitConversationUpdated,
+  emitNewMessage,
+} from '../services/socket-events.js'
 import { enqueueJob } from '../services/jobs.js'
 import {
+  createOutboundLocation,
   createOutboundText,
-  createOutboundMedia,
   resendOutboundMessage,
 } from '../services/outbound.js'
 import { whatsapp } from '../services/whatsapp.js'
 import { resolveMessagingState, shapeMessagingFields } from '../utils/messaging-windows.js'
 import { tryActivateCtwaFep, loadMessagingPayload } from '../services/ctwa-fep.js'
 import { attachReplyPreviews } from '../utils/message-shape.js'
-import { prepareAudioForWhatsApp } from '../utils/transcode-audio.js'
-import { analyzeAudioBuffer } from '../utils/inbound-audio-profile.js'
-import { normalizeWhatsAppMime } from '../utils/mime-normalize.js'
+import { prepareOutboundMedia } from '../utils/prepare-outbound-media.js'
+import {
+  sendOutboundMediaBuffer,
+  sendOutboundMediaFromS3Key,
+} from '../services/outbound-media-buffer.js'
+import { forwardMessageToConversation } from '../services/forward-message.js'
+import { resolveReplyTargets } from '../utils/resolve-reply.js'
 
 const PAGE = 30
-// WhatsApp media caps (stricter than the 50MB multipart limit).
-const MEDIA_CAPS: Record<string, number> = {
-  image: 5 * 1024 * 1024,
-  video: 16 * 1024 * 1024,
-  audio: 16 * 1024 * 1024,
-  document: 100 * 1024 * 1024,
-  sticker: 500 * 1024,
-}
-
-function mimeToType(mime: string): 'image' | 'video' | 'audio' | 'document' | 'sticker' {
-  if (mime.startsWith('image/')) return mime === 'image/webp' ? 'sticker' : 'image'
-  if (mime.startsWith('video/')) return 'video'
-  if (mime.startsWith('audio/')) return 'audio'
-  return 'document'
-}
-
-async function sendOutboundMediaBuffer(
-  app: FastifyInstance,
-  opts: {
-    conversationId: string
-    contactWaId: string
-    buffer: Buffer
-    filename: string
-    mimeHint: string
-    caption?: string
-    sentBy: string
-  },
-) {
-  let buffer = opts.buffer
-  let filename = opts.filename
-  let mime = normalizeWhatsAppMime(opts.mimeHint, opts.filename)
-  let voiceNote = false
-
-  if (mime.startsWith('audio/')) {
-    const prepared = await prepareAudioForWhatsApp(buffer, filename, {
-      conversationId: opts.conversationId,
-      s3: app.s3,
-      log: app.log,
-    })
-    buffer = prepared.buffer
-    mime = prepared.mime.split(';')[0].trim()
-    filename = prepared.filename
-    voiceNote = prepared.voiceNote
-    const out = analyzeAudioBuffer(buffer)
-    app.log.info(
-      {
-        mime,
-        bytes: buffer.length,
-        filename,
-        voiceNote,
-        outputMagic: out.magic,
-        sourceBytes: opts.buffer.length,
-        matchedInbound: prepared.reference?.mimeType ?? null,
-      },
-      'outbound_audio_prepared',
-    )
-  }
-
-  const type = mimeToType(mime)
-  const cap = MEDIA_CAPS[type] ?? 0
-  if (buffer.length > cap) throw errors.mediaTooLarge()
-
-  const uploaded = await whatsapp.uploadMedia(app.log, buffer, mime, filename)
-  const tempKey = `media/${opts.conversationId}/outbound/${Date.now()}-${filename}`
-  await app.s3.uploadToS3(tempKey, buffer, mime)
-
-  return createOutboundMedia(app.io, {
-    conversationId: opts.conversationId,
-    to: opts.contactWaId,
-    type: type === 'sticker' ? 'sticker' : type,
-    mediaId: uploaded.id,
-    s3Key: tempKey,
-    mimeType: mime,
-    filename,
-    caption: opts.caption,
-    sentBy: opts.sentBy,
-    voiceNote,
-  })
-}
 
 export async function conversationRoutes(app: FastifyInstance) {
   app.addHook('preHandler', app.authenticate)
+
+  // POST /api/conversations/forward-batch
+  app.post('/forward-batch', async (request, reply) => {
+    const { messageId, targetConversationIds } = z
+      .object({
+        messageId: z.string().uuid(),
+        targetConversationIds: z.array(z.string().uuid()).min(1).max(30),
+      })
+      .parse(request.body)
+
+    const results: Array<{
+      conversationId: string
+      ok: boolean
+      message?: Awaited<ReturnType<typeof forwardMessageToConversation>>
+      error?: string
+    }> = []
+
+    for (const targetConversationId of targetConversationIds) {
+      try {
+        const message = await forwardMessageToConversation(app, {
+          sourceMessageId: messageId,
+          targetConversationId,
+          sentBy: request.agent.id,
+        })
+        results.push({ conversationId: targetConversationId, ok: true, message })
+      } catch (err) {
+        results.push({
+          conversationId: targetConversationId,
+          ok: false,
+          error: err instanceof Error ? err.message : 'Forward failed',
+        })
+      }
+    }
+
+    const okCount = results.filter((r) => r.ok).length
+    return reply.code(okCount > 0 ? 201 : 400).send({ results, okCount })
+  })
 
   // GET /api/conversations
   app.get('/', async (request) => {
@@ -149,7 +115,11 @@ export async function conversationRoutes(app: FastifyInstance) {
       .innerJoin(contacts, eq(conversations.contactId, contacts.id))
       .leftJoin(teamMembers, eq(conversations.assignedTo, teamMembers.id))
       .where(conds.length ? and(...conds) : undefined)
-      .orderBy(desc(conversations.lastMessageAt))
+      .orderBy(
+        desc(sql`(CASE WHEN ${conversations.pinnedAt} IS NOT NULL THEN 1 ELSE 0 END)`),
+        desc(conversations.pinnedAt),
+        desc(conversations.lastMessageAt),
+      )
       .limit(PAGE + 1)
 
     const hasMore = rows.length > PAGE
@@ -199,6 +169,7 @@ export async function conversationRoutes(app: FastifyInstance) {
         status: z.enum(['open', 'resolved', 'pending']).optional(),
         assignedTo: z.string().uuid().nullable().optional(),
         notes: z.string().optional(),
+        pinned: z.boolean().optional(),
       })
       .parse(request.body)
 
@@ -211,6 +182,9 @@ export async function conversationRoutes(app: FastifyInstance) {
     if (body.status !== undefined) patch.status = body.status
     if (body.assignedTo !== undefined) patch.assignedTo = body.assignedTo
     if (body.notes !== undefined) patch.notes = body.notes
+    if (body.pinned !== undefined) {
+      patch.pinnedAt = body.pinned ? new Date() : null
+    }
 
     await db.update(conversations).set(patch).where(eq(conversations.id, id))
 
@@ -229,7 +203,7 @@ export async function conversationRoutes(app: FastifyInstance) {
         type: 'assigned',
         payload: { assignedTo: body.assignedTo },
       })
-      app.io.to(`agent:${body.assignedTo}`).emit('conversation_assigned', { conversationId: id })
+      emitConversationAssigned(app.io, id, body.assignedTo)
       await enqueueJob('send_push_notification', {
         agentId: body.assignedTo,
         title: 'Conversation assigned to you',
@@ -245,8 +219,7 @@ export async function conversationRoutes(app: FastifyInstance) {
       })
     }
 
-    app.io.to(`conversation:${id}`).emit('conversation_updated', { conversationId: id })
-    app.io.emit('inbox_updated', { conversationId: id })
+    emitConversationUpdated(app.io, id)
     const row = await db.query.conversations.findFirst({
       where: eq(conversations.id, id),
       with: { contact: true, assignedAgent: true },
@@ -347,15 +320,70 @@ export async function conversationRoutes(app: FastifyInstance) {
               mimeType: z.string().min(1),
               data: z.string().min(100),
               caption: z.string().optional(),
+              replyToMessageId: z.string().uuid().optional(),
+            }),
+            z.object({
+              type: z.literal('location'),
+              latitude: z.number().min(-90).max(90),
+              longitude: z.number().min(-180).max(180),
+              name: z.string().max(256).optional(),
+              address: z.string().max(512).optional(),
+              replyToMessageId: z.string().uuid().optional(),
+            }),
+            z.object({
+              type: z.literal('media_reuse'),
+              reuseS3Key: z.string().min(1),
+              filename: z.string().min(1),
+              mimeType: z.string().min(1),
+              caption: z.string().optional(),
+              replyToMessageId: z.string().uuid().optional(),
             }),
           ])
           .parse(request.body)
+
+        if (body.type === 'media_reuse') {
+          if (!body.reuseS3Key.startsWith('media/')) {
+            throw errors.validation('Invalid media key.')
+          }
+          const replyCtx = await resolveReplyTargets(id, body.replyToMessageId)
+          const message = await sendOutboundMediaFromS3Key(app, {
+            conversationId: id,
+            contactWaId: conversation.contact.waId,
+            s3Key: body.reuseS3Key,
+            filename: body.filename,
+            mimeType: body.mimeType,
+            caption: body.caption,
+            sentBy: request.agent.id,
+            replyToMessageId: replyCtx.replyToMessageId,
+            replyToWaMessageId: replyCtx.replyToWaMessageId,
+          })
+          const shaped = (await attachReplyPreviews([message]))[0]
+          return reply.code(201).send({ message: shaped })
+        }
+
+        if (body.type === 'location') {
+          const replyCtx = await resolveReplyTargets(id, body.replyToMessageId)
+          const raw = await createOutboundLocation(app.io, {
+            conversationId: id,
+            to: conversation.contact.waId,
+            latitude: body.latitude,
+            longitude: body.longitude,
+            name: body.name,
+            address: body.address,
+            sentBy: request.agent.id,
+            replyToMessageId: replyCtx.replyToMessageId,
+            replyToWaMessageId: replyCtx.replyToWaMessageId,
+          })
+          const message = (await attachReplyPreviews([raw]))[0]
+          return reply.code(201).send({ message })
+        }
 
         if (body.type === 'audio') {
           const buffer = Buffer.from(body.data.replace(/\s/g, ''), 'base64')
           if (buffer.length < 200) {
             throw errors.validation('Recording is too short or empty.')
           }
+          const replyCtx = await resolveReplyTargets(id, body.replyToMessageId)
           const message = await sendOutboundMediaBuffer(app, {
             conversationId: id,
             contactWaId: conversation.contact.waId,
@@ -364,33 +392,24 @@ export async function conversationRoutes(app: FastifyInstance) {
             mimeHint: body.mimeType,
             caption: body.caption,
             sentBy: request.agent.id,
+            replyToMessageId: replyCtx.replyToMessageId,
+            replyToWaMessageId: replyCtx.replyToWaMessageId,
           })
-          return reply.code(201).send({ message })
+          const shaped = (await attachReplyPreviews([message]))[0]
+          return reply.code(201).send({ message: shaped })
         }
 
-        let replyToWaMessageId: string | undefined
-        if (body.replyToMessageId) {
-          const parent = await db.query.messages.findFirst({
-            where: eq(messages.id, body.replyToMessageId),
-            columns: { id: true, conversationId: true, waMessageId: true },
-          })
-          if (!parent || parent.conversationId !== id) {
-            throw errors.validation('Reply target not found in this conversation')
-          }
-          if (!parent.waMessageId) {
-            throw errors.validation('Reply target is not available on WhatsApp yet')
-          }
-          replyToWaMessageId = parent.waMessageId
-        }
+        const replyCtx = await resolveReplyTargets(id, body.replyToMessageId)
 
-        const message = await createOutboundText(app.io, {
+        const raw = await createOutboundText(app.io, {
           conversationId: id,
           to: conversation.contact.waId,
           body: body.body,
           sentBy: request.agent.id,
-          replyToMessageId: body.replyToMessageId,
-          replyToWaMessageId,
+          replyToMessageId: replyCtx.replyToMessageId,
+          replyToWaMessageId: replyCtx.replyToWaMessageId,
         })
+        const message = (await attachReplyPreviews([raw]))[0]
         return reply.code(201).send({ message })
       }
 
@@ -399,8 +418,12 @@ export async function conversationRoutes(app: FastifyInstance) {
       if (!file) throw errors.validation('No file or unsupported content type.')
       const buffer = await file.toBuffer()
       const caption = (file.fields?.caption as { value?: string } | undefined)?.value
+      const replyToMessageId = (
+        file.fields?.replyToMessageId as { value?: string } | undefined
+      )?.value
+      const replyCtx = await resolveReplyTargets(id, replyToMessageId)
 
-      const message = await sendOutboundMediaBuffer(app, {
+      const raw = await sendOutboundMediaBuffer(app, {
         conversationId: id,
         contactWaId: conversation.contact.waId,
         buffer,
@@ -408,10 +431,26 @@ export async function conversationRoutes(app: FastifyInstance) {
         mimeHint: file.mimetype,
         caption,
         sentBy: request.agent.id,
+        replyToMessageId: replyCtx.replyToMessageId,
+        replyToWaMessageId: replyCtx.replyToWaMessageId,
       })
+      const message = (await attachReplyPreviews([raw]))[0]
       return reply.code(201).send({ message })
     },
   )
+
+  // POST /api/conversations/:id/forward — send an existing message to another chat
+  app.post('/:id/forward', async (request, reply) => {
+    const { id: targetConversationId } = z.object({ id: z.string().uuid() }).parse(request.params)
+    const { messageId } = z.object({ messageId: z.string().uuid() }).parse(request.body)
+
+    const message = await forwardMessageToConversation(app, {
+      sourceMessageId: messageId,
+      targetConversationId,
+      sentBy: request.agent.id,
+    })
+    return reply.code(201).send({ message })
+  })
 
   // POST /api/conversations/:id/messages/:messageId/resend
   app.post('/:id/messages/:messageId/resend', async (request, reply) => {
@@ -439,24 +478,20 @@ export async function conversationRoutes(app: FastifyInstance) {
       if (!message.mediaUrl || !message.mediaMimeType) {
         throw errors.validation('Message media is missing')
       }
-      let buffer = await app.s3.downloadFromS3(message.mediaUrl)
-      let mime = normalizeWhatsAppMime(
-        message.mediaMimeType,
+      const raw = await app.s3.downloadFromS3(message.mediaUrl)
+      const prepared = await prepareOutboundMedia(
+        raw,
         message.mediaFilename ?? 'upload',
+        message.mediaMimeType ?? 'application/octet-stream',
+        { conversationId: id, s3: app.s3, log: app.log },
       )
-      let uploadName = message.mediaFilename ?? 'upload'
-      if (mime.startsWith('audio/')) {
-        const prepared = await prepareAudioForWhatsApp(buffer, uploadName, {
-          conversationId: id,
-          s3: app.s3,
-          log: app.log,
-        })
-        buffer = prepared.buffer
-        mime = prepared.mime.split(';')[0].trim()
-        uploadName = prepared.filename
-        voiceNote = prepared.voiceNote
-      }
-      const uploaded = await whatsapp.uploadMedia(app.log, buffer, mime, uploadName)
+      voiceNote = prepared.voiceNote
+      const uploaded = await whatsapp.uploadMedia(
+        app.log,
+        prepared.buffer,
+        prepared.mime,
+        prepared.filename,
+      )
       mediaId = uploaded.id
     }
 
@@ -507,7 +542,13 @@ export async function conversationRoutes(app: FastifyInstance) {
 
     await db
       .update(conversations)
-      .set({ lastMessageAt: new Date(), lastMessagePreview: `[template] ${body.templateName}` })
+      .set({
+        lastMessageAt: new Date(),
+        lastMessagePreview: `[template] ${body.templateName}`,
+        lastMessageDirection: 'outbound',
+        lastMessageStatus: 'sent',
+        lastMessageType: 'text',
+      })
       .where(eq(conversations.id, id))
 
     await tryActivateCtwaFep(id)
@@ -536,6 +577,11 @@ function shape(
     assignedAgent: c.assignedTo ? { name: assignedName, avatarUrl: assignedAvatar } : null,
     lastMessageAt: c.lastMessageAt,
     lastMessagePreview: c.lastMessagePreview,
+    lastMessageId: c.lastMessageId,
+    lastMessageDirection: c.lastMessageDirection,
+    lastMessageStatus: c.lastMessageStatus,
+    lastMessageType: c.lastMessageType,
+    pinnedAt: c.pinnedAt?.toISOString() ?? null,
     unreadCount: c.unreadCount,
     aiHandled: c.aiHandled,
     ...shapeMessagingFields(c),

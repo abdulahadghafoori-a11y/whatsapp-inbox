@@ -1,4 +1,4 @@
-import { eq, sql } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { db } from '../db/index.js'
 import {
@@ -12,12 +12,14 @@ import {
 import { enqueueJob } from './jobs.js'
 import { routeConversation } from './router.js'
 import {
+  normalizeStatusForMessageType,
   normalizeWaMessageStatus,
   shouldUpgradeStatus,
 } from '../utils/message-status.js'
 import { customerServiceWindowExpiresAt } from '../utils/messaging-windows.js'
+import { conversationPreviewFromMessage } from '../utils/conversation-preview.js'
 import { loadMessagingPayload } from './ctwa-fep.js'
-import { emitNewMessage } from './socket-events.js'
+import { emitMessageStatus, emitNewMessage } from './socket-events.js'
 
 const MEDIA_TYPES = new Set(['image', 'video', 'audio', 'document', 'sticker'])
 const isMediaType = (t: string) => MEDIA_TYPES.has(t)
@@ -124,12 +126,20 @@ async function handleStatuses(app: FastifyInstance, value: WaChangeValue): Promi
 
     const existing = await db.query.messages.findFirst({
       where: eq(messages.waMessageId, status.id),
-      columns: { id: true, conversationId: true, status: true, direction: true },
+      columns: {
+        id: true,
+        conversationId: true,
+        status: true,
+        direction: true,
+        type: true,
+      },
     })
     if (!existing || existing.direction !== 'outbound') continue
-    if (!shouldUpgradeStatus(existing.status, normalized)) continue
 
-    if (normalized === 'failed') {
+    const statusToStore = normalizeStatusForMessageType(existing.type, normalized)
+    if (!shouldUpgradeStatus(existing.status, statusToStore)) continue
+
+    if (statusToStore === 'failed') {
       app.log.warn(
         {
           waMessageId: status.id,
@@ -141,7 +151,7 @@ async function handleStatuses(app: FastifyInstance, value: WaChangeValue): Promi
     }
 
     const errorMessage =
-      normalized === 'failed' && status.errors?.length
+      statusToStore === 'failed' && status.errors?.length
         ? status.errors
             .map((e) => e.error_data?.details ?? e.message ?? e.title)
             .filter(Boolean)
@@ -151,21 +161,29 @@ async function handleStatuses(app: FastifyInstance, value: WaChangeValue): Promi
     const [row] = await db
       .update(messages)
       .set({
-        status: normalized,
+        status: statusToStore,
         ...(errorMessage ? { errorMessage } : {}),
       })
       .where(eq(messages.id, existing.id))
       .returning({ conversationId: messages.conversationId, id: messages.id })
 
     if (row) {
-      app.io
-        .to(`conversation:${row.conversationId}`)
-        .emit('message_status', {
-          conversationId: row.conversationId,
-          messageId: row.id,
-          waMessageId: status.id,
-          status: normalized,
-        })
+      await db
+        .update(conversations)
+        .set({ lastMessageStatus: statusToStore })
+        .where(
+          and(
+            eq(conversations.id, row.conversationId),
+            eq(conversations.lastMessageId, existing.id),
+          ),
+        )
+
+      emitMessageStatus(app.io, {
+        conversationId: row.conversationId,
+        messageId: row.id,
+        waMessageId: status.id,
+        status: statusToStore,
+      })
     }
   }
 }
@@ -216,6 +234,7 @@ async function handleMessageEchoes(
       .set({
         lastMessageAt: message.sentAt,
         lastMessagePreview: getPreview(msg),
+        ...conversationPreviewFromMessage(message),
       })
       .where(eq(conversations.id, conversation.id))
 
@@ -288,6 +307,7 @@ async function handleMessages(app: FastifyInstance, value: WaChangeValue): Promi
         status: wasResolved ? 'open' : conversation.status,
         lastMessageAt: new Date(),
         lastMessagePreview: getPreview(msg),
+        ...conversationPreviewFromMessage(message),
         unreadCount: sql`${conversations.unreadCount} + 1`,
         ...(isCtwaInbound
           ? {
@@ -372,6 +392,7 @@ async function upsertConversation(contactId: string): Promise<Conversation> {
 
 function getPreview(msg: WaMessage): string {
   if (msg.type === 'text') return (msg.text?.body ?? '').slice(0, 120)
+  if (msg.type === 'location') return '📍 Location'
   return `[${msg.type}]`
 }
 

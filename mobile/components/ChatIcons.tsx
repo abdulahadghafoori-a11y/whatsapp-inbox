@@ -153,6 +153,62 @@ export function CloseIcon({ size = 22, color = '#6b7280' }: IconProps) {
   )
 }
 
+/** Curved reply arrow (swipe + menu). */
+export function ReplySwipeIcon({ size = 24, color = '#128C7E' }: IconProps) {
+  return (
+    <Text
+      pointerEvents="none"
+      style={{
+        fontSize: size,
+        lineHeight: size,
+        color,
+        fontWeight: '600',
+        transform: [{ scaleX: -1 }],
+      }}
+    >
+      ↩
+    </Text>
+  )
+}
+
+export function ForwardIcon({ size = 22, color = '#374151' }: IconProps) {
+  return (
+    <Text pointerEvents="none" style={{ fontSize: size, lineHeight: size, color, fontWeight: '500' }}>
+      ↪
+    </Text>
+  )
+}
+
+export function DeleteActionIcon({ size = 22, color = '#dc2626' }: IconProps) {
+  const w = size * 0.55
+  const h = size * 0.62
+  return (
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+      <View
+        style={{
+          width: w * 1.15,
+          height: h * 0.22,
+          borderRadius: 2,
+          backgroundColor: color,
+          marginBottom: 1,
+        }}
+      />
+      <View
+        style={{
+          width: w,
+          height: h,
+          borderWidth: 1.5,
+          borderColor: color,
+          borderTopLeftRadius: 3,
+          borderTopRightRadius: 3,
+          borderBottomLeftRadius: 2,
+          borderBottomRightRadius: 2,
+        }}
+      />
+    </View>
+  )
+}
+
 export function DocumentIcon({ size = 28, color = '#128C7E' }: IconProps) {
   const w = size * 0.65
   const h = size * 0.8

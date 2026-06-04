@@ -3,6 +3,7 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
+  HeadObjectCommand,
   GetBucketLifecycleConfigurationCommand,
   PutBucketLifecycleConfigurationCommand,
 } from '@aws-sdk/client-s3'
@@ -38,6 +39,19 @@ export class S3Service {
     this.bucket = config.S3_BUCKET_NAME
   }
 
+  async objectExists(key: string): Promise<boolean> {
+    try {
+      await this.client.send(
+        new HeadObjectCommand({ Bucket: this.bucket, Key: key }),
+      )
+      return true
+    } catch (err) {
+      const name = (err as { name?: string })?.name
+      if (name === 'NotFound' || name === 'NoSuchKey') return false
+      return false
+    }
+  }
+
   async uploadToS3(key: string, buffer: Buffer, mimeType: string): Promise<string> {
     await this.client.send(
       new PutObjectCommand({
@@ -48,6 +62,12 @@ export class S3Service {
       }),
     )
     return key
+  }
+
+  /** Upload only when the object is not already stored (content-addressed keys). */
+  async uploadToS3IfMissing(key: string, buffer: Buffer, mimeType: string): Promise<string> {
+    if (await this.objectExists(key)) return key
+    return this.uploadToS3(key, buffer, mimeType)
   }
 
   async downloadFromS3(key: string): Promise<Buffer> {

@@ -1,4 +1,26 @@
-import type { Message, MessageDirection, MessageStatus, MessageType, MediaStatus } from '@/types'
+import type {
+  Message,
+  MessageDirection,
+  MessageReplyPreview,
+  MessageStatus,
+  MessageType,
+  MediaStatus,
+} from '@/types'
+
+function normalizeReplyPreview(raw: unknown): MessageReplyPreview | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  return {
+    id: String(r.id),
+    direction: (r.direction ?? 'outbound') as MessageDirection,
+    type: (r.type ?? 'text') as MessageType,
+    body: (r.body ?? null) as string | null,
+    deletedAt: (r.deletedAt ?? r.deleted_at ?? null) as string | null,
+    mediaUrl: (r.mediaUrl ?? r.media_url ?? null) as string | null,
+    mediaMimeType: (r.mediaMimeType ?? r.media_mime_type ?? null) as string | null,
+    mediaFilename: (r.mediaFilename ?? r.media_filename ?? null) as string | null,
+  }
+}
 
 /** Normalize API/socket payloads (handles accidental snake_case). */
 export function normalizeMessage(raw: Message & Record<string, unknown>): Message {
@@ -28,10 +50,11 @@ export function normalizeMessage(raw: Message & Record<string, unknown>): Messag
       | null,
     deletedAt: (raw.deletedAt ?? raw.deleted_at ?? null) as string | null,
     editedAt: (raw.editedAt ?? raw.edited_at ?? null) as string | null,
-    replyTo: raw.replyTo ?? null,
+    replyTo: normalizeReplyPreview(raw.replyTo),
     sentAt,
     createdAt,
     localPreviewUri: raw.localPreviewUri,
+    metadata: (raw.metadata ?? null) as Record<string, unknown> | null,
   }
 }
 

@@ -8,6 +8,9 @@ export type ReplyPreview = {
   type: string
   body: string | null
   deletedAt: Date | null
+  mediaUrl: string | null
+  mediaMimeType: string | null
+  mediaFilename: string | null
 }
 
 export type ShapedMessage = Message & {
@@ -31,6 +34,9 @@ export async function attachReplyPreviews(rows: Message[]): Promise<ShapedMessag
       type: messages.type,
       body: messages.body,
       deletedAt: messages.deletedAt,
+      mediaUrl: messages.mediaUrl,
+      mediaMimeType: messages.mediaMimeType,
+      mediaFilename: messages.mediaFilename,
     })
     .from(messages)
     .where(inArray(messages.id, replyIds))

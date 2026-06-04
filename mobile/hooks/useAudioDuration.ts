@@ -1,27 +1,28 @@
-import { useEffect } from 'react'
-import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio'
-import { getAudioDuration, setAudioDuration } from '@/lib/audioDurationCache'
+import { useEffect, useState } from 'react'
+import { getAudioDuration, subscribeAudioDuration } from '@/lib/audioDurationCache'
+import { requestAudioDurationProbe } from '@/lib/audioDurationProbe'
 
 /**
- * Loads duration metadata without starting playback.
- * Disabled while this message uses the global player (isActive).
+ * Reads cached duration and queues a single shared probe when missing.
  */
 export function useAudioDuration(
-  uri: string,
+  uri: string | null | undefined,
   messageId: string,
   enabled: boolean,
 ): number {
-  const cached = getAudioDuration(messageId)
-  const shouldProbe = enabled && cached <= 0
-  const player = useAudioPlayer(shouldProbe ? uri : null, { updateInterval: 2000 })
-  const status = useAudioPlayerStatus(player)
+  const [, bump] = useState(0)
 
   useEffect(() => {
-    const ms = (status.duration ?? 0) * 1000
-    if (ms > 0) setAudioDuration(messageId, ms)
-  }, [status.duration, messageId])
+    const unsub = subscribeAudioDuration(() => {
+      bump((n) => n + 1)
+    })
+    return unsub
+  }, [])
 
-  if (cached > 0) return cached
-  const live = (status.duration ?? 0) * 1000
-  return live > 0 ? live : 0
+  useEffect(() => {
+    if (!enabled || !uri || getAudioDuration(messageId) > 0) return
+    requestAudioDurationProbe(messageId, uri)
+  }, [uri, messageId, enabled])
+
+  return getAudioDuration(messageId)
 }

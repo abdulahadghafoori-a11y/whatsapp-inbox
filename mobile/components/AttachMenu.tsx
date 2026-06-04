@@ -8,7 +8,7 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated'
 
-export const ATTACH_TRAY_HEIGHT = 148
+export const ATTACH_TRAY_HEIGHT = 200
 
 export const ATTACH_ANIM_MS = 260
 
@@ -54,6 +54,7 @@ export function AttachPanel({
   onCamera,
   onGallery,
   onDocument,
+  onLocation,
 }: {
   open: boolean
   targetHeight: number
@@ -61,6 +62,7 @@ export function AttachPanel({
   onCamera: () => void
   onGallery: () => void
   onDocument: () => void
+  onLocation: () => void
 }) {
   const height = useSharedValue(0)
 
@@ -84,6 +86,7 @@ export function AttachPanel({
     { key: 'document', label: 'Document', icon: '📄', onPress: onDocument },
     { key: 'camera', label: 'Camera', icon: '📷', onPress: onCamera },
     { key: 'gallery', label: 'Gallery', icon: '🖼', onPress: onGallery },
+    { key: 'location', label: 'Location', icon: '📍', onPress: onLocation },
   ]
 
   return (
@@ -119,11 +122,15 @@ const styles = StyleSheet.create({
   },
   grid: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     justifyContent: 'space-evenly',
     alignItems: 'flex-start',
+    rowGap: 12,
   },
   item: {
-    width: 88,
+    width: '22%',
+    minWidth: 72,
+    maxWidth: 88,
     alignItems: 'center',
   },
   itemPressed: {

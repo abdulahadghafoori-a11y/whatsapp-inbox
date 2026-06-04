@@ -19,7 +19,14 @@
       "infoPlist": {
         "NSCameraUsageDescription": "Take photos to send to customers.",
         "NSPhotoLibraryUsageDescription": "Attach photos and videos to messages.",
-        "NSMicrophoneUsageDescription": "Record voice messages."
+        "NSMicrophoneUsageDescription": "Record voice messages.",
+        "NSLocationWhenInUseUsageDescription": "Share your location in messages.",
+        "LSApplicationQueriesSchemes": [
+          "comgooglemaps",
+          "waze",
+          "citymapper",
+          "uber"
+        ]
       }
     },
     "android": {
@@ -34,7 +41,9 @@
         "READ_MEDIA_IMAGES",
         "READ_MEDIA_VIDEO",
         "RECORD_AUDIO",
-        "POST_NOTIFICATIONS"
+        "POST_NOTIFICATIONS",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
       ]
     },
     "plugins": [
@@ -57,7 +66,13 @@
       ],
       "expo-asset",
       "expo-audio",
-      "expo-video"
+      "expo-video",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Share your current location with customers."
+        }
+      ]
     ],
     "extra": {
       "router": {

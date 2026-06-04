@@ -8,6 +8,7 @@ export type MessageType =
   | 'audio'
   | 'document'
   | 'sticker'
+  | 'location'
 export type MessageStatus =
   | 'pending'
   | 'sent'
@@ -41,6 +42,11 @@ export interface ConversationListItem {
   assignedAgent: { name: string | null; avatarUrl: string | null } | null
   lastMessageAt: string | null
   lastMessagePreview: string | null
+  lastMessageId?: string | null
+  lastMessageDirection?: MessageDirection | null
+  lastMessageStatus?: MessageStatus | null
+  lastMessageType?: MessageType | null
+  pinnedAt?: string | null
   unreadCount: number
   windowExpiresAt: string | null
   fepExpiresAt: string | null
@@ -72,6 +78,11 @@ export interface MessageReplyPreview {
   type: MessageType
   body: string | null
   deletedAt: string | null
+  mediaUrl?: string | null
+  mediaMimeType?: string | null
+  mediaFilename?: string | null
+  /** Optimistic / in-flight parent media. */
+  localPreviewUri?: string | null
 }
 
 export interface Message {
@@ -96,6 +107,9 @@ export interface Message {
   createdAt: string
   /** Client-only: show local file while outbound upload is in flight. */
   localPreviewUri?: string
+  /** Client-only: permanent on-device copy (see messageMediaCache). */
+  localCacheUri?: string
+  metadata?: Record<string, unknown> | null
 }
 
 export interface Paginated<T> {

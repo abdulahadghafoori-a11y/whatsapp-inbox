@@ -8,7 +8,7 @@ import { processDownloadMedia } from '../services/media-processor.js'
 import { processAIAgentReply } from '../services/ai-agent.js'
 import { sendPushNotification } from '../services/push-notifications.js'
 import type { JobPayloads } from '../services/jobs.js'
-import { emitMediaFailed } from '../services/socket-events.js'
+import { emitMediaFailed, emitMessageStatus } from '../services/socket-events.js'
 
 const POLL_INTERVAL_MS = 5000
 const BATCH_SIZE = 10
@@ -143,14 +143,21 @@ async function handleSendMessage(
     result = await whatsapp.sendTextMessage(app.log, p.to, p.body ?? '', {
       replyToWaMessageId: p.replyToWaMessageId,
     })
+  } else if (p.type === 'location' && p.location) {
+    result = await whatsapp.sendLocationMessage(app.log, p.to, p.location, {
+      replyToWaMessageId: p.replyToWaMessageId,
+    })
   } else {
+    const mediaOpts: { voice?: boolean; replyToWaMessageId?: string } = {}
+    if (p.replyToWaMessageId) mediaOpts.replyToWaMessageId = p.replyToWaMessageId
+    if (p.type === 'audio' && p.voiceNote) mediaOpts.voice = true
     result = await whatsapp.sendMediaMessage(
       app.log,
       p.to,
       p.type,
       p.mediaId ?? '',
       p.caption,
-      p.type === 'audio' && p.voiceNote ? { voice: true } : undefined,
+      mediaOpts,
     )
   }
 
@@ -159,14 +166,12 @@ async function handleSendMessage(
     .set({ waMessageId: result.message_id, status: 'sent' })
     .where(eq(messages.id, p.messageId))
 
-  app.io
-    .to(`conversation:${p.conversationId}`)
-    .emit('message_status', {
-      conversationId: p.conversationId,
-      messageId: p.messageId,
-      waMessageId: result.message_id,
-      status: 'sent',
-    })
+  emitMessageStatus(app.io, {
+    conversationId: p.conversationId,
+    messageId: p.messageId,
+    waMessageId: result.message_id,
+    status: 'sent',
+  })
 }
 
 async function onPermanentFailure(app: FastifyInstance, job: Job): Promise<void> {
@@ -184,12 +189,10 @@ async function onPermanentFailure(app: FastifyInstance, job: Job): Promise<void>
       .update(messages)
       .set({ status: 'failed', errorMessage: job.lastError })
       .where(eq(messages.id, p.messageId))
-    app.io
-      .to(`conversation:${p.conversationId}`)
-      .emit('message_status', {
-        conversationId: p.conversationId,
-        messageId: p.messageId,
-        status: 'failed',
-      })
+    emitMessageStatus(app.io, {
+      conversationId: p.conversationId,
+      messageId: p.messageId,
+      status: 'failed',
+    })
   }
 }

@@ -66,6 +66,11 @@ export const conversations = pgTable(
     status: text('status').notNull().default('open'), // open | resolved | pending
     lastMessageAt: timestamp('last_message_at', { withTimezone: true }),
     lastMessagePreview: text('last_message_preview'),
+    lastMessageId: uuid('last_message_id'),
+    lastMessageDirection: text('last_message_direction'),
+    lastMessageStatus: text('last_message_status'),
+    lastMessageType: text('last_message_type'),
+    pinnedAt: timestamp('pinned_at', { withTimezone: true }),
     windowExpiresAt: timestamp('window_expires_at', { withTimezone: true }),
     /** First inbound message from a CTWA / referral ad (starts 24h reply deadline for FEP). */
     ctwaStartedAt: timestamp('ctwa_started_at', { withTimezone: true }),

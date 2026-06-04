@@ -1,5 +1,14 @@
 import type { Server as SocketIOServer } from 'socket.io'
 import type { Message } from '../db/schema.js'
+import type { ShapedMessage } from '../utils/message-shape.js'
+
+export type MessageStatusSocketPayload = {
+  conversationId: string
+  messageId?: string
+  waMessageId?: string
+  status: string
+  scope?: 'inbound' | 'outbound'
+}
 
 export type MessagingSocketPayload = {
   windowExpiresAt: string | null
@@ -39,4 +48,46 @@ export function emitMediaFailed(
   messageId: string,
 ): void {
   io.emit('media_failed', { conversationId, messageId })
+}
+
+/** Delivery receipts — broadcast so agents see ticks without joining a room. */
+export function emitMessageStatus(
+  io: SocketIOServer,
+  payload: MessageStatusSocketPayload,
+): void {
+  io.emit('message_status', payload)
+}
+
+export function emitMessageUpdated(
+  io: SocketIOServer,
+  conversationId: string,
+  message: ShapedMessage,
+): void {
+  io.emit('message_updated', { conversationId, message })
+}
+
+export function emitMessageDeleted(
+  io: SocketIOServer,
+  conversationId: string,
+  messageId: string,
+): void {
+  io.emit('message_deleted', { conversationId, messageId })
+}
+
+export function emitConversationUpdated(
+  io: SocketIOServer,
+  conversationId: string,
+): void {
+  io.emit('conversation_updated', { conversationId })
+  io.emit('inbox_updated', { conversationId })
+}
+
+export function emitConversationAssigned(
+  io: SocketIOServer,
+  conversationId: string,
+  agentId: string,
+): void {
+  io.to(`agent:${agentId}`).emit('conversation_assigned', { conversationId })
+  io.emit('conversation_assigned', { conversationId })
+  io.emit('inbox_updated', { conversationId })
 }

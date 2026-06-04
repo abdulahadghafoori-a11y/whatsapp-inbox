@@ -24,8 +24,13 @@ async function waitForFile(fileUri: string): Promise<FileSystem.FileInfo> {
   return info
 }
 
+function extFromName(name: string, fallback: string): string {
+  if (!name.includes('.')) return fallback
+  return name.split('.').pop() ?? fallback
+}
+
 /**
- * Copy recording to cache with a stable URI + extension before upload.
+ * Copy voice recording to cache with a stable URI before upload (waits for recorder flush).
  */
 export async function prepareUploadFile(
   uri: string,
@@ -35,7 +40,7 @@ export async function prepareUploadFile(
   const sourceUri = resolveUploadUri(uri)
   await waitForFile(sourceUri)
 
-  const ext = name.includes('.') ? (name.split('.').pop() ?? 'm4a') : 'm4a'
+  const ext = extFromName(name, 'm4a')
   const dest = `${FileSystem.cacheDirectory}wa-upload-${Date.now()}.${ext}`
   await FileSystem.copyAsync({ from: sourceUri, to: dest })
 
@@ -49,6 +54,30 @@ export async function prepareUploadFile(
     ext === '3gp' || ext === 'amr' ? 'audio/amr' : 'audio/mp4'
 
   return { uri: dest, name, mimeType: normalizedMime }
+}
+
+/**
+ * Copy gallery/camera media to cache — preserves image/video MIME (server compresses images).
+ */
+export async function prepareMediaFileForUpload(
+  uri: string,
+  name: string,
+  mimeType: string,
+): Promise<{ uri: string; name: string; mimeType: string }> {
+  const sourceUri = resolveUploadUri(uri)
+  const info = await FileSystem.getInfoAsync(sourceUri)
+  if (!info.exists) {
+    throw new Error('File not found. Please try again.')
+  }
+
+  const ext = extFromName(
+    name,
+    mimeType.startsWith('video/') ? 'mp4' : mimeType.includes('png') ? 'png' : 'jpg',
+  )
+  const dest = `${FileSystem.cacheDirectory}wa-upload-${Date.now()}.${ext}`
+  await FileSystem.copyAsync({ from: sourceUri, to: dest })
+
+  return { uri: dest, name, mimeType }
 }
 
 /** Read prepared audio as base64 — avoids React Native FormData corrupting binary uploads. */

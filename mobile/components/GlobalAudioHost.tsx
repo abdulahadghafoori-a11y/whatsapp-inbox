@@ -1,9 +1,13 @@
 import { useEffect, useRef } from 'react'
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio'
+import { AudioDurationProbeHost } from '@/components/AudioDurationProbeHost'
 import { safePause, safePlay } from '@/lib/safeAudioPlayer'
+import { resolveUploadUri } from '@/lib/uploadUri'
 import { useGlobalAudioStore } from '@/stores/globalAudioStore'
 
 function GlobalAudioPlayerInner({ uri }: { uri: string }) {
+  const source = resolveUploadUri(uri)
+  const isRemote = source.startsWith('http://') || source.startsWith('https://')
   const wantPlaying = useGlobalAudioStore((s) => s.wantPlaying)
   const playbackRate = useGlobalAudioStore((s) => s.playbackRate)
   const bindPlayer = useGlobalAudioStore((s) => s.bindPlayer)
@@ -12,12 +16,15 @@ function GlobalAudioPlayerInner({ uri }: { uri: string }) {
   const finishPlayback = useGlobalAudioStore((s) => s.finishPlayback)
   const didSeekOnLoad = useRef(false)
 
-  const player = useAudioPlayer(uri, { updateInterval: 150 })
+  const player = useAudioPlayer(source, {
+    updateInterval: 150,
+    downloadFirst: isRemote,
+  })
   const status = useAudioPlayerStatus(player)
 
   useEffect(() => {
     didSeekOnLoad.current = false
-  }, [uri])
+  }, [source])
 
   useEffect(() => {
     bindPlayer(player)
@@ -44,7 +51,7 @@ function GlobalAudioPlayerInner({ uri }: { uri: string }) {
 
     setPlayback({
       isPlaying: status.playing,
-      isLoaded: status.isLoaded || prev.isLoaded,
+      isLoaded: status.isLoaded,
       durationMs: durationMs > 0 ? durationMs : prev.durationMs,
       positionMs: positionMs > 0 ? positionMs : prev.positionMs,
       didJustFinish: status.didJustFinish,
@@ -98,6 +105,12 @@ export function GlobalAudioHost() {
     void setAudioModeAsync({ playsInSilentMode: true })
   }, [])
 
-  if (!track?.uri) return null
-  return <GlobalAudioPlayerInner key={track.messageId} uri={track.uri} />
+  return (
+    <>
+      <AudioDurationProbeHost />
+      {track?.uri && resolveUploadUri(track.uri) ? (
+        <GlobalAudioPlayerInner key={`${track.messageId}:${track.uri}`} uri={track.uri} />
+      ) : null}
+    </>
+  )
 }

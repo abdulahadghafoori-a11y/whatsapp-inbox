@@ -26,6 +26,14 @@ function PlayedMic() {
   return <MicIcon size={14} color={BLUE} />
 }
 
+/**
+ * WhatsApp outbound receipt UI:
+ * - pending → clock
+ * - sent → single gray ✓
+ * - delivered → double gray ✓✓
+ * - read (seen) → double blue ✓✓  (voice notes too — not the mic)
+ * - played → blue mic (voice notes only, after recipient listens)
+ */
 export function StatusTicks({
   status,
   messageType,
@@ -38,11 +46,13 @@ export function StatusTicks({
   }
   if (status === 'pending') {
     return (
-      <Text style={{ color: GRAY, fontSize: 12, lineHeight: 14, fontWeight: '500' }}>◔</Text>
+      <Text style={{ color: '#128C7E', fontSize: 14, lineHeight: 16, fontWeight: '600' }}>
+        ◷
+      </Text>
     )
   }
-  if (status === 'played' || (messageType === 'audio' && status === 'read')) {
-    return <PlayedMic />
+  if (status === 'played') {
+    return messageType === 'audio' ? <PlayedMic /> : <DoubleCheck color={BLUE} />
   }
   if (status === 'read') {
     return <DoubleCheck color={BLUE} />
@@ -50,6 +60,5 @@ export function StatusTicks({
   if (status === 'delivered') {
     return <DoubleCheck color={GRAY} />
   }
-  // sent (and any unknown) — single gray check
   return <Check color={GRAY} />
 }

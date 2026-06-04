@@ -29,7 +29,10 @@ export function normalizeMessageStatus(raw: string): MessageStatus | null {
   }
 }
 
-/** Prefer the furthest delivery state (never downgrade read → delivered). */
+/**
+ * Prefer the furthest delivery state (never downgrade).
+ * UI: audio uses blue mic only for `played`; `read` is blue double-check like text.
+ */
 export function mergeMessageStatus(
   current: MessageStatus,
   incoming: MessageStatus,

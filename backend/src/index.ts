@@ -73,7 +73,9 @@ async function buildServer() {
   })
 
   await app.register(cors, { origin: corsOrigins() })
-  await app.register(multipart, { limits: { fileSize: 50 * 1024 * 1024 } })
+  await app.register(multipart, {
+    limits: { fileSize: 100 * 1024 * 1024 },
+  })
   await app.register(rateLimit, { max: 100, timeWindow: '1 minute' })
 
   await app.register(authPlugin)

@@ -10,7 +10,7 @@ export type JobType =
 export interface JobPayloads {
   send_whatsapp_message: {
     to: string
-    type: 'text' | 'image' | 'video' | 'audio' | 'document' | 'sticker'
+    type: 'text' | 'image' | 'video' | 'audio' | 'document' | 'sticker' | 'location'
     conversationId: string
     messageId: string // local message row to update with wa id / status
     body?: string
@@ -18,6 +18,12 @@ export interface JobPayloads {
     caption?: string
     replyToWaMessageId?: string
     voiceNote?: boolean
+    location?: {
+      latitude: number
+      longitude: number
+      name?: string
+      address?: string
+    }
   }
   download_media: {
     messageId: string

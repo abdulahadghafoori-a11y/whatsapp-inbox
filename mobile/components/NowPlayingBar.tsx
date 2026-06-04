@@ -1,4 +1,4 @@
-import { View, Text, Pressable, Platform } from 'react-native'
+import { View, Text, Pressable } from 'react-native'
 import { useRouter, usePathname } from 'expo-router'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import {
@@ -8,14 +8,12 @@ import {
 } from '@/stores/globalAudioStore'
 import { formatDuration } from '@/lib/format'
 import { PlaybackSpeedButton } from '@/components/PlaybackSpeedButton'
-
-const TAB_BAR_HEIGHT = Platform.select({ ios: 49, android: 56, default: 49 }) ?? 49
+import { TAB_BAR_CONTENT_HEIGHT } from '@/lib/navigation'
 
 function isOnConversationScreen(pathname: string, conversationId: string) {
   return (
-    pathname === `/inbox/${conversationId}` ||
-    pathname.endsWith(`/inbox/${conversationId}`) ||
-    pathname.includes(`/${conversationId}`)
+    pathname === `/conversation/${conversationId}` ||
+    pathname.endsWith(`/conversation/${conversationId}`)
   )
 }
 
@@ -38,7 +36,7 @@ export function NowPlayingBar() {
   const router = useRouter()
   const pathname = usePathname()
   const insets = useSafeAreaInsets()
-  const bottomOffset = TAB_BAR_HEIGHT + insets.bottom
+  const bottomOffset = TAB_BAR_CONTENT_HEIGHT + Math.max(insets.bottom, 0)
 
   const track = useGlobalAudioStore((s) => s.track)
   const session = useGlobalAudioStore((s) => s.engagedSession)
@@ -80,7 +78,7 @@ export function NowPlayingBar() {
         </Pressable>
 
         <Pressable
-          onPress={() => router.push(`/(tabs)/inbox/${miniTrack.conversationId}`)}
+          onPress={() => router.push(`/conversation/${miniTrack.conversationId}`)}
           className="min-w-0 flex-1"
         >
           <Text numberOfLines={1} className="text-sm font-semibold text-white">
