@@ -86,8 +86,8 @@ export function MediaMessage({
   if (pending && !localPreview && !displayUrl) {
     return (
       <MediaPlaceholder minHeight={message.type === 'audio' ? 40 : 140}>
-        <ActivityIndicator color="#128C7E" />
-        <Text className="mt-2 text-sm text-neutral-500">
+        <ActivityIndicator color="#00A884" />
+        <Text className="mt-2 text-sm text-neutral-500 dark:text-neutral-400">
           {retrying ? 'Retrying…' : 'Downloading…'}
         </Text>
         <Pressable
@@ -122,7 +122,7 @@ export function MediaMessage({
   if (!displayUrl && isLoading) {
     return (
       <MediaPlaceholder minHeight={message.type === 'audio' ? 40 : FALLBACK_MEDIA_HEIGHT}>
-        <ActivityIndicator color="#128C7E" />
+        <ActivityIndicator color="#00A884" />
       </MediaPlaceholder>
     )
   }
@@ -139,7 +139,7 @@ export function MediaMessage({
     if (!displayUrl) {
       return (
         <MediaPlaceholder minHeight={FALLBACK_MEDIA_HEIGHT}>
-          <Text className="text-sm text-neutral-500">Photo unavailable</Text>
+          <Text className="text-sm text-neutral-500 dark:text-neutral-400">Photo unavailable</Text>
         </MediaPlaceholder>
       )
     }
@@ -168,7 +168,7 @@ export function MediaMessage({
     if (!displayUrl) {
       return (
         <MediaPlaceholder minHeight={140}>
-          <Text className="text-sm text-neutral-500">Video unavailable</Text>
+          <Text className="text-sm text-neutral-500 dark:text-neutral-400">Video unavailable</Text>
         </MediaPlaceholder>
       )
     }
@@ -205,7 +205,7 @@ export function MediaMessage({
     if (!displayUrl) {
       return (
         <MediaPlaceholder minHeight={48}>
-          <Text className="text-sm text-neutral-500">Voice unavailable</Text>
+          <Text className="text-sm text-neutral-500 dark:text-neutral-400">Voice unavailable</Text>
         </MediaPlaceholder>
       )
     }
@@ -253,16 +253,16 @@ export function MediaMessage({
     >
       <View className="h-10 w-10 items-center justify-center rounded-full bg-wa-teal/15">
         {openingDoc ? (
-          <ActivityIndicator color="#128C7E" size="small" />
+          <ActivityIndicator color="#00A884" size="small" />
         ) : (
           <DocumentIcon size={22} />
         )}
       </View>
       <View className="flex-1">
-        <Text numberOfLines={1} className="text-sm font-semibold text-neutral-800">
+        <Text numberOfLines={1} className="text-sm font-semibold text-neutral-800 dark:text-neutral-200">
           {message.mediaFilename ?? 'Document'}
         </Text>
-        <Text className="mt-0.5 text-xs text-neutral-500">Tap to open</Text>
+        <Text className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">Tap to open</Text>
       </View>
     </Pressable>
   )

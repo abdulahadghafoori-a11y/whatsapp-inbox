@@ -48,7 +48,7 @@ export function LocationMapView({
       pitchEnabled={false}
     >
       {showMarker ? (
-        <Marker coordinate={{ latitude, longitude }} pinColor="#128C7E" />
+        <Marker coordinate={{ latitude, longitude }} pinColor="#00A884" />
       ) : null}
     </MapView>
   )

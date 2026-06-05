@@ -50,6 +50,8 @@ export const errors = {
     new AppError('TOKEN_REVOKED', 'Your session was revoked. Please log in again.', 401),
   rateLimited: () =>
     new AppError('RATE_LIMITED', 'Too many messages. Slow down.', 429),
+  loginThrottled: () =>
+    new AppError('RATE_LIMITED', 'Too many login attempts. Please try again later.', 429),
   unauthorized: (message = 'Unauthorized') =>
     new AppError('UNAUTHORIZED', message, 401),
   forbidden: (message = 'Forbidden') => new AppError('FORBIDDEN', message, 403),

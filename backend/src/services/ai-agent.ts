@@ -14,10 +14,47 @@ import { config } from '../config.js'
 import { createOutboundText } from './outbound.js'
 import { emitConversationUpdated } from './socket-events.js'
 import { routeConversation } from './router.js'
+import { isCustomerServiceWindowOpen } from '../utils/messaging-windows.js'
 
 const client = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY })
 
 const DEFAULT_MODEL = 'claude-haiku-4-5-20251001'
+
+/**
+ * Hands an AI-owned conversation back to a human: clears assignment, locks out
+ * further AI routing, records an audit event, and re-routes to a human agent.
+ */
+async function escalateToHuman(
+  io: SocketIOServer,
+  log: FastifyBaseLogger,
+  conversationId: string,
+  actorId: string,
+  reason: string,
+): Promise<void> {
+  await db
+    .update(conversations)
+    .set({
+      handoffRequestedAt: new Date(),
+      handoffReason: reason,
+      assignedTo: null,
+      routingLock: 'human_only',
+    })
+    .where(eq(conversations.id, conversationId))
+
+  await db.insert(conversationEvents).values({
+    conversationId,
+    actorId,
+    type: 'handoff',
+    payload: { reason },
+  })
+
+  emitConversationUpdated(io, conversationId)
+
+  const fresh = await db.query.conversations.findFirst({
+    where: eq(conversations.id, conversationId),
+  })
+  if (fresh) await routeConversation(fresh, io, log)
+}
 
 /**
  * Generates and sends an AI reply for a conversation. Detects the `ESCALATE:`
@@ -48,11 +85,37 @@ export async function processAIAgentReply(
     return
   }
 
+  // A human may have taken over (or escalation locked the thread) between enqueue
+  // and execution. Don't let a stale AI job overwrite a human-owned conversation.
+  if (conversation.routingLock === 'human_only' || conversation.assignedTo !== job.agentId) {
+    log.info(
+      { conversationId: job.conversationId, assignedTo: conversation.assignedTo },
+      'ai reply skipped; conversation no longer AI-owned',
+    )
+    return
+  }
+
   const recent = await db.query.messages.findMany({
     where: eq(messages.conversationId, job.conversationId),
     orderBy: desc(messages.sentAt),
     limit: 15,
   })
+
+  // Coalesce duplicate jobs: if the latest message is already an AI/outbound
+  // reply, the pending inbound has been answered — nothing to do.
+  if (recent.length > 0 && recent[0].direction === 'outbound') {
+    log.debug({ conversationId: job.conversationId }, 'ai reply skipped; already answered')
+    return
+  }
+
+  // Free-form session replies require an open customer service window.
+  if (!isCustomerServiceWindowOpen(conversation.windowExpiresAt)) {
+    log.info(
+      { conversationId: job.conversationId },
+      'ai reply skipped; customer service window closed',
+    )
+    return
+  }
 
   const systemPrompt = `${cfg.systemPrompt ?? 'You are a helpful sales assistant.'}
 
@@ -73,43 +136,42 @@ respond with exactly: ESCALATE:<reason>`
 
   if (history.length === 0) return
 
-  const response = await client.messages.create({
-    model: cfg.model ?? DEFAULT_MODEL,
-    max_tokens: 500,
-    temperature: cfg.temperature ?? 0.7,
-    system: systemPrompt,
-    messages: history,
-  })
-
-  const first = response.content[0]
-  const replyText = first && first.type === 'text' ? first.text : ''
+  let replyText = ''
+  try {
+    const response = await client.messages.create({
+      model: cfg.model ?? DEFAULT_MODEL,
+      max_tokens: 500,
+      temperature: cfg.temperature ?? 0.7,
+      system: systemPrompt,
+      messages: history,
+    })
+    const first = response.content[0]
+    replyText = first && first.type === 'text' ? first.text : ''
+  } catch (err) {
+    // LLM failure (bad key, rate limit, outage): hand off to a human instead of
+    // leaving the customer with no reply. Was: uncaught -> job retried then
+    // permanently failed silently with the conversation stuck on the AI.
+    log.error({ err, conversationId: job.conversationId }, 'ai reply generation failed')
+    await escalateToHuman(
+      io,
+      log,
+      job.conversationId,
+      job.agentId,
+      'AI reply generation failed',
+    )
+    return
+  }
 
   if (replyText.startsWith('ESCALATE:')) {
     const reason = replyText.replace('ESCALATE:', '').trim()
-    await db
-      .update(conversations)
-      .set({
-        handoffRequestedAt: new Date(),
-        handoffReason: reason,
-        assignedTo: null,
-        routingLock: 'human_only',
-      })
-      .where(eq(conversations.id, job.conversationId))
+    await escalateToHuman(io, log, job.conversationId, job.agentId, reason)
+    return
+  }
 
-    await db.insert(conversationEvents).values({
-      conversationId: job.conversationId,
-      actorId: job.agentId,
-      type: 'handoff',
-      payload: { reason },
-    })
-
-    emitConversationUpdated(io, job.conversationId)
-
-    // Refetch the (now-unassigned, human_only) row before re-routing to a human.
-    const fresh = await db.query.conversations.findFirst({
-      where: eq(conversations.id, job.conversationId),
-    })
-    if (fresh) await routeConversation(fresh, io, log)
+  if (!replyText.trim()) {
+    // Empty/non-text model output: escalate rather than send a blank message.
+    log.warn({ conversationId: job.conversationId }, 'ai produced empty reply; escalating')
+    await escalateToHuman(io, log, job.conversationId, job.agentId, 'AI produced no reply')
     return
   }
 

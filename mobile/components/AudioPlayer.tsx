@@ -7,6 +7,7 @@ import {
   ActivityIndicator,
   type LayoutChangeEvent,
 } from 'react-native'
+import { Ionicons } from '@expo/vector-icons'
 import { useGlobalAudioStore } from '@/stores/globalAudioStore'
 import { useAudioDuration } from '@/hooks/useAudioDuration'
 import { getAudioDuration } from '@/lib/audioDurationCache'
@@ -56,9 +57,16 @@ export function AudioPlayer({
   const [scrubRatio, setScrubRatio] = useState(0)
   const [resolving, setResolving] = useState(false)
 
-  const playBg = variant === 'outbound' ? 'bg-wa-dark' : 'bg-wa-teal'
-  const waveActive = variant === 'outbound' ? 'bg-wa-dark/75' : 'bg-wa-teal'
-  const waveIdle = variant === 'outbound' ? 'bg-wa-dark/20' : 'bg-neutral-300'
+  // Outbound bubbles are green (light) / dark-green (dark); a green play button
+  // disappears against them. Use a high-contrast white disc with a dark glyph on
+  // outbound, and the brand teal disc with a white glyph on inbound.
+  const outbound = variant === 'outbound'
+  const playCircleClass = outbound ? 'bg-white' : 'bg-wa-teal'
+  const playIconColor = outbound ? '#075E54' : '#ffffff'
+  const waveActive = outbound ? 'bg-wa-teal dark:bg-white' : 'bg-wa-teal'
+  const waveIdle = outbound
+    ? 'bg-wa-teal/25 dark:bg-white/30'
+    : 'bg-neutral-300 dark:bg-neutral-600'
 
   const durationMs =
     session?.durationMs ||
@@ -170,13 +178,18 @@ export function AudioPlayer({
         disabled={loading}
         accessibilityRole="button"
         accessibilityLabel={isPlaying ? 'Pause' : 'Play'}
-        className={`shrink-0 items-center justify-center rounded-full ${playBg}`}
+        className={`shrink-0 items-center justify-center rounded-full ${playCircleClass}`}
         style={{ width: PLAY_SIZE, height: PLAY_SIZE, borderRadius: PLAY_SIZE / 2 }}
       >
         {loading ? (
-          <ActivityIndicator color="#fff" size="small" />
+          <ActivityIndicator color={playIconColor} size="small" />
         ) : (
-          <Text className="ml-0.5 text-[15px] text-white">{isPlaying ? '❚❚' : '▶'}</Text>
+          <Ionicons
+            name={isPlaying ? 'pause' : 'play'}
+            size={18}
+            color={playIconColor}
+            style={{ marginLeft: isPlaying ? 0 : 2 }}
+          />
         )}
       </Pressable>
 
@@ -200,9 +213,15 @@ export function AudioPlayer({
         })}
       </View>
 
-      <PlaybackSpeedButton variant="bubble" />
+      <PlaybackSpeedButton variant="bubble" outbound={outbound} />
 
-      <Text className="min-w-[34px] text-right text-[12px] tabular-nums text-neutral-600">
+      <Text
+        className={`min-w-[34px] text-right text-[12px] tabular-nums ${
+          outbound
+            ? 'text-neutral-700 dark:text-white/80'
+            : 'text-neutral-600 dark:text-neutral-400'
+        }`}
+      >
         {timeLabel}
       </Text>
     </View>

@@ -9,6 +9,7 @@ import { processAIAgentReply } from '../services/ai-agent.js'
 import { sendPushNotification } from '../services/push-notifications.js'
 import type { JobPayloads } from '../services/jobs.js'
 import { emitMediaFailed, emitMessageStatus } from '../services/socket-events.js'
+import { captureException } from '../utils/observability.js'
 
 const POLL_INTERVAL_MS = 5000
 const BATCH_SIZE = 10
@@ -100,6 +101,7 @@ async function runJob(app: FastifyInstance, job: Job): Promise<void> {
 
     if (exhausted) {
       log.error({ err: message, attempts: job.attempts }, 'job failed permanently')
+      captureException(err, { jobId: job.id, jobType: job.type, attempts: job.attempts })
       await onPermanentFailure(app, job)
     } else {
       log.warn({ err: message, attempts: job.attempts }, 'job failed; will retry')
@@ -138,32 +140,101 @@ async function handleSendMessage(
   app: FastifyInstance,
   p: JobPayloads['send_whatsapp_message'],
 ): Promise<void> {
-  let result: { message_id: string }
-  if (p.type === 'text') {
-    result = await whatsapp.sendTextMessage(app.log, p.to, p.body ?? '', {
-      replyToWaMessageId: p.replyToWaMessageId,
-    })
-  } else if (p.type === 'location' && p.location) {
-    result = await whatsapp.sendLocationMessage(app.log, p.to, p.location, {
-      replyToWaMessageId: p.replyToWaMessageId,
-    })
-  } else {
-    const mediaOpts: { voice?: boolean; replyToWaMessageId?: string } = {}
-    if (p.replyToWaMessageId) mediaOpts.replyToWaMessageId = p.replyToWaMessageId
-    if (p.type === 'audio' && p.voiceNote) mediaOpts.voice = true
-    result = await whatsapp.sendMediaMessage(
-      app.log,
-      p.to,
-      p.type,
-      p.mediaId ?? '',
-      p.caption,
-      mediaOpts,
+  const existing = await db.query.messages.findFirst({
+    where: eq(messages.id, p.messageId),
+    columns: { waMessageId: true, status: true, metadata: true },
+  })
+  if (!existing) throw new Error(`Message ${p.messageId} not found`)
+  // Was: job retry called Graph API again after WA success — duplicate customer messages.
+  if (existing.waMessageId) {
+    app.log.info({ messageId: p.messageId, waMessageId: existing.waMessageId }, 'skip duplicate send')
+    return
+  }
+
+  const meta = (existing.metadata as Record<string, unknown> | null) ?? {}
+  // An in-flight marker survives only if a prior attempt reached the Graph API but
+  // never recorded the result (crash between WA success and DB write). WhatsApp has
+  // no client idempotency key, so resending could duplicate the customer message —
+  // fail safe instead and let an agent verify/resend.
+  if (meta.sendInFlightAt) {
+    app.log.error(
+      { messageId: p.messageId },
+      'send had an in-flight attempt with no result; failing to avoid duplicate',
     )
+    await db
+      .update(messages)
+      .set({
+        status: 'failed',
+        errorMessage:
+          'Previous send may have completed but was interrupted. Verify the chat and resend if needed.',
+      })
+      .where(eq(messages.id, p.messageId))
+    emitMessageStatus(app.io, {
+      conversationId: p.conversationId,
+      messageId: p.messageId,
+      status: 'failed',
+    })
+    return
+  }
+
+  // Mark in-flight before the API call. Cleared on a thrown error (message not
+  // sent -> safe to retry); left set if the process dies mid-send.
+  await db
+    .update(messages)
+    .set({ metadata: { ...meta, sendInFlightAt: new Date().toISOString() } })
+    .where(eq(messages.id, p.messageId))
+
+  let result: { message_id: string }
+  try {
+    if (p.type === 'template') {
+      if (!p.templateName || !p.languageCode) {
+        throw new Error('Template name and language required')
+      }
+      result = await whatsapp.sendTemplateMessage(
+        app.log,
+        p.to,
+        p.templateName,
+        p.languageCode,
+        p.components,
+      )
+    } else if (p.type === 'text') {
+      result = await whatsapp.sendTextMessage(app.log, p.to, p.body ?? '', {
+        replyToWaMessageId: p.replyToWaMessageId,
+      })
+    } else if (p.type === 'location' && p.location) {
+      result = await whatsapp.sendLocationMessage(app.log, p.to, p.location, {
+        replyToWaMessageId: p.replyToWaMessageId,
+      })
+    } else {
+      const mediaOpts: { voice?: boolean; replyToWaMessageId?: string } = {}
+      if (p.replyToWaMessageId) mediaOpts.replyToWaMessageId = p.replyToWaMessageId
+      if (p.type === 'audio' && p.voiceNote) mediaOpts.voice = true
+      result = await whatsapp.sendMediaMessage(
+        app.log,
+        p.to,
+        p.type,
+        p.mediaId ?? '',
+        p.caption,
+        mediaOpts,
+      )
+    }
+
+    if (!result.message_id?.trim()) {
+      throw new Error('WhatsApp API returned empty message_id')
+    }
+  } catch (err) {
+    // The Graph call errored (after its internal retries). Treat as not-sent and
+    // clear the marker so the job can retry cleanly.
+    await db
+      .update(messages)
+      .set({ metadata: meta })
+      .where(eq(messages.id, p.messageId))
+    throw err
   }
 
   await db
     .update(messages)
-    .set({ waMessageId: result.message_id, status: 'sent' })
+    .set({ waMessageId: result.message_id, status: 'sent', metadata: meta })
     .where(eq(messages.id, p.messageId))
 
   emitMessageStatus(app.io, {

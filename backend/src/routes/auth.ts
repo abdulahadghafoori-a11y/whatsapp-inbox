@@ -2,12 +2,19 @@ import { randomBytes } from 'node:crypto'
 import type { FastifyInstance } from 'fastify'
 import bcrypt from 'bcryptjs'
 import { z } from 'zod'
-import { eq } from 'drizzle-orm'
+import { and, eq, isNull } from 'drizzle-orm'
 import { db } from '../db/index.js'
 import { refreshTokens, teamMembers, type TeamMember } from '../db/schema.js'
 import { errors } from '../utils/errors.js'
+import { BCRYPT_ROUNDS } from '../utils/bcrypt.js'
+import { LoginThrottle } from '../utils/login-throttle.js'
 
 const REFRESH_TTL_DAYS = 30
+
+/** Constant-time decoy: compared against when the email is unknown. */
+const DUMMY_BCRYPT_HASH = bcrypt.hashSync('login-timing-decoy', BCRYPT_ROUNDS)
+
+const loginThrottle = new LoginThrottle()
 
 function publicAgent(m: TeamMember) {
   return {
@@ -25,7 +32,7 @@ async function issueTokens(app: FastifyInstance, member: TeamMember) {
   const accessToken = await app.jwt.sign({ sub: member.id, role: member.role as 'admin' | 'agent' | 'ai_agent' })
 
   const secret = randomBytes(64).toString('hex')
-  const tokenHash = await bcrypt.hash(secret, 10)
+  const tokenHash = await bcrypt.hash(secret, BCRYPT_ROUNDS)
   const expiresAt = new Date(Date.now() + REFRESH_TTL_DAYS * 24 * 60 * 60 * 1000)
 
   const [row] = await db
@@ -44,24 +51,58 @@ const loginSchema = z.object({
 const refreshSchema = z.object({ refreshToken: z.string().min(1) })
 
 export async function authRoutes(app: FastifyInstance) {
-  app.post('/login', async (request) => {
+  // Was: only global 100/min — dedicated limit reduces brute-force on credentials.
+  app.post(
+    '/login',
+    {
+      config: {
+        // IP-only here (keyGenerator runs before body parse). Per-email throttle
+        // is enforced in the handler via registerLoginAttempt.
+        rateLimit: {
+          max: 30,
+          timeWindow: '15 minutes',
+          keyGenerator: (req) => req.ip,
+        },
+      },
+    },
+    async (request) => {
     const { email, password } = loginSchema.parse(request.body)
+    const normalizedEmail = email.toLowerCase()
+    const throttleKey = `${request.ip}:${normalizedEmail}`
+    if (!loginThrottle.register(throttleKey)) {
+      throw errors.loginThrottled()
+    }
 
     const member = await db.query.teamMembers.findFirst({
-      where: eq(teamMembers.email, email.toLowerCase()),
+      where: eq(teamMembers.email, normalizedEmail),
     })
-    // ai_agent rows have no password and cannot log in.
-    if (!member || member.role === 'ai_agent' || !member.passwordHash) {
+    // ai_agent rows have no password and cannot log in. Always run a bcrypt
+    // compare (against a dummy hash for unknown users) to avoid a timing
+    // side-channel that reveals whether an email exists.
+    const passwordHash = member?.passwordHash ?? DUMMY_BCRYPT_HASH
+    const ok = await bcrypt.compare(password, passwordHash)
+    if (!member || member.role === 'ai_agent' || !member.passwordHash || !ok) {
       throw errors.unauthorized('Invalid credentials.')
     }
-    const ok = await bcrypt.compare(password, member.passwordHash)
-    if (!ok) throw errors.unauthorized('Invalid credentials.')
 
+    loginThrottle.clear(throttleKey)
     const tokens = await issueTokens(app, member)
     return { ...tokens, agent: publicAgent(member) }
-  })
+    },
+  )
 
-  app.post('/refresh', async (request) => {
+  app.post(
+    '/refresh',
+    {
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: '15 minutes',
+          keyGenerator: (req) => req.ip,
+        },
+      },
+    },
+    async (request) => {
     const { refreshToken } = refreshSchema.parse(request.body)
     const [id, secret] = refreshToken.split('.')
     if (!id || !secret) throw errors.unauthorized('Malformed refresh token.')
@@ -96,24 +137,54 @@ export async function authRoutes(app: FastifyInstance) {
     })
     if (!member) throw errors.unauthorized('Account no longer exists.')
 
-    // Rotate: revoke the presented token, issue a fresh pair.
-    await db
+    // Honor a global session revoke (admin offboarding / reuse detection) even if
+    // this particular refresh row was not individually revoked.
+    if (member.tokenRevokedAt && row.createdAt.getTime() < member.tokenRevokedAt.getTime()) {
+      throw errors.unauthorized('Session revoked. Please log in again.')
+    }
+
+    // Rotate atomically: the neon-http driver has no interactive transactions, so
+    // we revoke with `WHERE revoked_at IS NULL` and require exactly one row. Two
+    // concurrent refreshes with the same token now have a single winner; the loser
+    // matches zero rows and is treated as reuse.
+    const claimed = await db
       .update(refreshTokens)
       .set({ revokedAt: new Date() })
-      .where(eq(refreshTokens.id, row.id))
+      .where(and(eq(refreshTokens.id, row.id), isNull(refreshTokens.revokedAt)))
+      .returning({ id: refreshTokens.id })
+
+    if (claimed.length === 0) {
+      await db
+        .update(refreshTokens)
+        .set({ revokedAt: new Date() })
+        .where(eq(refreshTokens.teamMemberId, row.teamMemberId))
+      await db
+        .update(teamMembers)
+        .set({ tokenRevokedAt: new Date() })
+        .where(eq(teamMembers.id, row.teamMemberId))
+      throw errors.unauthorized('Refresh token reuse detected. Please log in again.')
+    }
 
     return issueTokens(app, member)
-  })
+    },
+  )
 
   app.post('/logout', async (request) => {
     const parsed = refreshSchema.safeParse(request.body)
     if (parsed.success) {
-      const [id] = parsed.data.refreshToken.split('.')
-      if (id) {
-        await db
-          .update(refreshTokens)
-          .set({ revokedAt: new Date() })
-          .where(eq(refreshTokens.id, id))
+      const [id, secret] = parsed.data.refreshToken.split('.')
+      if (id && secret) {
+        // Verify the secret before revoking so a known/guessed token id can't be
+        // used to terminate another agent's session.
+        const row = await db.query.refreshTokens.findFirst({
+          where: eq(refreshTokens.id, id),
+        })
+        if (row && (await bcrypt.compare(secret, row.tokenHash))) {
+          await db
+            .update(refreshTokens)
+            .set({ revokedAt: new Date() })
+            .where(eq(refreshTokens.id, id))
+        }
       }
     }
     return { ok: true }

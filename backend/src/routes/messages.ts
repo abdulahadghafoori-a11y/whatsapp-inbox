@@ -1,8 +1,8 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { and, desc, eq } from 'drizzle-orm'
+import { and, desc, eq, ilike, isNull, lt } from 'drizzle-orm'
 import { db } from '../db/index.js'
-import { conversations, messages } from '../db/schema.js'
+import { conversations, contacts, messages } from '../db/schema.js'
 import { enqueueJob } from '../services/jobs.js'
 import { errors } from '../utils/errors.js'
 import { isMediaMessageType, waMediaIdFromMetadata } from '../utils/wa-media.js'
@@ -13,6 +13,57 @@ import {
 
 export async function messageRoutes(app: FastifyInstance) {
   app.addHook('preHandler', app.authenticate)
+
+  // GET /api/messages/search?q=...  — global message-content search across all
+  // (non-deleted) conversations. Returns matches with conversation/contact context.
+  app.get('/search', async (request) => {
+    const q = z
+      .object({
+        q: z.string().trim().min(1).max(200),
+        cursor: z.string().datetime().optional(),
+      })
+      .parse(request.query)
+
+    const term = `%${q.q}%`
+    const conds = [ilike(messages.body, term), isNull(conversations.deletedAt)]
+    if (q.cursor) conds.push(lt(messages.sentAt, new Date(q.cursor)))
+
+    const PAGE = 30
+    const rows = await db
+      .select({
+        id: messages.id,
+        conversationId: messages.conversationId,
+        body: messages.body,
+        direction: messages.direction,
+        type: messages.type,
+        sentAt: messages.sentAt,
+        contactName: contacts.name,
+        contactWaId: contacts.waId,
+      })
+      .from(messages)
+      .innerJoin(conversations, eq(messages.conversationId, conversations.id))
+      .innerJoin(contacts, eq(conversations.contactId, contacts.id))
+      .where(and(...conds))
+      .orderBy(desc(messages.sentAt))
+      .limit(PAGE + 1)
+
+    const hasMore = rows.length > PAGE
+    const page = rows.slice(0, PAGE)
+    const last = page[page.length - 1]?.sentAt
+    return {
+      results: page.map((r) => ({
+        messageId: r.id,
+        conversationId: r.conversationId,
+        body: r.body,
+        direction: r.direction,
+        type: r.type,
+        sentAt: r.sentAt,
+        contactName: r.contactName ?? r.contactWaId,
+        contactWaId: r.contactWaId,
+      })),
+      nextCursor: hasMore && last ? last.toISOString() : null,
+    }
+  })
 
   // POST /api/messages/media/:messageId/retry — re-download from WhatsApp → S3
   app.post('/media/:messageId/retry', async (request) => {

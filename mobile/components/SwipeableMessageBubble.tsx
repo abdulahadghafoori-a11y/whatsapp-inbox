@@ -1,8 +1,8 @@
 import { memo, useCallback, useRef } from 'react'
 import { Animated, Pressable, View } from 'react-native'
 import Swipeable from 'react-native-gesture-handler/Swipeable'
+import { Ionicons } from '@expo/vector-icons'
 import { MessageBubble } from '@/components/MessageBubble'
-import { ReplySwipeIcon } from '@/components/ChatIcons'
 import type { MessageAnchor } from '@/components/MessageActionsOverlay'
 import type { Message } from '@/types'
 
@@ -86,10 +86,10 @@ function SwipeableMessageBubbleBase({
           <Pressable
             onPress={triggerReply}
             hitSlop={12}
-            className="h-10 w-10 items-center justify-center rounded-full bg-wa-teal/15"
+            className="h-10 w-10 items-center justify-center rounded-full bg-wa-teal/15 dark:bg-wa-green/20"
             accessibilityLabel="Reply"
           >
-            <ReplySwipeIcon size={24} color="#128C7E" />
+            <Ionicons name="arrow-undo" size={22} color="#008069" />
           </Pressable>
         </Animated.View>
       )
@@ -130,7 +130,7 @@ function SwipeableMessageBubbleBase({
           if (direction === 'left') triggerReply()
         }}
       >
-        <View className="bg-wa-bg">{bubble}</View>
+        <View className="bg-wa-bg dark:bg-wa-chatDark">{bubble}</View>
       </Swipeable>
     </View>
   )

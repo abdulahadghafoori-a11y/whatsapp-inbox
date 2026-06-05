@@ -6,10 +6,15 @@ vi.mock('../config.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../config.js')>()
   return {
     ...actual,
-    config: { ...actual.config, WEBHOOK_SKIP_SIGNATURE: false },
+    config: { ...actual.config, WEBHOOK_SKIP_SIGNATURE: false, WHATSAPP_APP_SECRET: 'test_app_secret' },
     isProd: false,
   }
 })
+
+vi.mock('../services/webhook-inbox.js', () => ({
+  persistWebhookPayload: vi.fn(async () => '00000000-0000-4000-8000-000000000001'),
+  processWebhookEvent: vi.fn(async () => undefined),
+}))
 
 import { webhookRoutes } from './webhook.js'
 

@@ -9,6 +9,9 @@ export type MessageType =
   | 'document'
   | 'sticker'
   | 'location'
+  | 'contacts'
+  | 'interactive'
+  | 'button'
 export type MessageStatus =
   | 'pending'
   | 'sent'

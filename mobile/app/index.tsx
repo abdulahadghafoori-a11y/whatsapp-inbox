@@ -4,8 +4,8 @@ import { View, ActivityIndicator } from 'react-native'
 // the correct group based on stored credentials.
 export default function Index() {
   return (
-    <View className="flex-1 items-center justify-center bg-white">
-      <ActivityIndicator size="large" color="#128C7E" />
+    <View className="flex-1 items-center justify-center bg-[#F7F8FA] dark:bg-wa-panelDeep">
+      <ActivityIndicator size="large" color="#00A884" />
     </View>
   )
 }

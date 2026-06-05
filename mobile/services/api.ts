@@ -5,6 +5,9 @@ import axios, {
 } from 'axios'
 import { useAuthStore } from '@/stores/authStore'
 import { reauthSocket } from '@/lib/socket'
+import { assertProductionTransportSecurity } from '@/lib/transportSecurity'
+
+assertProductionTransportSecurity()
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:3001'
 

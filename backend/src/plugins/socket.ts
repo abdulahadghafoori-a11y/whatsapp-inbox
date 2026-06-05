@@ -2,7 +2,7 @@ import fp from 'fastify-plugin'
 import { Server as SocketIOServer } from 'socket.io'
 import { eq } from 'drizzle-orm'
 import { db } from '../db/index.js'
-import { teamMembers } from '../db/schema.js'
+import { conversations, teamMembers } from '../db/schema.js'
 import { assertNotRevoked, type AccessTokenPayload } from '../utils/jwt.js'
 import { corsOrigins } from '../config.js'
 
@@ -40,16 +40,48 @@ export const socketPlugin = fp(async (app) => {
     await markPresence(agentId, true)
     io.emit('agent_online', { agentId })
 
-    socket.on('join_conversation', (conversationId: string) => {
-      if (typeof conversationId === 'string') {
-        socket.join(`conversation:${conversationId}`)
-      }
+    // Was: join any UUID — now verify conversation exists before entering room.
+    socket.on('join_conversation', async (conversationId: string) => {
+      if (typeof conversationId !== 'string') return
+      const uuid =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+          conversationId,
+        )
+      if (!uuid) return
+      const row = await db.query.conversations.findFirst({
+        where: eq(conversations.id, conversationId),
+        columns: { id: true },
+      })
+      if (!row) return
+      socket.join(`conversation:${conversationId}`)
     })
 
     socket.on('leave_conversation', (conversationId: string) => {
       if (typeof conversationId === 'string') {
         socket.leave(`conversation:${conversationId}`)
       }
+    })
+
+    const emitTyping = async (conversationId: string, typing: boolean) => {
+      if (typeof conversationId !== 'string') return
+      const member = await db.query.teamMembers.findFirst({
+        where: eq(teamMembers.id, agentId),
+        columns: { name: true },
+      })
+      socket.to(`conversation:${conversationId}`).emit('typing_indicator', {
+        conversationId,
+        agentId,
+        agentName: member?.name ?? 'Agent',
+        typing,
+      })
+    }
+
+    socket.on('typing_start', (conversationId: string) => {
+      void emitTyping(conversationId, true)
+    })
+
+    socket.on('typing_stop', (conversationId: string) => {
+      void emitTyping(conversationId, false)
     })
 
     // Optional heartbeat to refine presence (see plan: optional for v1).

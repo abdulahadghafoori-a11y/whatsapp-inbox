@@ -3,6 +3,14 @@ import type { VoiceRecording } from '@/lib/voiceRecording'
 import { meteringToLevel } from '@/lib/metering'
 
 const DEFAULT_BARS = 32
+/**
+ * One bar per ~65ms. WhatsApp scrolls the live waveform at roughly this rate,
+ * so each bar maps to a consistent slice of speech — that's what makes it read
+ * as "in sync" with your voice (vs. one bar per render frame, which scrolls
+ * ~4x too fast and looks like noise).
+ */
+const SAMPLE_MS = 65
+const IDLE = 0.12
 
 export function useVoiceMetering(
   recorder: VoiceRecording | null,
@@ -10,15 +18,15 @@ export function useVoiceMetering(
   barCount: number = DEFAULT_BARS,
 ): number[] {
   const count = Math.max(16, barCount)
-  const [levels, setLevels] = useState<number[]>(() => Array(count).fill(0.12))
-  const phase = useRef(0)
+  const [levels, setLevels] = useState<number[]>(() => Array(count).fill(IDLE))
   const levelsRef = useRef(levels)
+  const smoothed = useRef(IDLE)
 
   useEffect(() => {
-    const idle = Array(count).fill(0.12)
+    const idle = Array(count).fill(IDLE)
     levelsRef.current = idle
+    smoothed.current = IDLE
     setLevels(idle)
-    phase.current = 0
   }, [count])
 
   useEffect(() => {
@@ -28,28 +36,30 @@ export function useVoiceMetering(
   useEffect(() => {
     if (!active || !recorder) return
 
-    let raf = 0
     const tick = () => {
-      let level = 0.12
+      let level = IDLE
       try {
         const status = recorder.getStatus()
         level = meteringToLevel(status.metering)
       } catch {
-        phase.current += 0.28
-        level = 0.12 + Math.abs(Math.sin(phase.current)) * 0.08
+        level = IDLE
       }
+      // Light attack/decay smoothing keeps the trace fluid instead of jittery.
+      const prevSmooth = smoothed.current
+      const next = level > prevSmooth ? prevSmooth + (level - prevSmooth) * 0.6 : prevSmooth + (level - prevSmooth) * 0.4
+      smoothed.current = next
+
       const prev = levelsRef.current
-      const next =
+      const updated =
         prev.length === count
-          ? [...prev.slice(1), level]
-          : [...Array(count - 1).fill(0.12), level]
-      levelsRef.current = next
-      setLevels(next)
-      raf = requestAnimationFrame(tick)
+          ? [...prev.slice(1), next]
+          : [...Array(count - 1).fill(IDLE), next]
+      levelsRef.current = updated
+      setLevels(updated)
     }
 
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
+    const id = setInterval(tick, SAMPLE_MS)
+    return () => clearInterval(id)
   }, [active, recorder, count])
 
   return levels

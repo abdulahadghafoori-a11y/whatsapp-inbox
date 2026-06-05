@@ -36,6 +36,7 @@ export function useMessageMedia(message: MessageMediaInput) {
 
   const { data: remoteUrl, isLoading: remoteLoading, isError: remoteError } = useMediaUrl(
     hasRemoteKey && !cachedUri && !message.localPreviewUri ? message.mediaUrl : null,
+    message.id,
   )
 
   const displayUrl = useMemo(() => {

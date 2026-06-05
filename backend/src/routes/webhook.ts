@@ -1,7 +1,8 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { config, isProd } from '../config.js'
-import { processWebhookPayload } from '../services/webhook-processor.js'
+import { persistWebhookPayload, processWebhookEvent } from '../services/webhook-inbox.js'
+import { secureCompareStrings } from '../utils/secure-compare.js'
 
 /**
  * WhatsApp webhook.
@@ -36,7 +37,13 @@ export async function webhookRoutes(app: FastifyInstance) {
     const token = q['hub.verify_token']
     const challenge = q['hub.challenge']
 
-    if (mode === 'subscribe' && token === config.WHATSAPP_WEBHOOK_VERIFY_TOKEN) {
+    // Was: `token === verifyToken` — replaced with constant-time compare.
+    if (
+      mode === 'subscribe' &&
+      token &&
+      challenge &&
+      secureCompareStrings(token, config.WHATSAPP_WEBHOOK_VERIFY_TOKEN)
+    ) {
       return reply.code(200).type('text/plain').send(challenge)
     }
     return reply.code(403).send({ error: 'Verification failed', code: 'INVALID_SIGNATURE', statusCode: 403 })
@@ -66,12 +73,13 @@ export async function webhookRoutes(app: FastifyInstance) {
       app.log.warn('webhook accepted without x-hub-signature-256 (WEBHOOK_SKIP_SIGNATURE)')
     }
 
-    // Ack immediately, then process out of band. Never let processing crash the route.
+    // Was: 200 before DB — events lost on crash. Now persist first, then ack, then process.
+    const eventId = await persistWebhookPayload(request.body as unknown)
     reply.code(200).send({ received: true })
 
     setImmediate(() => {
-      processWebhookPayload(app, request.body as unknown).catch((err) => {
-        app.log.error({ err }, 'webhook processing failed')
+      processWebhookEvent(app, eventId, request.body as unknown).catch((err) => {
+        app.log.error({ err, eventId }, 'webhook processing failed')
       })
     })
   })

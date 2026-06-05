@@ -10,7 +10,10 @@ export type JobType =
 export interface JobPayloads {
   send_whatsapp_message: {
     to: string
-    type: 'text' | 'image' | 'video' | 'audio' | 'document' | 'sticker' | 'location'
+    type: 'text' | 'image' | 'video' | 'audio' | 'document' | 'sticker' | 'location' | 'template'
+    templateName?: string
+    languageCode?: string
+    components?: unknown[]
     conversationId: string
     messageId: string // local message row to update with wa id / status
     body?: string

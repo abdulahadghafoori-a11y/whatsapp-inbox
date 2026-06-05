@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Pressable, Text, View, StyleSheet } from 'react-native'
+import { useColorScheme } from 'nativewind'
 import { MessageSendingOverlay } from '@/components/MessageSendingOverlay'
 import { LocationDetailSheet } from '@/components/LocationDetailSheet'
 import { LocationMapView } from '@/components/LocationMapView'
@@ -12,6 +13,8 @@ const MAP_H = 150
 
 export function LocationMessage({ message }: { message: Message }) {
   const [detailOpen, setDetailOpen] = useState(false)
+  const { colorScheme } = useColorScheme()
+  const isDark = colorScheme === 'dark'
   const loc = parseMessageLocation(message.metadata)
 
   if (!loc) {
@@ -30,7 +33,7 @@ export function LocationMessage({ message }: { message: Message }) {
     <>
       <Pressable
         onPress={() => setDetailOpen(true)}
-        style={styles.card}
+        style={[styles.card, isDark && { backgroundColor: '#233138' }]}
         accessibilityRole="button"
         accessibilityLabel="View location on map"
       >
@@ -45,11 +48,11 @@ export function LocationMessage({ message }: { message: Message }) {
             showMarker
           />
         </View>
-        <View style={styles.footer}>
-          <Text numberOfLines={2} style={styles.title}>
+        <View style={[styles.footer, isDark && { borderTopColor: 'rgba(255,255,255,0.08)' }]}>
+          <Text numberOfLines={2} style={[styles.title, isDark && { color: '#e5e5e5' }]}>
             {label}
           </Text>
-          <Text style={styles.hint}>Tap to view on map</Text>
+          <Text style={[styles.hint, isDark && { color: '#8a9aa1' }]}>Tap to view on map</Text>
         </View>
       </Pressable>
 

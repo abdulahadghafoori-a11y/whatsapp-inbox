@@ -34,7 +34,8 @@ export async function teamRoutes(app: FastifyInstance) {
   app.patch('/me', async (request) => {
     const body = z
       .object({
-        expoPushToken: z.string().optional(),
+        // Nullable so the client can clear the token when push is disabled.
+        expoPushToken: z.string().nullable().optional(),
         avatarUrl: z.string().url().optional(),
       })
       .parse(request.body)

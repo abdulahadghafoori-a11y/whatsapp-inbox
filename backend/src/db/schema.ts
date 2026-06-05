@@ -50,6 +50,7 @@ export const contacts = pgTable('contacts', {
   waId: text('wa_id').unique().notNull(),
   name: text('name'),
   profilePictureUrl: text('profile_picture_url'),
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
 
@@ -96,6 +97,15 @@ export const conversations = pgTable(
 
     // Internal notes (never sent to the customer)
     notes: text('notes'),
+
+    // SLA tracking
+    /** First outbound (business) reply timestamp — for first-response-time metrics. */
+    firstResponseAt: timestamp('first_response_at', { withTimezone: true }),
+    /** When the conversation was last marked resolved. */
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+
+    /** Soft delete — hidden from the inbox but retained for audit/restore. */
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
@@ -168,6 +178,21 @@ export const jobs = pgTable(
 )
 
 // Lightweight audit trail for assignment / resolution / handoff actions.
+/** Durable webhook inbox: persist before Meta 200 ack so crashes can replay. */
+export const webhookEvents = pgTable(
+  'webhook_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    rawPayload: jsonb('raw_payload').notNull(),
+    receivedAt: timestamp('received_at', { withTimezone: true }).notNull().defaultNow(),
+    processedAt: timestamp('processed_at', { withTimezone: true }),
+    error: text('error'),
+  },
+  (t) => ({
+    receivedAtIdx: index('idx_webhook_events_received_at').on(t.receivedAt),
+  }),
+)
+
 export const conversationEvents = pgTable(
   'conversation_events',
   {
@@ -185,8 +210,63 @@ export const conversationEvents = pgTable(
   }),
 )
 
+export const tags = pgTable('tags', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  name: text('name').unique().notNull(),
+  color: text('color'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
+export const conversationTags = pgTable(
+  'conversation_tags',
+  {
+    conversationId: uuid('conversation_id')
+      .references(() => conversations.id, { onDelete: 'cascade' })
+      .notNull(),
+    tagId: uuid('tag_id')
+      .references(() => tags.id, { onDelete: 'cascade' })
+      .notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: uniqueIndex('uq_conversation_tags').on(t.conversationId, t.tagId),
+    tagIdx: index('idx_conversation_tags_tag').on(t.tagId),
+  }),
+)
+
+/** Reusable canned responses / macros agents can insert into the composer. */
+export const cannedResponses = pgTable(
+  'canned_responses',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    title: text('title').notNull(),
+    body: text('body').notNull(),
+    shortcut: text('shortcut'),
+    createdBy: uuid('created_by').references(() => teamMembers.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    shortcutIdx: index('idx_canned_responses_shortcut').on(t.shortcut),
+  }),
+)
+
 export const contactsRelations = relations(contacts, ({ many }) => ({
   conversations: many(conversations),
+}))
+
+export const tagsRelations = relations(tags, ({ many }) => ({
+  conversationTags: many(conversationTags),
+}))
+
+export const conversationTagsRelations = relations(conversationTags, ({ one }) => ({
+  conversation: one(conversations, {
+    fields: [conversationTags.conversationId],
+    references: [conversations.id],
+  }),
+  tag: one(tags, {
+    fields: [conversationTags.tagId],
+    references: [tags.id],
+  }),
 }))
 
 export const conversationsRelations = relations(conversations, ({ one, many }) => ({
@@ -224,6 +304,8 @@ export type Message = typeof messages.$inferSelect
 export type NewMessage = typeof messages.$inferInsert
 export type Job = typeof jobs.$inferSelect
 export type RefreshToken = typeof refreshTokens.$inferSelect
+export type Tag = typeof tags.$inferSelect
+export type CannedResponse = typeof cannedResponses.$inferSelect
 
 export interface AgentConfig {
   model: string

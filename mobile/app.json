@@ -15,8 +15,11 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.example.salesinbox",
+      "bundleIdentifier": "com.salesinbox.app",
       "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        },
         "NSCameraUsageDescription": "Take photos to send to customers.",
         "NSPhotoLibraryUsageDescription": "Attach photos and videos to messages.",
         "NSMicrophoneUsageDescription": "Record voice messages.",
@@ -31,7 +34,8 @@
     },
     "android": {
       "softwareKeyboardLayoutMode": "resize",
-      "package": "com.example.salesinbox",
+      "usesCleartextTraffic": true,
+      "package": "com.salesinbox.app",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
@@ -72,11 +76,15 @@
         {
           "locationWhenInUsePermission": "Share your current location with customers."
         }
-      ]
+      ],
+      "@sentry/react-native"
     ],
     "extra": {
       "router": {
         "origin": false
+      },
+      "eas": {
+        "projectId": "00000000-0000-0000-0000-000000000000"
       }
     }
   }

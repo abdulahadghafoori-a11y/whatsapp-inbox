@@ -1,4 +1,5 @@
 import { Pressable, StyleSheet, Text } from 'react-native'
+import { useColorScheme } from 'nativewind'
 import Animated, { FadeIn, FadeOut } from 'react-native-reanimated'
 
 export function ScrollToLatestButton({
@@ -10,6 +11,8 @@ export function ScrollToLatestButton({
   onPress: () => void
   bottomInset?: number
 }) {
+  const { colorScheme } = useColorScheme()
+  const isDark = colorScheme === 'dark'
   if (!visible) return null
 
   return (
@@ -21,12 +24,12 @@ export function ScrollToLatestButton({
     >
       <Pressable
         onPress={onPress}
-        style={styles.btn}
+        style={[styles.btn, isDark && { backgroundColor: '#2a3942' }]}
         accessibilityRole="button"
         accessibilityLabel="Scroll to latest messages"
         hitSlop={8}
       >
-        <Text style={styles.icon}>⌄</Text>
+        <Text style={[styles.icon, isDark && { color: '#aebac1' }]}>⌄</Text>
       </Pressable>
     </Animated.View>
   )

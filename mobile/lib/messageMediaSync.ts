@@ -30,9 +30,10 @@ function inflightKey(message: SyncableMediaMessage) {
   return message.mediaUrl ?? `msg:${message.id}`
 }
 
-async function presignedUrlForKey(s3Key: string): Promise<string | null> {
+// Was: mediaApiPath(s3Key) sent messageId=undefined -> backend 400. Pass the message id.
+async function presignedUrlForKey(s3Key: string, messageId: string): Promise<string | null> {
   try {
-    const res = await api.get<{ url: string }>(mediaApiPath(s3Key))
+    const res = await api.get<{ url: string }>(mediaApiPath(s3Key, messageId))
     return res.data.url
   } catch {
     return null
@@ -72,7 +73,7 @@ async function syncMessageMediaInner(message: SyncableMediaMessage): Promise<str
 
   if (!(await isOnline())) return null
 
-  const url = await presignedUrlForKey(message.mediaUrl)
+  const url = await presignedUrlForKey(message.mediaUrl, message.id)
   if (!url) return null
 
   return cacheMediaFromRemoteUrl(

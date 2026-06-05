@@ -1,5 +1,6 @@
 import { Pressable, Text, View, StyleSheet } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
+import { useColorScheme } from 'nativewind'
 import { LocationMapView } from '@/components/LocationMapView'
 import { PresentationModal } from '@/components/PresentationModal'
 import { locationDisplayLabel } from '@/lib/locationDisplayLabel'
@@ -15,13 +16,15 @@ export function LocationDetailSheet({
   visible: boolean
   onClose: () => void
 }) {
+  const { colorScheme } = useColorScheme()
+  const isDark = colorScheme === 'dark'
   if (!location) return null
 
   const label = locationDisplayLabel(location)
 
   return (
     <PresentationModal visible={visible} onClose={onClose} animationType="slide">
-      <SafeAreaView style={styles.root} edges={['top', 'bottom']}>
+      <SafeAreaView style={[styles.root, isDark && { backgroundColor: '#0b141a' }]} edges={['top', 'bottom']}>
         <View style={styles.mapWrap}>
           <LocationMapView
             latitude={location.latitude}
@@ -32,8 +35,8 @@ export function LocationDetailSheet({
           />
         </View>
 
-        <View style={styles.footer}>
-          <Text numberOfLines={2} style={styles.label}>
+        <View style={[styles.footer, isDark && { borderTopColor: '#233138' }]}>
+          <Text numberOfLines={2} style={[styles.label, isDark && { color: '#e5e5e5' }]}>
             {label}
           </Text>
 
@@ -46,8 +49,8 @@ export function LocationDetailSheet({
             <Text style={styles.openBtnText}>Open in maps app</Text>
           </Pressable>
 
-          <Pressable onPress={onClose} style={styles.closeBtn}>
-            <Text style={styles.closeBtnText}>Close</Text>
+          <Pressable onPress={onClose} style={[styles.closeBtn, isDark && { backgroundColor: '#233138' }]}>
+            <Text style={[styles.closeBtnText, isDark && { color: '#d4d4d4' }]}>Close</Text>
           </Pressable>
         </View>
       </SafeAreaView>
@@ -80,7 +83,7 @@ const styles = StyleSheet.create({
   },
   openBtn: {
     borderRadius: 12,
-    backgroundColor: '#128C7E',
+    backgroundColor: '#00A884',
     paddingVertical: 14,
     alignItems: 'center',
   },

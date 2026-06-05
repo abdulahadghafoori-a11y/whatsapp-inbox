@@ -4,12 +4,16 @@ import * as Notifications from 'expo-notifications'
 import * as Device from 'expo-device'
 import { api } from '@/services/api'
 
+/** All-zeros UUID is the repo placeholder — treat as "not configured". */
+const PLACEHOLDER_PROJECT_ID = '00000000-0000-0000-0000-000000000000'
+
 function resolveExpoProjectId(): string | undefined {
-  return (
+  const id =
     Constants.expoConfig?.extra?.eas?.projectId ??
     Constants.easConfig?.projectId ??
     undefined
-  )
+  if (!id || id === PLACEHOLDER_PROJECT_ID) return undefined
+  return id
 }
 
 Notifications.setNotificationHandler({
@@ -26,6 +30,15 @@ Notifications.setNotificationHandler({
  * Requests notification permission, fetches the Expo push token, and registers
  * it with the backend (PATCH /api/team/me). Safe to call repeatedly.
  */
+/** Clear the server-side push token (e.g. when the user disables notifications). */
+export async function clearPushRegistration(): Promise<void> {
+  try {
+    await api.patch('/team/me', { expoPushToken: null })
+  } catch {
+    // Non-fatal.
+  }
+}
+
 export async function registerForPushNotifications(): Promise<string | null> {
   if (!Device.isDevice) return null
 

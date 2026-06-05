@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { and, desc, eq, ilike, lt, or, sql } from 'drizzle-orm'
+import { and, desc, eq, ilike, isNull, lt, or, sql } from 'drizzle-orm'
 import { db } from '../db/index.js'
 import {
   conversations,
@@ -8,23 +8,24 @@ import {
   messages,
   teamMembers,
   conversationEvents,
+  conversationTags,
+  tags,
   type Conversation,
 } from '../db/schema.js'
 import { errors } from '../utils/errors.js'
 import {
   emitConversationAssigned,
   emitConversationUpdated,
-  emitNewMessage,
 } from '../services/socket-events.js'
 import { enqueueJob } from '../services/jobs.js'
 import {
   createOutboundLocation,
+  createOutboundTemplate,
   createOutboundText,
   resendOutboundMessage,
 } from '../services/outbound.js'
 import { whatsapp } from '../services/whatsapp.js'
 import { resolveMessagingState, shapeMessagingFields } from '../utils/messaging-windows.js'
-import { tryActivateCtwaFep, loadMessagingPayload } from '../services/ctwa-fep.js'
 import { attachReplyPreviews } from '../utils/message-shape.js'
 import { prepareOutboundMedia } from '../utils/prepare-outbound-media.js'
 import {
@@ -87,7 +88,7 @@ export async function conversationRoutes(app: FastifyInstance) {
       })
       .parse(request.query)
 
-    const conds = []
+    const conds = [isNull(conversations.deletedAt)]
     if (q.status !== 'all') conds.push(eq(conversations.status, q.status))
     if (q.assignedTo === 'me') conds.push(eq(conversations.assignedTo, request.agent.id))
     else if (q.assignedTo) conds.push(eq(conversations.assignedTo, q.assignedTo))
@@ -179,7 +180,11 @@ export async function conversationRoutes(app: FastifyInstance) {
     if (!existing) throw errors.conversationNotFound()
 
     const patch: Partial<Conversation> = {}
-    if (body.status !== undefined) patch.status = body.status
+    if (body.status !== undefined) {
+      patch.status = body.status
+      // Track resolution time for SLA reporting; clear it when reopened.
+      patch.resolvedAt = body.status === 'resolved' ? new Date() : null
+    }
     if (body.assignedTo !== undefined) patch.assignedTo = body.assignedTo
     if (body.notes !== undefined) patch.notes = body.notes
     if (body.pinned !== undefined) {
@@ -189,33 +194,53 @@ export async function conversationRoutes(app: FastifyInstance) {
     await db.update(conversations).set(patch).where(eq(conversations.id, id))
 
     // Audit + side effects.
-    if (body.status) {
+    if (body.status && body.status !== existing.status) {
+      // Was: any non-resolved status logged as 'reopened' (wrong for open->pending).
+      const type =
+        body.status === 'resolved'
+          ? 'resolved'
+          : existing.status === 'resolved'
+            ? 'reopened'
+            : 'status_changed'
       await db.insert(conversationEvents).values({
         conversationId: id,
         actorId: request.agent.id,
-        type: body.status === 'resolved' ? 'resolved' : 'reopened',
+        type,
+        payload: { from: existing.status, to: body.status },
       })
     }
-    if (body.assignedTo !== undefined && body.assignedTo && body.assignedTo !== existing.assignedTo) {
-      await db.insert(conversationEvents).values({
-        conversationId: id,
-        actorId: request.agent.id,
-        type: 'assigned',
-        payload: { assignedTo: body.assignedTo },
-      })
-      emitConversationAssigned(app.io, id, body.assignedTo)
-      await enqueueJob('send_push_notification', {
-        agentId: body.assignedTo,
-        title: 'Conversation assigned to you',
-        body: existing.lastMessagePreview ?? 'New conversation',
-        data: { conversationId: id },
-      })
+    if (body.assignedTo !== undefined && body.assignedTo !== existing.assignedTo) {
+      if (body.assignedTo) {
+        await db.insert(conversationEvents).values({
+          conversationId: id,
+          actorId: request.agent.id,
+          type: 'assigned',
+          payload: { from: existing.assignedTo, assignedTo: body.assignedTo },
+        })
+        emitConversationAssigned(app.io, id, body.assignedTo)
+        await enqueueJob('send_push_notification', {
+          agentId: body.assignedTo,
+          title: 'Conversation assigned to you',
+          body: existing.lastMessagePreview ?? 'New conversation',
+          data: { conversationId: id },
+        })
+      } else {
+        // Was: unassign (assignedTo -> null) left no audit trail.
+        await db.insert(conversationEvents).values({
+          conversationId: id,
+          actorId: request.agent.id,
+          type: 'unassigned',
+          payload: { from: existing.assignedTo },
+        })
+      }
     }
-    if (body.notes !== undefined) {
+    if (body.notes !== undefined && body.notes !== (existing.notes ?? '')) {
       await db.insert(conversationEvents).values({
         conversationId: id,
         actorId: request.agent.id,
         type: 'note_updated',
+        // Store a diff so the audit log shows what changed.
+        payload: { from: existing.notes ?? null, to: body.notes },
       })
     }
 
@@ -246,10 +271,96 @@ export async function conversationRoutes(app: FastifyInstance) {
     }
   })
 
+  // DELETE /api/conversations/:id  — soft delete (hidden from inbox, retained).
+  app.delete('/:id', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params)
+    const existing = await db.query.conversations.findFirst({
+      where: eq(conversations.id, id),
+    })
+    if (!existing) throw errors.conversationNotFound()
+    await db
+      .update(conversations)
+      .set({ deletedAt: new Date() })
+      .where(eq(conversations.id, id))
+    await db.insert(conversationEvents).values({
+      conversationId: id,
+      actorId: request.agent.id,
+      type: 'deleted',
+    })
+    emitConversationUpdated(app.io, id)
+    return reply.code(200).send({ ok: true })
+  })
+
+  // GET /api/conversations/:id/tags
+  app.get('/:id/tags', async (request) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params)
+    const rows = await db
+      .select({ id: tags.id, name: tags.name, color: tags.color })
+      .from(conversationTags)
+      .innerJoin(tags, eq(conversationTags.tagId, tags.id))
+      .where(eq(conversationTags.conversationId, id))
+    return { tags: rows }
+  })
+
+  // POST /api/conversations/:id/tags  { tagId }
+  app.post('/:id/tags', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params)
+    const { tagId } = z.object({ tagId: z.string().uuid() }).parse(request.body)
+    const conversation = await db.query.conversations.findFirst({
+      where: eq(conversations.id, id),
+    })
+    if (!conversation) throw errors.conversationNotFound()
+    const tag = await db.query.tags.findFirst({ where: eq(tags.id, tagId) })
+    if (!tag) throw errors.notFound('Tag not found.')
+    await db
+      .insert(conversationTags)
+      .values({ conversationId: id, tagId })
+      .onConflictDoNothing()
+    emitConversationUpdated(app.io, id)
+    return reply.code(201).send({ ok: true })
+  })
+
+  // DELETE /api/conversations/:id/tags/:tagId
+  app.delete('/:id/tags/:tagId', async (request) => {
+    const { id, tagId } = z
+      .object({ id: z.string().uuid(), tagId: z.string().uuid() })
+      .parse(request.params)
+    await db
+      .delete(conversationTags)
+      .where(
+        and(eq(conversationTags.conversationId, id), eq(conversationTags.tagId, tagId)),
+      )
+    emitConversationUpdated(app.io, id)
+    return { ok: true }
+  })
+
   // GET /api/conversations/:id/messages  (cursor pagination, oldest first)
   app.get('/:id/messages', async (request) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params)
-    const q = z.object({ before: z.string().uuid().optional() }).parse(request.query)
+    const q = z
+      .object({
+        before: z.string().uuid().optional(),
+        /** In-conversation message search (body text). */
+        q: z.string().max(200).optional(),
+      })
+      .parse(request.query)
+
+    const searchTerm = q.q?.trim()
+    if (searchTerm) {
+      const rows = await db
+        .select()
+        .from(messages)
+        .where(
+          and(eq(messages.conversationId, id), ilike(messages.body, `%${searchTerm}%`)),
+        )
+        .orderBy(desc(messages.sentAt))
+        .limit(50)
+      const ordered = rows.slice().reverse()
+      return {
+        messages: await attachReplyPreviews(ordered),
+        nextCursor: null,
+      }
+    }
 
     let beforeSentAt: Date | undefined
     if (q.before) {
@@ -344,6 +455,17 @@ export async function conversationRoutes(app: FastifyInstance) {
         if (body.type === 'media_reuse') {
           if (!body.reuseS3Key.startsWith('media/')) {
             throw errors.validation('Invalid media key.')
+          }
+          // Authorization: the key must belong to an existing message attachment.
+          // Was: only the `media/` prefix was checked, so any agent could send any
+          // arbitrary S3 object under that prefix (IDOR). Mirrors the presign check
+          // in routes/media.ts.
+          const owningMessage = await db.query.messages.findFirst({
+            where: eq(messages.mediaUrl, body.reuseS3Key),
+            columns: { id: true },
+          })
+          if (!owningMessage) {
+            throw errors.forbidden('Media key is not available for reuse.')
           }
           const replyCtx = await resolveReplyTargets(id, body.replyToMessageId)
           const message = await sendOutboundMediaFromS3Key(app, {
@@ -519,41 +641,14 @@ export async function conversationRoutes(app: FastifyInstance) {
     })
     if (!conversation || !conversation.contact) throw errors.conversationNotFound()
 
-    const result = await whatsapp.sendTemplateMessage(
-      app.log,
-      conversation.contact.waId,
-      body.templateName,
-      body.languageCode,
-      body.components,
-    )
-
-    const [message] = await db
-      .insert(messages)
-      .values({
-        conversationId: id,
-        waMessageId: result.message_id,
-        sentBy: request.agent.id,
-        direction: 'outbound',
-        type: 'text',
-        body: `[template: ${body.templateName}]`,
-        status: 'sent',
-      })
-      .returning()
-
-    await db
-      .update(conversations)
-      .set({
-        lastMessageAt: new Date(),
-        lastMessagePreview: `[template] ${body.templateName}`,
-        lastMessageDirection: 'outbound',
-        lastMessageStatus: 'sent',
-        lastMessageType: 'text',
-      })
-      .where(eq(conversations.id, id))
-
-    await tryActivateCtwaFep(id)
-    const messaging = await loadMessagingPayload(id)
-    emitNewMessage(app.io, id, message, messaging)
+    const message = await createOutboundTemplate(app.io, {
+      conversationId: id,
+      to: conversation.contact.waId,
+      templateName: body.templateName,
+      languageCode: body.languageCode,
+      components: body.components,
+      sentBy: request.agent.id,
+    })
     return reply.code(201).send({ message })
   })
 }

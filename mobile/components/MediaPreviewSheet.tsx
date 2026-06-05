@@ -267,7 +267,7 @@ const styles = StyleSheet.create({
     minWidth: 120,
     height: 48,
     borderRadius: 24,
-    backgroundColor: '#128C7E',
+    backgroundColor: '#00A884',
     paddingHorizontal: 20,
   },
   sendText: {

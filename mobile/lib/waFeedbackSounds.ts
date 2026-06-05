@@ -10,10 +10,12 @@ const SEND_WAV_B64 =
 export type WaFeedbackSound = 'recordStart' | 'recordCancel' | 'send' | 'sent'
 
 const FILES: Record<WaFeedbackSound, { b64: string; volume: number; tailMs: number }> = {
-  recordStart: { b64: soundData.recordStart, volume: 0.55, tailMs: 110 },
-  recordCancel: { b64: soundData.recordCancel, volume: 0.45, tailMs: 120 },
-  send: { b64: SEND_WAV_B64, volume: 0.45, tailMs: 100 },
-  sent: { b64: soundData.sent, volume: 0.38, tailMs: 90 },
+  // recordStart gets a longer tail: the mic session opens right after, which cuts
+  // playback — letting more of the tone through before that switch.
+  recordStart: { b64: soundData.recordStart, volume: 0.7, tailMs: 220 },
+  recordCancel: { b64: soundData.recordCancel, volume: 0.5, tailMs: 160 },
+  send: { b64: SEND_WAV_B64, volume: 0.5, tailMs: 120 },
+  sent: { b64: soundData.sent, volume: 0.4, tailMs: 110 },
 }
 
 const uriCache = new Map<WaFeedbackSound, string>()
@@ -43,12 +45,25 @@ async function ensurePlaybackMode(): Promise<void> {
   })
 }
 
+// Retain players until the clip has comfortably finished so the JS engine does
+// not garbage-collect the native player mid-playback (which silences the cue).
+const livePlayers = new Set<ReturnType<typeof createAudioPlayer>>()
+
 async function playClip(kind: WaFeedbackSound): Promise<void> {
   await ensurePlaybackMode()
   const uri = await uriFor(kind)
   const player = createAudioPlayer(uri)
   player.volume = FILES[kind].volume
+  livePlayers.add(player)
   player.play()
+  setTimeout(() => {
+    try {
+      player.remove()
+    } catch {
+      /* already released */
+    }
+    livePlayers.delete(player)
+  }, FILES[kind].tailMs + 600)
   await new Promise((r) => setTimeout(r, FILES[kind].tailMs))
 }
 

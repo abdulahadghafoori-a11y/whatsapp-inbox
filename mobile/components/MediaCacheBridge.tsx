@@ -1,8 +1,14 @@
 import { useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { ensureMediaIndexLoaded } from '@/lib/messageMediaCache'
+import {
+  cleanupUploadTempFiles,
+  ensureMediaIndexLoaded,
+} from '@/lib/messageMediaCache'
 import { syncConversationMedia } from '@/lib/messageMediaSync'
-import type { MessagesResponse } from '@/types'
+import {
+  coerceMessagesInfiniteData,
+  flattenMessagesPages,
+} from '@/lib/messagesQueryCache'
 
 /**
  * When message lists are hydrated (network or disk), copy media into app storage
@@ -13,13 +19,17 @@ export function MediaCacheBridge() {
 
   useEffect(() => {
     void ensureMediaIndexLoaded()
+    void cleanupUploadTempFiles()
 
     const cache = qc.getQueryCache()
     const run = () => {
       const queries = cache.findAll({ queryKey: ['messages'] })
       for (const query of queries) {
-        const data = query.state.data as MessagesResponse | undefined
-        if (data?.messages?.length) syncConversationMedia(data.messages)
+        // Messages are stored as InfiniteData ({ pages: [{ messages }] }). Was:
+        // read as a flat { messages } shape, so this always no-oped.
+        const data = coerceMessagesInfiniteData(query.state.data)
+        const messages = flattenMessagesPages(data)
+        if (messages.length) syncConversationMedia(messages)
       }
     }
 

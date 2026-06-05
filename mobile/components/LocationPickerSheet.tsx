@@ -8,6 +8,8 @@ import {
 } from 'react-native'
 import type { Region } from 'react-native-maps'
 import { SafeAreaView } from 'react-native-safe-area-context'
+import { useColorScheme } from 'nativewind'
+import { Ionicons } from '@expo/vector-icons'
 import * as ExpoLocation from 'expo-location'
 import { SendIcon } from '@/components/ChatIcons'
 import { LocationMapView, regionFor } from '@/components/LocationMapView'
@@ -31,6 +33,8 @@ export function LocationPickerSheet({
   onSend: (location: MessageLocation & { name?: string }) => void
   onPermissionDenied?: () => void
 }) {
+  const { colorScheme } = useColorScheme()
+  const isDark = colorScheme === 'dark'
   const [booting, setBooting] = useState(true)
   const [initialRegion, setInitialRegion] = useState<Region | null>(null)
   const [center, setCenter] = useState<{ latitude: number; longitude: number } | null>(
@@ -150,7 +154,7 @@ export function LocationPickerSheet({
 
   return (
     <PresentationModal visible={open} onClose={onCancel} animationType="slide">
-      <SafeAreaView style={styles.root} edges={['top', 'bottom']}>
+      <SafeAreaView style={[styles.root, isDark && { backgroundColor: '#0b141a' }]} edges={['top', 'bottom']}>
         <View style={styles.mapShell}>
           {initialRegion ? (
             <LocationMapView
@@ -171,21 +175,21 @@ export function LocationPickerSheet({
           </View>
 
           {booting ? (
-            <View style={styles.loadingOverlay}>
-              <ActivityIndicator color="#128C7E" size="large" />
-              <Text style={styles.loadingText}>Getting your location…</Text>
+            <View style={[styles.loadingOverlay, isDark && { backgroundColor: 'rgba(11,20,26,0.85)' }]}>
+              <ActivityIndicator color="#00A884" size="large" />
+              <Text style={[styles.loadingText, isDark && { color: '#a3b0b6' }]}>Getting your location…</Text>
             </View>
           ) : null}
         </View>
 
-        <View style={styles.footer}>
-          <Text style={styles.footerTitle}>Send location</Text>
+        <View style={[styles.footer, isDark && { backgroundColor: '#171717', borderTopColor: '#233138' }]}>
+          <Text style={[styles.footerTitle, isDark && { color: '#f5f5f5' }]}>Send location</Text>
 
           <View style={styles.addressBox}>
             {geocoding ? (
-              <ActivityIndicator color="#128C7E" size="small" />
+              <ActivityIndicator color="#00A884" size="small" />
             ) : (
-              <Text numberOfLines={2} style={styles.addressText}>
+              <Text numberOfLines={2} style={[styles.addressText, isDark && { color: '#d4d4d4' }]}>
                 {footerLabel ??
                   (center
                     ? `${center.latitude.toFixed(5)}, ${center.longitude.toFixed(5)}`
@@ -197,9 +201,9 @@ export function LocationPickerSheet({
           <Pressable
             onPress={() => void handleSendCurrent()}
             disabled={booting || sending}
-            style={styles.currentBtn}
+            style={[styles.currentBtn, isDark && { backgroundColor: '#233138' }]}
           >
-            <Text style={styles.currentBtnIcon}>📍</Text>
+            <Ionicons name="navigate" size={18} color="#00A884" />
             <Text style={styles.currentBtnText}>Send your current location</Text>
           </Pressable>
 
@@ -218,8 +222,8 @@ export function LocationPickerSheet({
             )}
           </Pressable>
 
-          <Pressable onPress={onCancel} disabled={sending} style={styles.cancelBtn}>
-            <Text style={styles.cancelBtnText}>Cancel</Text>
+          <Pressable onPress={onCancel} disabled={sending} style={[styles.cancelBtn, isDark && { backgroundColor: '#233138' }]}>
+            <Text style={[styles.cancelBtnText, isDark && { color: '#d4d4d4' }]}>Cancel</Text>
           </Pressable>
         </View>
       </SafeAreaView>
@@ -245,7 +249,7 @@ const styles = StyleSheet.create({
     width: 26,
     height: 26,
     borderRadius: 13,
-    backgroundColor: '#128C7E',
+    backgroundColor: '#00A884',
     borderWidth: 3,
     borderColor: '#fff',
     marginBottom: 2,
@@ -258,7 +262,7 @@ const styles = StyleSheet.create({
   pinStem: {
     width: 3,
     height: 10,
-    backgroundColor: '#128C7E',
+    backgroundColor: '#00A884',
     borderRadius: 2,
   },
   loadingOverlay: {
@@ -306,13 +310,10 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     backgroundColor: '#f0f2f5',
   },
-  currentBtnIcon: {
-    fontSize: 20,
-  },
   currentBtnText: {
     fontSize: 15,
     fontWeight: '500',
-    color: '#128C7E',
+    color: '#00A884',
   },
   sendBtn: {
     flexDirection: 'row',
@@ -320,7 +321,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 8,
     borderRadius: 12,
-    backgroundColor: '#128C7E',
+    backgroundColor: '#00A884',
     paddingVertical: 14,
   },
   sendBtnDisabled: {

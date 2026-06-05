@@ -63,7 +63,7 @@ export function buildLocationMapHtml(
     }).addTo(map);
     var icon = L.divIcon({
       className: '',
-      html: '<div style="width:22px;height:22px;margin-left:-11px;margin-top:-22px;background:#128C7E;border:2px solid #fff;border-radius:50% 50% 50% 0;transform:rotate(-45deg);box-shadow:0 2px 6px rgba(0,0,0,0.35);"></div>',
+      html: '<div style="width:22px;height:22px;margin-left:-11px;margin-top:-22px;background:#00A884;border:2px solid #fff;border-radius:50% 50% 50% 0;transform:rotate(-45deg);box-shadow:0 2px 6px rgba(0,0,0,0.35);"></div>',
       iconSize: [22, 22],
       iconAnchor: [11, 22]
     });

@@ -10,7 +10,10 @@ import {
   StyleSheet,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
+import { StatusBar } from 'expo-status-bar'
 import { useRouter, useFocusEffect } from 'expo-router'
+import { useColorScheme } from 'nativewind'
+import { Ionicons } from '@expo/vector-icons'
 import { useQueryClient } from '@tanstack/react-query'
 import { SwipeableConversationItem } from '@/components/SwipeableConversationItem'
 import { QueryError } from '@/components/QueryState'
@@ -26,6 +29,9 @@ import { apiErrorMessage } from '@/services/api'
 import type { ConversationListItem } from '@/types'
 import type Swipeable from 'react-native-gesture-handler/Swipeable'
 import { registerInboxScrollToTop } from '@/lib/inboxScroll'
+import { userFacingLoadError } from '@/lib/userFacingError'
+import { SocketConnectionBanner } from '@/components/SocketConnectionBanner'
+import { hapticSelection } from '@/lib/haptics'
 
 const FILTERS: { key: InboxFilter; label: string }[] = [
   { key: 'all', label: 'All' },
@@ -43,7 +49,7 @@ const filterStyles = StyleSheet.create({
     backgroundColor: '#f5f5f5',
   },
   pillActive: {
-    backgroundColor: '#128C7E',
+    backgroundColor: '#008069',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.1,
@@ -62,6 +68,8 @@ const filterStyles = StyleSheet.create({
 
 export default function InboxScreen() {
   const router = useRouter()
+  const { colorScheme: scheme } = useColorScheme()
+  const isDark = scheme === 'dark'
   const queryClient = useQueryClient()
   const toast = useToast()
   const markRead = useMarkRead()
@@ -70,6 +78,7 @@ export default function InboxScreen() {
   const openSwipeRef = useRef<Swipeable | null>(null)
   const listRef = useRef<FlatList<ConversationListItem>>(null)
   const [filter, setFilter] = useState<InboxFilter>('all')
+  const [searchInput, setSearchInput] = useState('')
   const [search, setSearch] = useState('')
   const [refreshing, setRefreshing] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
@@ -112,6 +121,11 @@ export default function InboxScreen() {
       }
     }, [queryKey, queryClient]),
   )
+
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(searchInput.trim()), 300)
+    return () => clearTimeout(t)
+  }, [searchInput])
 
   useEffect(() => {
     registerInboxScrollToTop(() => {
@@ -168,32 +182,50 @@ export default function InboxScreen() {
   }
 
   return (
-    <SafeAreaView className="flex-1 bg-neutral-50" edges={['top']}>
-      <View className="bg-wa-teal px-4 pb-4 pt-2">
-        <Text className="text-[24px] font-bold tracking-tight text-white">Inbox</Text>
-        <View className="mt-3 rounded-2xl bg-white px-4">
+    <View className="flex-1 bg-neutral-50 dark:bg-wa-panelDeep">
+      <StatusBar style="light" />
+      <SafeAreaView edges={['top']} className="bg-wa-teal dark:bg-wa-headerDark">
+      <View className="px-4 pb-4 pt-1">
+        <View className="flex-row items-center justify-between">
+          <Text className="text-[24px] font-bold tracking-tight text-white">Chats</Text>
+          <Pressable
+            onPress={() => router.push('/search')}
+            hitSlop={10}
+            accessibilityLabel="Search messages"
+            className="h-10 w-10 items-center justify-center rounded-full active:bg-white/15"
+          >
+            <Ionicons name="search" size={22} color="#ffffff" />
+          </Pressable>
+        </View>
+        <View className="mt-3 rounded-full bg-white/95 px-4 dark:bg-wa-elevated">
           <TextInput
             placeholder="Search name or number"
-            value={search}
-            onChangeText={setSearch}
-            className="py-3.5 text-[16px] text-neutral-900"
-            placeholderTextColor="#9ca3af"
+            value={searchInput}
+            onChangeText={setSearchInput}
+            className="py-3 text-[16px] text-neutral-900 dark:text-wa-textDark"
+            placeholderTextColor={isDark ? '#8696A0' : '#9ca3af'}
             returnKeyType="search"
             clearButtonMode="while-editing"
           />
         </View>
       </View>
+      </SafeAreaView>
 
-      <View className="flex-row gap-2 border-b border-neutral-100 bg-white px-4 py-3">
+      <View className="flex-row gap-2 border-b border-neutral-100 bg-white px-4 py-3 dark:border-white/5 dark:bg-wa-panelDeep">
         {FILTERS.map((f) => {
           const active = filter === f.key
+          const pillStyle = !active && isDark ? { backgroundColor: '#2A3942' } : null
+          const labelStyle = !active && isDark ? { color: '#C5CFD6' } : null
           return (
             <Pressable
               key={f.key}
-              onPress={() => setFilter(f.key)}
-              style={[filterStyles.pill, active ? filterStyles.pillActive : null]}
+              onPress={() => {
+                if (f.key !== filter) hapticSelection()
+                setFilter(f.key)
+              }}
+              style={[filterStyles.pill, active ? filterStyles.pillActive : pillStyle]}
             >
-              <Text style={[filterStyles.label, active ? filterStyles.labelActive : null]}>
+              <Text style={[filterStyles.label, active ? filterStyles.labelActive : labelStyle]}>
                 {f.label}
               </Text>
             </Pressable>
@@ -201,9 +233,11 @@ export default function InboxScreen() {
         })}
       </View>
 
+      <SocketConnectionBanner />
+
       {isError ? (
         <QueryError
-          message={`${apiErrorMessage(error)}. Check that the backend is running and EXPO_PUBLIC_API_URL in mobile/.env matches your PC IP.`}
+          message={userFacingLoadError(error, 'inbox')}
           onRetry={() => void refetch()}
         />
       ) : showSkeleton ? (
@@ -213,6 +247,10 @@ export default function InboxScreen() {
           ref={listRef}
           key={`${filter}-${search}`}
           data={conversations}
+          initialNumToRender={12}
+          maxToRenderPerBatch={8}
+          windowSize={7}
+          removeClippedSubviews
           keyExtractor={(item) => item.id}
           renderItem={({ item }: { item: ConversationListItem }) => (
             <SwipeableConversationItem
@@ -231,8 +269,8 @@ export default function InboxScreen() {
             <RefreshControl
               refreshing={refreshing}
               onRefresh={onPullRefresh}
-              tintColor="#128C7E"
-              colors={['#128C7E']}
+              tintColor="#00A884"
+              colors={['#00A884']}
             />
           }
           onScrollBeginDrag={() => {
@@ -249,18 +287,18 @@ export default function InboxScreen() {
           ListFooterComponent={
             loadingMore ? (
               <View className="items-center py-4">
-                <ActivityIndicator color="#128C7E" />
+                <ActivityIndicator color="#00A884" />
               </View>
             ) : null
           }
           ListEmptyComponent={
             <View className="mt-20 items-center">
-              <Text className="text-neutral-400">No conversations</Text>
+              <Text className="text-neutral-400 dark:text-wa-subDark">No conversations</Text>
             </View>
           }
         />
       )}
-    </SafeAreaView>
+    </View>
   )
 }
 
@@ -269,10 +307,10 @@ function SkeletonList() {
     <View className="px-4 pt-2">
       {Array.from({ length: 8 }).map((_, i) => (
         <View key={i} className="flex-row items-center gap-3 py-3">
-          <View className="h-12 w-12 rounded-full bg-neutral-200" />
+          <View className="h-12 w-12 rounded-full bg-neutral-200 dark:bg-neutral-800" />
           <View className="flex-1 gap-2">
-            <View className="h-3.5 rounded bg-neutral-200" style={{ width: '50%' }} />
-            <View className="h-3 rounded bg-neutral-100" style={{ width: '75%' }} />
+            <View className="h-3.5 rounded bg-neutral-200 dark:bg-neutral-800" style={{ width: '50%' }} />
+            <View className="h-3 rounded bg-neutral-100 dark:bg-neutral-800/60" style={{ width: '75%' }} />
           </View>
         </View>
       ))}

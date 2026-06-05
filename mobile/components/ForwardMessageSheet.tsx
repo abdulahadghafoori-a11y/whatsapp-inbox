@@ -12,6 +12,8 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { useConversations } from '@/hooks/useConversations'
 import { ConversationItem } from '@/components/ConversationItem'
 import { MessageBubble } from '@/components/MessageBubble'
+import { Avatar } from '@/components/Avatar'
+import { PressableScale } from '@/components/PressableScale'
 import type { ConversationListItem, Message } from '@/types'
 
 type Step = 'select' | 'preview'
@@ -90,14 +92,14 @@ export function ForwardMessageSheet({
 
   return (
     <Modal visible={open} animationType="slide" onRequestClose={resetAndClose}>
-      <SafeAreaView className="flex-1 bg-white" edges={['top', 'bottom']}>
+      <SafeAreaView className="flex-1 bg-white dark:bg-wa-panelDeep" edges={['top', 'bottom']}>
         {step === 'select' ? (
           <>
-            <View className="flex-row items-center justify-between border-b border-neutral-100 px-4 py-3">
+            <View className="flex-row items-center justify-between border-b border-neutral-100 dark:border-white/5 px-4 py-3">
               <Pressable onPress={resetAndClose} disabled={forwarding} hitSlop={8}>
                 <Text className="text-base text-wa-teal">Cancel</Text>
               </Pressable>
-              <Text className="text-base font-semibold text-neutral-900">Forward to</Text>
+              <Text className="text-base font-semibold text-neutral-900 dark:text-neutral-100">Forward to</Text>
               <Pressable
                 onPress={selected.size === list.length ? clearSelection : selectAll}
                 disabled={list.length === 0 || forwarding}
@@ -114,15 +116,15 @@ export function ForwardMessageSheet({
                 value={search}
                 onChangeText={setSearch}
                 placeholder="Search chats"
-                className="rounded-xl bg-neutral-100 px-4 py-2.5 text-[15px] text-neutral-900"
+                className="rounded-xl bg-neutral-100 dark:bg-wa-elevated px-4 py-2.5 text-[15px] text-neutral-900 dark:text-wa-textDark"
                 placeholderTextColor="#9ca3af"
               />
               {selected.size > 0 ? (
-                <Text className="mt-2 text-center text-sm text-neutral-500">
+                <Text className="mt-2 text-center text-sm text-neutral-500 dark:text-neutral-400">
                   {selected.size} chat{selected.size === 1 ? '' : 's'} selected
                 </Text>
               ) : (
-                <Text className="mt-2 text-center text-xs text-neutral-400">
+                <Text className="mt-2 text-center text-xs text-neutral-400 dark:text-neutral-500">
                   Tap or long-press to select chats
                 </Text>
               )}
@@ -130,7 +132,7 @@ export function ForwardMessageSheet({
 
             {isPending && list.length === 0 ? (
               <View className="flex-1 items-center justify-center">
-                <ActivityIndicator color="#128C7E" />
+                <ActivityIndicator color="#008069" />
               </View>
             ) : (
               <FlatList
@@ -146,28 +148,30 @@ export function ForwardMessageSheet({
                   />
                 )}
                 ListEmptyComponent={
-                  <Text className="py-8 text-center text-neutral-500">No other chats found</Text>
+                  <Text className="py-8 text-center text-neutral-500 dark:text-neutral-400">No other chats found</Text>
                 }
               />
             )}
 
-            <View className="border-t border-neutral-100 px-4 py-3">
-              <Pressable
+            <View className="border-t border-neutral-100 dark:border-white/5 px-4 py-3">
+              <PressableScale
                 onPress={goToPreview}
+                haptic="light"
                 disabled={selected.size === 0 || forwarding}
-                className={`rounded-xl py-3.5 ${
-                  selected.size > 0 ? 'bg-wa-teal' : 'bg-neutral-200'
+                scaleTo={0.97}
+                className={`items-center rounded-2xl py-3.5 ${
+                  selected.size > 0 ? 'bg-wa-teal' : 'bg-neutral-200 dark:bg-wa-elevated'
                 }`}
               >
                 <Text className="text-center text-base font-semibold text-white">
                   Next {selected.size > 0 ? `(${selected.size})` : ''}
                 </Text>
-              </Pressable>
+              </PressableScale>
             </View>
           </>
         ) : (
           <>
-            <View className="flex-row items-center justify-between border-b border-neutral-100 px-4 py-3">
+            <View className="flex-row items-center justify-between border-b border-neutral-100 dark:border-white/5 px-4 py-3">
               <Pressable
                 onPress={() => setStep('select')}
                 disabled={forwarding}
@@ -175,31 +179,27 @@ export function ForwardMessageSheet({
               >
                 <Text className="text-base text-wa-teal">Back</Text>
               </Pressable>
-              <Text className="text-base font-semibold text-neutral-900">Forward</Text>
+              <Text className="text-base font-semibold text-neutral-900 dark:text-neutral-100">Forward</Text>
               <View className="w-12" />
             </View>
 
-            <View className="flex-1 bg-wa-bg px-4 pt-4">
+            <View className="flex-1 bg-wa-bg px-4 pt-4 dark:bg-wa-chatDark">
               {message ? (
                 <View className="mb-4">
                   <MessageBubble message={message} contactName={contactName} />
                 </View>
               ) : null}
 
-              <Text className="mb-2 text-sm font-medium text-neutral-600">
+              <Text className="mb-2 text-sm font-medium text-neutral-600 dark:text-neutral-400">
                 Send to {selectedList.length} chat{selectedList.length === 1 ? '' : 's'}
               </Text>
               <FlatList
                 data={selectedList}
                 keyExtractor={(c) => c.id}
                 renderItem={({ item }) => (
-                  <View className="flex-row items-center gap-3 border-b border-neutral-100 py-2.5">
-                    <View className="h-10 w-10 items-center justify-center rounded-full bg-wa-teal">
-                      <Text className="text-sm font-semibold text-white">
-                        {(item.contact.name ?? item.contact.waId).slice(0, 2).toUpperCase()}
-                      </Text>
-                    </View>
-                    <Text className="flex-1 text-[15px] text-neutral-900">
+                  <View className="flex-row items-center gap-3 border-b border-neutral-100 dark:border-white/5 py-2.5">
+                    <Avatar name={item.contact.name} fallback={item.contact.waId} size={40} />
+                    <Text className="flex-1 text-[15px] text-neutral-900 dark:text-neutral-100">
                       {item.contact.name ?? item.contact.waId}
                     </Text>
                   </View>
@@ -207,11 +207,13 @@ export function ForwardMessageSheet({
               />
             </View>
 
-            <View className="border-t border-neutral-100 px-4 py-3">
-              <Pressable
+            <View className="border-t border-neutral-100 dark:border-white/5 px-4 py-3">
+              <PressableScale
                 onPress={() => onForward([...selected])}
+                haptic="light"
                 disabled={forwarding || selected.size === 0}
-                className="flex-row items-center justify-center rounded-xl bg-wa-teal py-3.5"
+                scaleTo={0.97}
+                className="flex-row items-center justify-center rounded-2xl bg-wa-teal py-3.5"
               >
                 {forwarding ? (
                   <ActivityIndicator color="#fff" />
@@ -220,7 +222,7 @@ export function ForwardMessageSheet({
                     Send
                   </Text>
                 )}
-              </Pressable>
+              </PressableScale>
             </View>
           </>
         )}

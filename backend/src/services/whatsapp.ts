@@ -231,20 +231,39 @@ export const whatsapp: WhatsAppService = {
       knownLength: buffer.length,
     })
 
-    const res = await request(`${BASE}/${PHONE}/media`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`,
-        ...form.getHeaders(),
+    // Was: single attempt — uploads now retry on 429/5xx like other Graph calls.
+    return withRetry(
+      async () => {
+        const res = await request(`${BASE}/${PHONE}/media`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`,
+            ...form.getHeaders(),
+          },
+          body: form,
+        })
+        const text = await res.body.text()
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          log.error({ status: res.statusCode, text }, 'whatsapp_media_upload_failed')
+          const retryAfter = res.headers['retry-after']
+          const retryAfterMs = retryAfter ? Number(retryAfter) * 1000 : undefined
+          throw new WhatsAppApiError(
+            `Media upload failed (${res.statusCode})`,
+            res.statusCode,
+            retryAfterMs,
+          )
+        }
+        return JSON.parse(text) as { id: string }
       },
-      body: form,
+      {
+        attempts: 3,
+        shouldRetry: isRetryable,
+        onRetry: (err, attempt, delay) =>
+          log.warn({ attempt, delay, err: (err as Error).message }, 'whatsapp_media_upload_retry'),
+      },
+    ).catch((err) => {
+      throw errors.whatsappApi((err as Error).message)
     })
-    const text = await res.body.text()
-    if (res.statusCode < 200 || res.statusCode >= 300) {
-      log.error({ status: res.statusCode, text }, 'whatsapp_media_upload_failed')
-      throw errors.whatsappApi(`Media upload failed (${res.statusCode})`)
-    }
-    return JSON.parse(text) as { id: string }
   },
 
   async getMediaUrl(log, mediaId) {

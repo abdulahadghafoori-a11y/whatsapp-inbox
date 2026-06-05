@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs'
 import { eq } from 'drizzle-orm'
 import { db } from './index.js'
 import { teamMembers } from './schema.js'
+import { BCRYPT_ROUNDS } from '../utils/bcrypt.js'
 
 const DEFAULT_PASSWORD = process.env.SEED_PASSWORD ?? 'password123'
 
@@ -15,7 +16,7 @@ const seedMembers = [
 ]
 
 async function main() {
-  const passwordHash = await bcrypt.hash(DEFAULT_PASSWORD, 10)
+  const passwordHash = await bcrypt.hash(DEFAULT_PASSWORD, BCRYPT_ROUNDS)
 
   for (const m of seedMembers) {
     const existing = await db.query.teamMembers.findFirst({

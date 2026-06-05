@@ -1,5 +1,7 @@
 import { appStorage } from '@/lib/appStorage'
 import { api } from '@/services/api'
+import { queryClient } from '@/lib/queryClient'
+import { removeMessageInfinite, type MessagesInfinite } from '@/lib/messagesQueryCache'
 import type { Message } from '@/types'
 
 const KEY = 'wa-inbox-outbound-queue'
@@ -64,7 +66,20 @@ export async function enqueueTextSend(
   return optimisticMessage(item)
 }
 
-export async function flushOutboundQueue(): Promise<{ sent: number; failed: number }> {
+// Guard against concurrent flushes (mount + NetInfo + AppState can fire at once).
+// Without this, two overlapping flushes read the same queue and POST every item
+// twice, double-sending the customer's text.
+let flushInFlight: Promise<{ sent: number; failed: number }> | null = null
+
+export function flushOutboundQueue(): Promise<{ sent: number; failed: number }> {
+  if (flushInFlight) return flushInFlight
+  flushInFlight = doFlushOutboundQueue().finally(() => {
+    flushInFlight = null
+  })
+  return flushInFlight
+}
+
+async function doFlushOutboundQueue(): Promise<{ sent: number; failed: number }> {
   const queue = await loadOutboundQueue()
   if (queue.length === 0) return { sent: 0, failed: 0 }
 
@@ -84,6 +99,13 @@ export async function flushOutboundQueue(): Promise<{ sent: number; failed: numb
         { headers: { 'Content-Type': 'application/json' } },
       )
       sent++
+      // Drop the optimistic placeholder now that the server has the message. The
+      // real row arrives via the new_message socket event / refetch. Was: the
+      // pending bubble lingered and showed as a duplicate alongside the echo.
+      queryClient.setQueryData<MessagesInfinite>(
+        ['messages', item.conversationId],
+        (old) => removeMessageInfinite(old, item.id),
+      )
     } catch {
       failed++
       remaining.push(item)
@@ -92,4 +114,9 @@ export async function flushOutboundQueue(): Promise<{ sent: number; failed: numb
 
   await saveOutboundQueue(remaining)
   return { sent, failed }
+}
+
+/** Drop all queued sends (e.g. on logout) without attempting delivery. */
+export async function clearOutboundQueue(): Promise<void> {
+  await appStorage.removeItem(KEY)
 }

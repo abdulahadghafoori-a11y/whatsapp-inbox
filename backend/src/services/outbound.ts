@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import type { Server as SocketIOServer } from 'socket.io'
 import { db } from '../db/index.js'
 import { conversations, messages, type Message } from '../db/schema.js'
@@ -57,6 +57,8 @@ async function finalize(io: SocketIOServer, conversationId: string, message: Mes
     .set({
       lastMessageAt: new Date(),
       lastMessagePreview: preview(message.type, message.body),
+      // Record the first business reply once (SLA first-response metric).
+      firstResponseAt: sql`COALESCE(${conversations.firstResponseAt}, NOW())`,
       ...conversationPreviewFromMessage(message),
     })
     .where(eq(conversations.id, conversationId))
@@ -164,6 +166,46 @@ export async function createOutboundMedia(
     caption: args.caption,
     voiceNote: args.voiceNote,
     replyToWaMessageId: args.replyToWaMessageId,
+  })
+
+  await finalize(io, args.conversationId, message)
+  return message
+}
+
+interface OutboundTemplateArgs {
+  conversationId: string
+  to: string
+  templateName: string
+  languageCode: string
+  components?: unknown[]
+  sentBy: string | null
+}
+
+/** Was: template sent synchronously in route — now job-backed like other outbound messages. */
+export async function createOutboundTemplate(
+  io: SocketIOServer,
+  args: OutboundTemplateArgs,
+): Promise<Message> {
+  const [message] = await db
+    .insert(messages)
+    .values({
+      conversationId: args.conversationId,
+      sentBy: args.sentBy,
+      direction: 'outbound',
+      type: 'text',
+      body: `[template: ${args.templateName}]`,
+      status: 'pending',
+    })
+    .returning()
+
+  await enqueueJob('send_whatsapp_message', {
+    to: args.to,
+    type: 'template',
+    conversationId: args.conversationId,
+    messageId: message.id,
+    templateName: args.templateName,
+    languageCode: args.languageCode,
+    components: args.components,
   })
 
   await finalize(io, args.conversationId, message)

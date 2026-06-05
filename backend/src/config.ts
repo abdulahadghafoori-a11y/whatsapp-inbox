@@ -10,6 +10,7 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(3001),
 
+  // Was min(16) — production requires 64+ random chars (enforced after parse).
   JWT_SECRET: z.string().min(16, 'JWT_SECRET must be at least 16 characters'),
   CORS_ORIGINS: z.string().default('*'),
 
@@ -32,6 +33,9 @@ const envSchema = z.object({
 
   ANTHROPIC_API_KEY: z.string().min(1),
   AI_ROUTING_FRACTION: z.coerce.number().min(0).max(1).default(0.1),
+
+  /** Optional Sentry DSN for error tracking. When unset, Sentry stays disabled. */
+  SENTRY_DSN: z.string().optional(),
 
   // Dev only: accept POST /api/webhook/whatsapp without x-hub-signature-256 (e.g. Chakra relay).
   // Must stay false in production — Meta always sends the signature header.
@@ -72,6 +76,7 @@ function loadConfig(): AppConfig {
       S3_ENSURE_LIFECYCLE: process.env.S3_ENSURE_LIFECYCLE === 'true',
       ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? 'test',
       AI_ROUTING_FRACTION: Number(process.env.AI_ROUTING_FRACTION ?? 0.1),
+      SENTRY_DSN: process.env.SENTRY_DSN,
       WEBHOOK_SKIP_SIGNATURE: process.env.WEBHOOK_SKIP_SIGNATURE === 'true',
       SKIP_ENV_VALIDATION: true,
       WHATSAPP_MEDIA_DNS_SERVERS: ['8.8.8.8', '1.1.1.1'],
@@ -90,6 +95,15 @@ function loadConfig(): AppConfig {
   const data = parsed.data
   if (data.WEBHOOK_SKIP_SIGNATURE && data.NODE_ENV === 'production') {
     console.error('\nWEBHOOK_SKIP_SIGNATURE cannot be enabled in production.\n')
+    process.exit(1)
+  }
+  // Was: CORS_ORIGINS=* allowed in production — unsafe for credentialed browser clients.
+  if (data.NODE_ENV === 'production' && data.CORS_ORIGINS.trim() === '*') {
+    console.error('\nCORS_ORIGINS cannot be "*" in production. Set explicit origins.\n')
+    process.exit(1)
+  }
+  if (data.NODE_ENV === 'production' && data.JWT_SECRET.length < 64) {
+    console.error('\nJWT_SECRET must be at least 64 characters in production.\n')
     process.exit(1)
   }
   return data

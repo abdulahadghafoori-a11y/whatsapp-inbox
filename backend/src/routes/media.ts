@@ -1,16 +1,26 @@
 import type { FastifyInstance } from 'fastify'
+import { and, eq } from 'drizzle-orm'
 import { z } from 'zod'
+import { db } from '../db/index.js'
+import { messages } from '../db/schema.js'
 import { errors } from '../utils/errors.js'
 
 export async function mediaRoutes(app: FastifyInstance) {
   app.addHook('preHandler', app.authenticate)
 
-  // GET /api/media/*  (the S3 key contains slashes -> wildcard param)
+  // GET /api/media/*?messageId=<uuid>
+  // Was: any JWT + guessed S3 key could presign — now key must match the message row.
   app.get('/*', async (request) => {
     const key = (request.params as Record<string, string>)['*']
     z.string().min(1).parse(key)
-    // Only ever sign keys under the managed media/ prefix.
     if (!key.startsWith('media/')) throw errors.forbidden('Invalid media key.')
+
+    const q = z.object({ messageId: z.string().uuid() }).parse(request.query)
+
+    const row = await db.query.messages.findFirst({
+      where: and(eq(messages.id, q.messageId), eq(messages.mediaUrl, key)),
+    })
+    if (!row) throw errors.forbidden('Media not found for this message.')
 
     const expiresIn = 3600
     const url = await app.s3.getPresignedUrl(key, expiresIn)

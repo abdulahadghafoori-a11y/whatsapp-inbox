@@ -87,7 +87,6 @@ export function MessagingWindowTimer({
     const chip = HEADER_CHIP[model.kind]
     if (!chip) return null
 
-    const showClockInHeader = model.kind !== 'ctwa_reply'
     const remaining = model.expiresAt ? msUntil(model.expiresAt) : 0
     const clock =
       model.expiresAt && remaining > 0 ? formatCountdown(remaining) : '0:00'
@@ -97,7 +96,7 @@ export function MessagingWindowTimer({
         <Text className={`text-[10px] font-semibold uppercase tracking-wide ${chip.labelColor}`}>
           {chip.label}
         </Text>
-        {showClockInHeader ? (
+        {model.expiresAt ? (
           <Text className={`font-mono text-[15px] font-bold tabular-nums leading-tight ${chip.clockColor}`}>
             {clock}
           </Text>
@@ -109,17 +108,10 @@ export function MessagingWindowTimer({
   if (!showUnderHeaderBar(model) || !model.bannerMessage) return null
 
   const s = BANNER_STYLES[model.kind as 'ctwa_reply' | 'template_only']
-  const remaining = model.expiresAt ? msUntil(model.expiresAt) : 0
-  const showClock = model.kind === 'ctwa_reply' && model.expiresAt && remaining > 0
 
   return (
-    <View className={`flex-row items-center justify-between gap-3 border-b px-4 py-2.5 ${s.bg} ${s.border}`}>
-      <Text className={`flex-1 text-sm leading-5 ${s.text}`}>{model.bannerMessage}</Text>
-      {showClock ? (
-        <Text className={`shrink-0 font-mono text-lg font-bold tabular-nums ${s.clock}`}>
-          {formatCountdown(remaining)}
-        </Text>
-      ) : null}
+    <View className={`border-b px-4 py-2.5 ${s.bg} ${s.border}`}>
+      <Text className={`text-sm leading-5 ${s.text}`}>{model.bannerMessage}</Text>
     </View>
   )
 }

@@ -1,4 +1,4 @@
-import { and, eq, isNotNull, sql } from 'drizzle-orm'
+import { and, eq, isNotNull, isNull, sql } from 'drizzle-orm'
 import type { Server as SocketIOServer } from 'socket.io'
 import type { FastifyBaseLogger } from 'fastify'
 import { db } from '../db/index.js'
@@ -8,7 +8,7 @@ import { enqueueJob } from './jobs.js'
 import { emitConversationAssigned } from './socket-events.js'
 
 /** Stable 0..99 bucket from a UUID string (deterministic, no DB round-trip). */
-function bucket(id: string): number {
+export function bucket(id: string): number {
   let h = 0
   for (let i = 0; i < id.length; i++) {
     h = (h * 31 + id.charCodeAt(i)) >>> 0
@@ -66,10 +66,16 @@ export async function routeConversation(
     return
   }
 
-  await db
+  // Was: two concurrent webhooks could both assign — only update if still unassigned.
+  const claimed = await db
     .update(conversations)
     .set({ assignedTo: assignTo, aiHandled: isAI ? true : conversation.aiHandled })
-    .where(eq(conversations.id, conversation.id))
+    .where(and(eq(conversations.id, conversation.id), isNull(conversations.assignedTo)))
+    .returning({ id: conversations.id })
+  if (claimed.length === 0) {
+    log.debug({ conversationId: conversation.id }, 'assignment race lost; already assigned')
+    return
+  }
 
   await db.insert(conversationEvents).values({
     conversationId: conversation.id,

@@ -1,5 +1,8 @@
 import { io, type Socket } from 'socket.io-client'
 import { useAuthStore } from '@/stores/authStore'
+import { assertProductionTransportSecurity } from '@/lib/transportSecurity'
+
+assertProductionTransportSecurity()
 
 const SOCKET_URL = process.env.EXPO_PUBLIC_SOCKET_URL ?? 'http://localhost:3001'
 

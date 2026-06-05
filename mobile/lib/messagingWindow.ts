@@ -77,9 +77,10 @@ export function messagingWindowTimer(
   const cswMs = msUntil(c.windowExpiresAt)
   const fepMs = msUntil(c.fepExpiresAt)
   const cswOpen = c.canSendSession
-  const fepOpen = c.isFepOpen
+  const fepOpen = c.isFepOpen || fepMs > 0
 
-  if (fepOpen && !cswOpen) {
+  // 72h CTWA FEP wins over 24h session when both are open (common right after you reply).
+  if (c.isCtwaLead && fepOpen) {
     return {
       kind: 'ctwa_fep',
       expiresAt: c.fepExpiresAt,

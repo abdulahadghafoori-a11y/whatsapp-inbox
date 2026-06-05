@@ -23,7 +23,7 @@ export const queryClient = new QueryClient({
 
 export const queryPersister = createAsyncStoragePersister({
   storage: appStorage,
-  key: 'wa-inbox-query-cache-v2',
+  key: 'wa-inbox-query-cache-v3',
 })
 
 export function shouldPersistQuery(queryKey: readonly unknown[]): boolean {

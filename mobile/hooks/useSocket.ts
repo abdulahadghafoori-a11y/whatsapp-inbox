@@ -7,10 +7,20 @@ import {
 } from '@/hooks/useConversations'
 import { normalizeConversation } from '@/lib/conversation'
 import { normalizeMessage } from '@/lib/normalizeMessage'
-import { upsertMessage } from '@/lib/messageCache'
+import {
+  type MessagesInfinite,
+  flattenMessagesPages,
+  mapMessagesInfinite,
+  patchMessageMediaInfinite,
+  patchMessagesStatusInfinite,
+  upsertMessageInfinite,
+} from '@/lib/messagesQueryCache'
 import { syncMessageMedia } from '@/lib/messageMediaSync'
-import { mergeMessageStatus, normalizeMessageStatus } from '@/lib/messageStatus'
-import { playWaFeedbackAsync } from '@/lib/waFeedbackSounds'
+import { normalizeMessageStatus } from '@/lib/messageStatus'
+import {
+  getActiveConversationId,
+  setActiveConversationId,
+} from '@/lib/activeConversation'
 import { useAuthStore } from '@/stores/authStore'
 import type {
   Agent,
@@ -18,7 +28,6 @@ import type {
   ConversationListItem,
   ConversationsResponse,
   Message,
-  MessagesResponse,
 } from '@/types'
 
 interface TeamResponse {
@@ -39,43 +48,6 @@ function messagePreview(message: Message): string {
   return `[${message.type}]`
 }
 
-function patchMessages(
-  old: MessagesResponse | undefined,
-  payload: MessageStatusPayload,
-): MessagesResponse | undefined {
-  if (!old) return old
-
-  const normalized = normalizeMessageStatus(payload.status)
-  if (!normalized) return old
-
-  let changed = false
-  const messages = old.messages.map((m) => {
-    if (m.direction !== 'outbound') return m
-    const idMatch = payload.messageId != null && m.id === payload.messageId
-    const waMatch = payload.waMessageId != null && m.waMessageId === payload.waMessageId
-    if (!idMatch && !waMatch) return m
-    const next = mergeMessageStatus(m.status, normalized)
-    if (next === m.status) return m
-    if (
-      m.type === 'audio' &&
-      m.status === 'pending' &&
-      next === 'sent'
-    ) {
-      void playWaFeedbackAsync('sent')
-    }
-    changed = true
-    return { ...m, status: next }
-  })
-
-  return changed ? { ...old, messages } : old
-}
-
-function appendMessage(
-  old: MessagesResponse | undefined,
-  message: Message,
-): MessagesResponse {
-  return upsertMessage(old, message)
-}
 
 type MessagingPatch = Partial<
   Pick<
@@ -97,6 +69,7 @@ function patchInboxForNewMessage(
   conversationId: string,
   message: Message,
   messaging?: MessagingPatch,
+  suppressUnread = false,
 ): InfiniteData<ConversationsResponse> | undefined {
   if (!old) return old
 
@@ -104,6 +77,7 @@ function patchInboxForNewMessage(
   const pages = old.pages.map((page, pageIndex) => {
     const rest = page.conversations.filter((c) => {
       if (c.id !== conversationId) return true
+      const bumpUnread = message.direction === 'inbound' && !suppressUnread
       updated = normalizeConversation({
         ...c,
         lastMessageAt: message.sentAt,
@@ -112,8 +86,7 @@ function patchInboxForNewMessage(
         lastMessageDirection: message.direction,
         lastMessageStatus: message.status,
         lastMessageType: message.type,
-        unreadCount:
-          message.direction === 'inbound' ? c.unreadCount + 1 : c.unreadCount,
+        unreadCount: bumpUnread ? c.unreadCount + 1 : c.unreadCount,
         ...(messaging ?? {}),
       })
       return false
@@ -126,21 +99,6 @@ function patchInboxForNewMessage(
   })
 
   return updated ? { ...old, pages } : old
-}
-
-function patchMessageMedia(
-  old: MessagesResponse | undefined,
-  messageId: string,
-  patch: Pick<Message, 'mediaUrl' | 'mediaStatus'>,
-): MessagesResponse | undefined {
-  if (!old) return old
-  let changed = false
-  const messages = old.messages.map((m) => {
-    if (m.id !== messageId) return m
-    changed = true
-    return { ...m, ...patch }
-  })
-  return changed ? { ...old, messages } : old
 }
 
 /**
@@ -184,12 +142,15 @@ export function useSocketSync() {
       message: Message
     } & MessagingPatch) => {
       const normalized = normalizeMessage(message as Message & Record<string, unknown>)
-      queryClient.setQueryData<MessagesResponse>(
+      queryClient.setQueryData<MessagesInfinite>(
         ['messages', conversationId],
-        (old) => appendMessage(old, normalized),
+        (old) => upsertMessageInfinite(old, normalized),
       )
 
-      const hasMessaging = messaging.windowExpiresAt != null
+      const hasMessaging =
+        messaging.fepExpiresAt != null ||
+        messaging.windowExpiresAt != null ||
+        messaging.isFepOpen === true
 
       if (hasMessaging) {
         queryClient.setQueryData<ConversationDetail>(
@@ -198,9 +159,11 @@ export function useSocketSync() {
         )
       }
 
+      // Don't bump the unread badge for a chat the agent is currently viewing.
+      const suppressUnread = getActiveConversationId() === conversationId
       queryClient.setQueriesData<InfiniteData<ConversationsResponse>>(
         { queryKey: ['conversations'] },
-        (old) => patchInboxForNewMessage(old, conversationId, message, messaging),
+        (old) => patchInboxForNewMessage(old, conversationId, message, messaging, suppressUnread),
       )
 
       if (normalized.mediaUrl || normalized.localPreviewUri) {
@@ -211,10 +174,11 @@ export function useSocketSync() {
     const onMessageStatus = (payload: MessageStatusPayload) => {
       if (payload.scope === 'inbound') return
 
-      const patch = (old: MessagesResponse | undefined) => patchMessages(old, payload)
+      const patch = (old: MessagesInfinite | undefined) =>
+        patchMessagesStatusInfinite(old, payload)
 
       if (payload.conversationId) {
-        queryClient.setQueryData<MessagesResponse>(
+        queryClient.setQueryData<MessagesInfinite>(
           ['messages', payload.conversationId],
           patch,
         )
@@ -234,7 +198,7 @@ export function useSocketSync() {
       }
 
       if (payload.messageId || payload.waMessageId) {
-        queryClient.setQueriesData<MessagesResponse>({ queryKey: ['messages'] }, patch)
+        queryClient.setQueriesData<MessagesInfinite>({ queryKey: ['messages'] }, patch)
       }
     }
 
@@ -247,23 +211,23 @@ export function useSocketSync() {
       messageId: string
       mediaUrl: string
     }) => {
-      const patch = (old: MessagesResponse | undefined) =>
-        patchMessageMedia(old, messageId, { mediaUrl, mediaStatus: 'uploaded' })
+      const patch = (old: MessagesInfinite | undefined) =>
+        patchMessageMediaInfinite(old, messageId, { mediaUrl, mediaStatus: 'uploaded' })
 
       if (conversationId) {
-        queryClient.setQueryData<MessagesResponse>(
+        queryClient.setQueryData<MessagesInfinite>(
           ['messages', conversationId],
           patch,
         )
       } else {
-        queryClient.setQueriesData<MessagesResponse>({ queryKey: ['messages'] }, patch)
+        queryClient.setQueriesData<MessagesInfinite>({ queryKey: ['messages'] }, patch)
       }
 
-      void queryClient.invalidateQueries({ queryKey: ['media', mediaUrl] })
+      void queryClient.invalidateQueries({ queryKey: ['media', mediaUrl, messageId] })
 
       if (conversationId) {
-        const data = queryClient.getQueryData<MessagesResponse>(['messages', conversationId])
-        const msg = data?.messages.find((m) => m.id === messageId)
+        const data = queryClient.getQueryData<MessagesInfinite>(['messages', conversationId])
+        const msg = flattenMessagesPages(data).find((m) => m.id === messageId)
         if (msg) void syncMessageMedia({ ...msg, mediaUrl, mediaStatus: 'uploaded' })
       }
     }
@@ -275,16 +239,16 @@ export function useSocketSync() {
       conversationId?: string
       messageId: string
     }) => {
-      const patch = (old: MessagesResponse | undefined) =>
-        patchMessageMedia(old, messageId, { mediaUrl: null, mediaStatus: 'failed' })
+      const patch = (old: MessagesInfinite | undefined) =>
+        patchMessageMediaInfinite(old, messageId, { mediaUrl: null, mediaStatus: 'failed' })
 
       if (conversationId) {
-        queryClient.setQueryData<MessagesResponse>(
+        queryClient.setQueryData<MessagesInfinite>(
           ['messages', conversationId],
           patch,
         )
       } else {
-        queryClient.setQueriesData<MessagesResponse>({ queryKey: ['messages'] }, patch)
+        queryClient.setQueriesData<MessagesInfinite>({ queryKey: ['messages'] }, patch)
       }
     }
 
@@ -296,22 +260,17 @@ export function useSocketSync() {
       message: Message
     }) => {
       const normalized = normalizeMessage(message as Message & Record<string, unknown>)
-      const patch = (old: MessagesResponse | undefined) => {
-        if (!old) return old
-        return {
-          ...old,
-          messages: old.messages.map((m) =>
-            m.id === normalized.id
-              ? {
-                  ...normalized,
-                  localPreviewUri: normalized.localPreviewUri ?? m.localPreviewUri,
-                }
-              : m,
-          ),
-        }
-      }
-      queryClient.setQueryData<MessagesResponse>(['messages', conversationId], patch)
-      queryClient.setQueriesData<MessagesResponse>({ queryKey: ['messages'] }, patch)
+      const patch = (old: MessagesInfinite | undefined) =>
+        mapMessagesInfinite(old, (m) =>
+          m.id === normalized.id
+            ? {
+                ...normalized,
+                localPreviewUri: normalized.localPreviewUri ?? m.localPreviewUri,
+              }
+            : m,
+        )
+      queryClient.setQueryData<MessagesInfinite>(['messages', conversationId], patch)
+      queryClient.setQueriesData<MessagesInfinite>({ queryKey: ['messages'] }, patch)
     }
 
     const onMessageDeleted = ({
@@ -321,19 +280,14 @@ export function useSocketSync() {
       conversationId: string
       messageId: string
     }) => {
-      const patch = (old: MessagesResponse | undefined) => {
-        if (!old) return old
-        return {
-          ...old,
-          messages: old.messages.map((m) =>
-            m.id === messageId
-              ? { ...m, deletedAt: new Date().toISOString(), body: null }
-              : m,
-          ),
-        }
-      }
-      queryClient.setQueryData<MessagesResponse>(['messages', conversationId], patch)
-      queryClient.setQueriesData<MessagesResponse>({ queryKey: ['messages'] }, patch)
+      const patch = (old: MessagesInfinite | undefined) =>
+        mapMessagesInfinite(old, (m) =>
+          m.id === messageId
+            ? { ...m, deletedAt: new Date().toISOString(), body: null }
+            : m,
+        )
+      queryClient.setQueryData<MessagesInfinite>(['messages', conversationId], patch)
+      queryClient.setQueriesData<MessagesInfinite>({ queryKey: ['messages'] }, patch)
     }
 
     const patchTeamPresence = (agentId: string, isOnline: boolean) => {
@@ -356,9 +310,22 @@ export function useSocketSync() {
       patchTeamPresence(agentId, false)
     }
 
+    // 'connect' fires on first connection and every reconnect. Skip the first
+    // (initial queries load on their own) and, on reconnect, refresh the list +
+    // only the open chat. Was: every connect invalidated ALL message threads —
+    // expensive and janky for agents with many cached conversations.
+    let hasConnectedOnce = false
     const onReconnect = () => {
+      if (!hasConnectedOnce) {
+        hasConnectedOnce = true
+        return
+      }
       void queryClient.invalidateQueries({ queryKey: ['conversations'] })
       void queryClient.invalidateQueries({ queryKey: ['team'] })
+      const active = getActiveConversationId()
+      if (active) {
+        void queryClient.invalidateQueries({ queryKey: ['messages', active] })
+      }
     }
 
     socket.on('connect', onReconnect)
@@ -403,8 +370,10 @@ export function useConversationRoom(conversationId: string | undefined) {
     if (!conversationId) return
     const socket = getSocket()
     socket.emit('join_conversation', conversationId)
+    setActiveConversationId(conversationId)
     return () => {
       socket.emit('leave_conversation', conversationId)
+      setActiveConversationId(null)
     }
   }, [conversationId])
 }

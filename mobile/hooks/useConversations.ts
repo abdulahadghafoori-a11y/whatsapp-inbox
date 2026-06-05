@@ -13,7 +13,12 @@ import { enqueueTextSend } from '@/lib/offlineQueue'
 import axios from 'axios'
 import { normalizeConversation } from '@/lib/conversation'
 import { messageTypeFromMime, normalizeUploadMime } from '@/lib/mediaMime'
-import { patchMessageStatus, upsertMessage } from '@/lib/messageCache'
+import {
+  type MessagesInfinite,
+  coerceMessagesInfiniteData,
+  patchMessageStatusInfinite,
+  upsertMessageInfinite,
+} from '@/lib/messagesQueryCache'
 import { playWaFeedback, playWaFeedbackAsync } from '@/lib/waFeedbackSounds'
 import { normalizeMessage, normalizeMessagesResponse } from '@/lib/normalizeMessage'
 import { prepareMediaFileForUpload, readPreparedAudioBase64 } from '@/lib/prepareUpload'
@@ -147,48 +152,68 @@ export function useConversation(id: string) {
   })
 }
 
-function patchMessageInCache(
-  old: MessagesResponse | undefined,
+function patchMessageInCacheInfinite(
+  old: MessagesInfinite | undefined,
   message: Message,
-): MessagesResponse | undefined {
+): MessagesInfinite | undefined {
   if (!old) return old
-  const exists = old.messages.some((m) => m.id === message.id)
   return {
     ...old,
-    messages: exists
-      ? old.messages.map((m) => {
-          if (m.id !== message.id) return m
-          return {
-            ...m,
-            ...message,
-            localPreviewUri: message.localPreviewUri ?? m.localPreviewUri,
-          }
-        })
-      : [...old.messages, message],
+    pages: old.pages.map((page) => {
+      const exists = page.messages.some((m) => m.id === message.id)
+      if (!exists) return page
+      return {
+        ...page,
+        messages: page.messages.map((m) =>
+          m.id === message.id
+            ? {
+                ...m,
+                ...message,
+                localPreviewUri: message.localPreviewUri ?? m.localPreviewUri,
+              }
+            : m,
+        ),
+      }
+    }),
   }
 }
 
 export function useMessages(conversationId: string) {
   const qc = useQueryClient()
-  return useQuery({
+
+  // Migrate in-memory cache from pre-pagination useQuery shape (must run before useInfiniteQuery).
+  if (conversationId) {
+    const key = ['messages', conversationId] as const
+    const raw = qc.getQueryData(key)
+    if (raw) {
+      const coerced = coerceMessagesInfiniteData(raw)
+      if (!coerced) qc.removeQueries({ queryKey: key })
+      else if (raw !== coerced) qc.setQueryData(key, coerced)
+    }
+  }
+
+  const query = useInfiniteQuery({
     queryKey: ['messages', conversationId],
-    placeholderData: keepPreviousData,
     staleTime: 15_000,
     networkMode: 'offlineFirst',
-    queryFn: async () => {
+    initialPageParam: null as string | null,
+    enabled: !!conversationId,
+    queryFn: async ({ pageParam }) => {
       const res = await api.get<MessagesResponse>(
         `/conversations/${conversationId}/messages`,
+        { params: pageParam ? { before: pageParam } : {} },
       )
       const incoming = normalizeMessagesResponse(
         res.data as { messages: (Message & Record<string, unknown>)[]; nextCursor: string | null },
       )
-      const previous = qc.getQueryData<MessagesResponse>(['messages', conversationId])
-      if (!previous?.messages.length) return incoming
+      const previous = coerceMessagesInfiniteData(
+        qc.getQueryData(['messages', conversationId]),
+      )
+      const flatPrev = previous?.pages.flatMap((p) => p.messages) ?? []
+      if (!flatPrev.length) return incoming
 
       const localById = new Map(
-        previous.messages
-          .filter((m) => m.localPreviewUri)
-          .map((m) => [m.id, m.localPreviewUri!]),
+        flatPrev.filter((m) => m.localPreviewUri).map((m) => [m.id, m.localPreviewUri!]),
       )
       if (localById.size === 0) return incoming
 
@@ -200,8 +225,20 @@ export function useMessages(conversationId: string) {
         })),
       }
     },
-    enabled: !!conversationId,
+    getNextPageParam: (lastPage) => lastPage?.nextCursor ?? undefined,
   })
+
+  const infinite = coerceMessagesInfiniteData(query.data) ?? query.data
+  const messages = infinite?.pages.flatMap((p) => p.messages) ?? []
+  const nextCursor = infinite?.pages.at(-1)?.nextCursor ?? null
+
+  return {
+    ...query,
+    data: { messages, nextCursor },
+    fetchOlderMessages: query.fetchNextPage,
+    hasOlderMessages: query.hasNextPage,
+    isFetchingOlder: query.isFetchingNextPage,
+  }
 }
 
 export type SendTextInput = {
@@ -224,7 +261,7 @@ export function useSendText(conversationId: string) {
   const qc = useQueryClient()
   return useMutation({
     onMutate: async (input) => {
-      const previous = qc.getQueryData<MessagesResponse>(['messages', conversationId])
+      const previous = qc.getQueryData<MessagesInfinite>(['messages', conversationId])
       const optimisticId = `pending-text-${Date.now()}`
       const optimistic: Message = {
         id: optimisticId,
@@ -245,8 +282,8 @@ export function useSendText(conversationId: string) {
         sentAt: new Date().toISOString(),
         createdAt: new Date().toISOString(),
       }
-      qc.setQueryData<MessagesResponse>(['messages', conversationId], (old) =>
-        upsertMessage(old, optimistic),
+      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
+        upsertMessageInfinite(old, optimistic),
       )
       return { previous, optimisticId }
     },
@@ -283,8 +320,8 @@ export function useSendText(conversationId: string) {
       }
     },
     onSuccess: (message, _input, ctx) => {
-      qc.setQueryData<MessagesResponse>(['messages', conversationId], (old) =>
-        upsertMessage(old, message, { removeId: ctx?.optimisticId }),
+      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
+        upsertMessageInfinite(old, message, { removeId: ctx?.optimisticId }),
       )
     },
   })
@@ -314,7 +351,7 @@ export function useSendLocation(conversationId: string) {
   const qc = useQueryClient()
   return useMutation({
     onMutate: async (input) => {
-      const previous = qc.getQueryData<MessagesResponse>(['messages', conversationId])
+      const previous = qc.getQueryData<MessagesInfinite>(['messages', conversationId])
       const optimisticId = `pending-location-${Date.now()}`
       const metadata = {
         latitude: input.latitude,
@@ -342,8 +379,8 @@ export function useSendLocation(conversationId: string) {
         sentAt: new Date().toISOString(),
         createdAt: new Date().toISOString(),
       }
-      qc.setQueryData<MessagesResponse>(['messages', conversationId], (old) =>
-        upsertMessage(old, optimistic),
+      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
+        upsertMessageInfinite(old, optimistic),
       )
       return { previous, optimisticId }
     },
@@ -368,8 +405,8 @@ export function useSendLocation(conversationId: string) {
       return normalizeMessage(res.data.message as Message & Record<string, unknown>)
     },
     onSuccess: (message, _input, ctx) => {
-      qc.setQueryData<MessagesResponse>(['messages', conversationId], (old) =>
-        upsertMessage(old, message, { removeId: ctx?.optimisticId }),
+      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
+        upsertMessageInfinite(old, message, { removeId: ctx?.optimisticId }),
       )
     },
   })
@@ -560,10 +597,10 @@ export function useSendMedia(conversationId: string) {
       if (!mime.startsWith('audio/')) {
         void playWaFeedback('send')
       }
-      const previous = qc.getQueryData<MessagesResponse>(['messages', conversationId])
+      const previous = qc.getQueryData<MessagesInfinite>(['messages', conversationId])
       if (media.replaceMessageId) {
-        qc.setQueryData<MessagesResponse>(['messages', conversationId], (old) =>
-          patchMessageStatus(old, media.replaceMessageId!, 'pending'),
+        qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
+          patchMessageStatusInfinite(old, media.replaceMessageId!, 'pending'),
         )
         return {
           previous,
@@ -573,37 +610,39 @@ export function useSendMedia(conversationId: string) {
       }
       const optimisticId = `pending-media-${Date.now()}`
       const optimistic = buildOptimisticMediaMessage(conversationId, optimisticId, media)
-      qc.setQueryData<MessagesResponse>(['messages', conversationId], (old) =>
-        upsertMessage(old, optimistic),
+      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
+        upsertMessageInfinite(old, optimistic),
       )
       return { previous, optimisticId, localUri: media.uri }
     },
     onError: (_err, media, ctx) => {
       if (ctx?.replaceMessageId) {
-        qc.setQueryData<MessagesResponse>(['messages', conversationId], (old) =>
-          patchMessageStatus(old, ctx.replaceMessageId!, 'failed'),
+        qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
+          patchMessageStatusInfinite(old, ctx.replaceMessageId!, 'failed'),
         )
         return
       }
       if (!ctx?.optimisticId) return
       const failed = buildOptimisticMediaMessage(conversationId, ctx.optimisticId, media)
-      qc.setQueryData<MessagesResponse>(['messages', conversationId], (old) =>
-        upsertMessage(old, { ...failed, status: 'failed' }, { localPreviewUri: ctx.localUri }),
+      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
+        upsertMessageInfinite(old, { ...failed, status: 'failed' }, { localPreviewUri: ctx.localUri }),
       )
     },
     onSuccess: (message, _media, ctx) => {
       if (message.type === 'audio' && message.status === 'sent') {
         void playWaFeedbackAsync('sent')
       }
-      qc.setQueryData<MessagesResponse>(['messages', conversationId], (old) => {
-        if (ctx?.replaceMessageId && old) {
-          const trimmed = {
-            ...old,
-            messages: old.messages.filter((m) => m.id !== ctx.replaceMessageId),
+      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) => {
+        if (ctx?.replaceMessageId && old?.pages.length) {
+          const pages = [...old.pages]
+          const first = pages[0]
+          pages[0] = {
+            ...first,
+            messages: first.messages.filter((m) => m.id !== ctx.replaceMessageId),
           }
-          return upsertMessage(trimmed, message, { localPreviewUri: ctx.localUri })
+          return upsertMessageInfinite({ ...old, pages }, message, { localPreviewUri: ctx.localUri })
         }
-        return upsertMessage(old, message, {
+        return upsertMessageInfinite(old, message, {
           removeId: ctx?.optimisticId,
           localPreviewUri: ctx?.localUri,
         })
@@ -636,20 +675,20 @@ export function useResendMessage(conversationId: string) {
     },
     onMutate: (messageId) => {
       void playWaFeedback('send')
-      const previous = qc.getQueryData<MessagesResponse>(['messages', conversationId])
-      qc.setQueryData<MessagesResponse>(['messages', conversationId], (old) =>
-        patchMessageStatus(old, messageId, 'pending'),
+      const previous = qc.getQueryData<MessagesInfinite>(['messages', conversationId])
+      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
+        patchMessageStatusInfinite(old, messageId, 'pending'),
       )
       return { previous, messageId }
     },
     onError: (_err, messageId) => {
-      qc.setQueryData<MessagesResponse>(['messages', conversationId], (old) =>
-        patchMessageStatus(old, messageId, 'failed'),
+      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
+        patchMessageStatusInfinite(old, messageId, 'failed'),
       )
     },
     onSuccess: (message) => {
-      qc.setQueryData<MessagesResponse>(['messages', conversationId], (old) =>
-        patchMessageInCache(old, message),
+      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
+        patchMessageInCacheInfinite(old, message),
       )
       scheduleMessageSync(qc, conversationId)
     },
@@ -671,6 +710,23 @@ export function useSendTemplate(conversationId: string) {
       return res.data.message
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['messages', conversationId] }),
+  })
+}
+
+export function useMessageSearch(conversationId: string, term: string) {
+  const q = term.trim()
+  return useQuery({
+    queryKey: ['messages', conversationId, 'search', q],
+    enabled: !!conversationId && q.length >= 2,
+    staleTime: 30_000,
+    queryFn: async () => {
+      const res = await api.get<MessagesResponse>(`/conversations/${conversationId}/messages`, {
+        params: { q },
+      })
+      return normalizeMessagesResponse(
+        res.data as { messages: (Message & Record<string, unknown>)[]; nextCursor: string | null },
+      ).messages
+    },
   })
 }
 

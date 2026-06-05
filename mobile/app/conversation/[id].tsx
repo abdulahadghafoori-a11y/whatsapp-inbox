@@ -20,25 +20,36 @@ import Animated, {
   runOnUI,
   useAnimatedRef,
   useAnimatedScrollHandler,
+  useAnimatedStyle,
   useSharedValue,
+  withRepeat,
+  withTiming,
 } from 'react-native-reanimated'
 import { KeyboardAvoidingView, useReanimatedKeyboardAnimation } from 'react-native-keyboard-controller'
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
+import { StatusBar } from 'expo-status-bar'
+import { useColorScheme } from 'nativewind'
 import { useIsFocused } from '@react-navigation/native'
 import { useLocalSearchParams, useRouter } from 'expo-router'
 import * as ImagePicker from 'expo-image-picker'
 import * as DocumentPicker from 'expo-document-picker'
+import * as Clipboard from 'expo-clipboard'
+import { Ionicons } from '@expo/vector-icons'
 import {
   MessageActionsOverlay,
   type MessageAnchor,
 } from '@/components/MessageActionsOverlay'
+import { Avatar } from '@/components/Avatar'
+import { PressableScale } from '@/components/PressableScale'
+import { hapticLight, hapticMedium, hapticWarning } from '@/lib/haptics'
+import { clearDraft, loadDraft, saveDraft } from '@/lib/drafts'
 import { ForwardMessageSheet } from '@/components/ForwardMessageSheet'
 import { SwipeableMessageBubble } from '@/components/SwipeableMessageBubble'
 import { ReplyQuoteBlock } from '@/components/ReplyQuoteBlock'
 import { messageToReplyPreview } from '@/lib/replyPreview'
 import { MessagingWindowTimer } from '@/components/MessagingWindowTimer'
 import { messagingWindowState, showUnderHeaderBar } from '@/lib/messagingWindow'
-import { AttachIcon, CloseIcon, KeyboardIcon, MicIcon, SendIcon } from '@/components/ChatIcons'
+import { KeyboardIcon } from '@/components/ChatIcons'
 import { AttachPanel, ATTACH_TRAY_HEIGHT } from '@/components/AttachMenu'
 import { MediaPreviewSheet, type PendingMedia } from '@/components/MediaPreviewSheet'
 import {
@@ -67,8 +78,12 @@ import {
   type WaTemplate,
 } from '@/hooks/useConversations'
 import { useConversationRoom } from '@/hooks/useSocket'
+import { useTypingEmitter, useTypingIndicator } from '@/hooks/useTyping'
+import { useMessageSearch } from '@/hooks/useConversations'
 import { useTeam } from '@/hooks/useTeam'
 import { api, apiErrorMessage } from '@/services/api'
+import { userFacingLoadError } from '@/lib/userFacingError'
+import { SocketConnectionBanner } from '@/components/SocketConnectionBanner'
 import {
   cancelVoiceRecording,
   startVoiceRecording,
@@ -97,6 +112,8 @@ export default function ChatScreen() {
   const router = useRouter()
   const isFocused = useIsFocused()
   const insets = useSafeAreaInsets()
+  const { colorScheme: scheme } = useColorScheme()
+  const isDark = scheme === 'dark'
   const toast = useToast()
 
   const { data: conversation } = useConversation(conversationId)
@@ -106,6 +123,9 @@ export default function ChatScreen() {
     isError: messagesError,
     error: messagesFetchError,
     refetch: refetchMessages,
+    fetchOlderMessages,
+    hasOlderMessages,
+    isFetchingOlder,
   } = useMessages(conversationId)
   const sendText = useSendText(conversationId)
   const sendLocation = useSendLocation(conversationId)
@@ -115,6 +135,7 @@ export default function ChatScreen() {
   const update = useUpdateConversation(conversationId)
 
   const [draft, setDraft] = useState('')
+  const draftLoadedRef = useRef(false)
   const [replyTo, setReplyTo] = useState<Message | null>(null)
   const [actionMessage, setActionMessage] = useState<Message | null>(null)
   const [actionAnchor, setActionAnchor] = useState<MessageAnchor | null>(null)
@@ -126,6 +147,32 @@ export default function ChatScreen() {
   const [keyboardVisible, setKeyboardVisible] = useState(false)
   const { height: keyboardHeight } = useReanimatedKeyboardAnimation()
   const [menuOpen, setMenuOpen] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchTerm, setSearchTerm] = useState('')
+  const typingPeers = useTypingIndicator(conversationId)
+  useTypingEmitter(conversationId, draft)
+
+  // Restore any saved draft when entering the conversation.
+  useEffect(() => {
+    draftLoadedRef.current = false
+    let cancelled = false
+    void loadDraft(conversationId).then((saved) => {
+      if (cancelled) return
+      if (saved) setDraft(saved)
+      draftLoadedRef.current = true
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [conversationId])
+
+  // Persist the draft (debounced) so typed text survives navigation.
+  useEffect(() => {
+    if (!draftLoadedRef.current) return
+    const t = setTimeout(() => void saveDraft(conversationId, draft), 400)
+    return () => clearTimeout(t)
+  }, [conversationId, draft])
+  const { data: searchHits } = useMessageSearch(conversationId, searchTerm)
   const [sendingVoice, setSendingVoice] = useState(false)
   const [assignOpen, setAssignOpen] = useState(false)
   const [templateOpen, setTemplateOpen] = useState(false)
@@ -281,10 +328,13 @@ export default function ChatScreen() {
   }
 
   // Inverted list wants newest first; API returns oldest-first.
-  const inverted = useMemo(
-    () => (messagesData?.messages ?? []).slice().reverse(),
-    [messagesData],
-  )
+  const inverted = useMemo(() => {
+    const list =
+      searchTerm.trim().length >= 2
+        ? (searchHits ?? [])
+        : (messagesData?.messages ?? [])
+    return list.slice().reverse()
+  }, [messagesData, searchHits, searchTerm])
 
   const bumpScrubVisible = useCallback(() => {
     setScrubVisible(true)
@@ -349,6 +399,7 @@ export default function ChatScreen() {
     const replyToMessageId = savedReply?.id
     const replyToPreview = savedReply ? messageToReplyPreview(savedReply) : undefined
     setDraft('')
+    void clearDraft(conversationId)
     setReplyTo(null)
     scrollToLatest()
     sendText.mutate(
@@ -595,6 +646,7 @@ export default function ChatScreen() {
   async function startRecording() {
     if (recordingOpen || voiceStartInFlight.current) return
     voiceStartInFlight.current = true
+    hapticMedium()
     openRecordingUi()
     try {
       await playWaFeedbackAsync('recordStart')
@@ -612,6 +664,7 @@ export default function ChatScreen() {
   }
 
   function cancelRecording() {
+    hapticWarning()
     playWaFeedback('recordCancel')
     const rec = voiceRecorder.current
     voiceRecorder.current = null
@@ -672,39 +725,77 @@ export default function ChatScreen() {
   }
 
   return (
-    <SafeAreaView className="flex-1 bg-wa-bg" edges={['top']}>
+    <View className="flex-1 bg-wa-bg dark:bg-wa-chatDark">
+      <StatusBar style="light" />
       {/* Header */}
-      <View className="flex-row items-center gap-3 bg-wa-teal px-4 py-3 shadow-sm">
-        <Pressable
-          onPress={() => router.back()}
-          hitSlop={10}
-          className="h-9 w-9 items-center justify-center rounded-full bg-white/15"
-        >
-          <Text className="text-xl leading-none text-white">‹</Text>
-        </Pressable>
-        <View className="min-w-0 flex-1 justify-center">
-          <Text numberOfLines={1} className="text-[17px] font-semibold text-white">
-            {contactName}
-          </Text>
-          <Text numberOfLines={1} className="mt-0.5 text-xs text-white/75">
-            {conversation?.status ?? '—'}
+      <SafeAreaView edges={['top']} className="bg-wa-teal dark:bg-wa-headerDark">
+        <View className="flex-row items-center gap-1 px-2 py-2.5">
+          <Pressable
+            onPress={() => router.back()}
+            hitSlop={8}
+            className="h-10 w-10 items-center justify-center rounded-full active:bg-white/15"
+          >
+            <Ionicons name="arrow-back" size={24} color="#ffffff" />
+          </Pressable>
+          <Avatar
+            name={conversation?.contact?.name}
+            fallback={conversation?.contact?.waId ?? contactName}
+            size={38}
+          />
+          <View className="min-w-0 flex-1 justify-center pl-1.5">
+            <Text numberOfLines={1} className="text-[17px] font-semibold text-white">
+              {contactName}
+            </Text>
+            <Text numberOfLines={1} className="mt-0.5 text-xs text-white/70">
+              {conversation?.status ?? '—'}
+            </Text>
+          </View>
+          {conversation ? <MessagingWindowTimer conversation={conversation} variant="header" /> : null}
+          <Pressable
+            onPress={() => setSearchOpen((v) => !v)}
+            hitSlop={8}
+            className="h-10 w-10 items-center justify-center rounded-full active:bg-white/15"
+          >
+            <Ionicons name="search" size={21} color="#ffffff" />
+          </Pressable>
+          <Pressable
+            onPress={() => setMenuOpen(true)}
+            hitSlop={8}
+            className="h-10 w-10 items-center justify-center rounded-full active:bg-white/15"
+          >
+            <Ionicons name="ellipsis-vertical" size={20} color="#ffffff" />
+          </Pressable>
+        </View>
+      </SafeAreaView>
+
+      {searchOpen ? (
+        <View className="border-b border-neutral-200 bg-white px-3 py-2 dark:border-white/5 dark:bg-wa-headerDark">
+          <TextInput
+            value={searchTerm}
+            onChangeText={setSearchTerm}
+            placeholder="Search in conversation"
+            placeholderTextColor={isDark ? '#8696A0' : '#9ca3af'}
+            className="rounded-lg bg-neutral-100 px-3 py-2 text-[15px] text-neutral-900 dark:bg-wa-elevated dark:text-wa-textDark"
+            autoFocus
+          />
+        </View>
+      ) : null}
+
+      {typingPeers.length > 0 ? (
+        <View className="bg-white/90 px-4 py-1 dark:bg-wa-panelDeep/90">
+          <Text className="text-xs text-neutral-500 dark:text-wa-subDark">
+            {typingPeers.join(', ')} {typingPeers.length === 1 ? 'is' : 'are'} typing…
           </Text>
         </View>
-        {conversation ? <MessagingWindowTimer conversation={conversation} variant="header" /> : null}
-        <Pressable
-          onPress={() => setMenuOpen(true)}
-          hitSlop={10}
-          className="h-9 w-9 items-center justify-center rounded-full bg-white/15"
-        >
-          <Text className="text-lg text-white">⋮</Text>
-        </Pressable>
-      </View>
+      ) : null}
 
       {(() => {
         const windowState = conversation ? messagingWindowState(conversation) : null
         if (!windowState || !showUnderHeaderBar(windowState)) return null
         return <MessagingWindowTimer conversation={conversation} variant="banner" />
       })()}
+
+      <SocketConnectionBanner />
 
       <KeyboardAvoidingView
         style={{ flex: 1 }}
@@ -714,12 +805,12 @@ export default function ChatScreen() {
         <View className="min-h-0 flex-1">
           {messagesError ? (
             <QueryError
-              message={`${apiErrorMessage(messagesFetchError)}. Check that the backend is running and EXPO_PUBLIC_API_URL in mobile/.env matches your PC IP (same Wi‑Fi as the phone).`}
+              message={userFacingLoadError(messagesFetchError, 'chat')}
               onRetry={() => void refetchMessages()}
             />
           ) : showMessagesLoader ? (
             <View className="flex-1 items-center justify-center">
-              <ActivityIndicator color="#128C7E" />
+              <ActivityIndicator color="#00A884" />
             </View>
           ) : (
             <View className="min-h-0 flex-1" onLayout={(e) => setListViewportHeight(e.nativeEvent.layout.height)}>
@@ -727,8 +818,23 @@ export default function ChatScreen() {
               ref={messagesListRef}
               data={inverted}
               inverted
+              initialNumToRender={18}
+              maxToRenderPerBatch={12}
+              windowSize={9}
+              removeClippedSubviews
               scrollEnabled={!listScrubbing}
               keyExtractor={(m) => m.id}
+              onEndReachedThreshold={0.2}
+              onEndReached={() => {
+                if (hasOlderMessages && !isFetchingOlder) void fetchOlderMessages()
+              }}
+              ListFooterComponent={
+                isFetchingOlder ? (
+                  <View className="items-center py-3">
+                    <ActivityIndicator color="#00A884" size="small" />
+                  </View>
+                ) : null
+              }
               keyboardShouldPersistTaps="handled"
               directionalLockEnabled
               showsVerticalScrollIndicator={false}
@@ -794,52 +900,57 @@ export default function ChatScreen() {
 
         <View
           style={{
-            backgroundColor: '#ffffff',
+            backgroundColor: isDark ? '#111B21' : '#ffffff',
             paddingBottom: hideFooterSafePad ? 0 : safeBottom,
           }}
         >
           {canSendSession ? (
           recordingOpen ? (
-            <View className="bg-white px-4 py-3">
+            <View className="bg-white px-4 py-3 dark:bg-wa-panelDeep">
               <View className="flex-row items-center gap-3">
-                <Pressable
+                <PressableScale
                   onPress={cancelRecording}
+                  haptic="none"
                   hitSlop={8}
-                  className="h-10 w-10 items-center justify-center rounded-full bg-neutral-100"
+                  className="h-10 w-10 items-center justify-center rounded-full bg-neutral-100 dark:bg-wa-elevated"
                 >
-                  <CloseIcon />
-                </Pressable>
-                <View className="h-11 flex-1 flex-row items-center gap-2 rounded-2xl bg-neutral-100 px-3">
-                  <View className="h-2.5 w-2.5 shrink-0 rounded-full bg-red-500" />
+                  <Ionicons name="trash-outline" size={20} color={isDark ? '#f87171' : '#ef4444'} />
+                </PressableScale>
+                <View className="h-11 flex-1 flex-row items-center gap-2 rounded-2xl bg-neutral-100 px-3 dark:bg-wa-elevated">
+                  <RecordingPulse />
                   <VoiceRecordingWaveform
                     recorder={voiceRecorderLive}
                     active={micReady}
                   />
-                  <Text className="shrink-0 text-sm font-medium tabular-nums text-neutral-700">
+                  <Text className="shrink-0 text-sm font-medium tabular-nums text-neutral-700 dark:text-neutral-300">
                     {formatDuration(recordingMs / 1000)}
                   </Text>
                 </View>
-                <Pressable
-                  onPress={() => void finishVoiceRecording()}
+                <PressableScale
+                  onPress={() => {
+                    hapticLight()
+                    void finishVoiceRecording()
+                  }}
+                  haptic="none"
                   disabled={!micReady || sendMedia.isPending || sendingVoice}
                   className={`h-11 w-11 items-center justify-center rounded-full shadow-sm ${
-                    micReady ? 'bg-wa-teal' : 'bg-neutral-300'
+                    micReady ? 'bg-wa-teal' : 'bg-neutral-300 dark:bg-wa-elevated'
                   }`}
                 >
                   {sendMedia.isPending || sendingVoice ? (
                     <ActivityIndicator color="#fff" size="small" />
                   ) : (
-                    <SendIcon />
+                    <Ionicons name="send" size={19} color="#ffffff" style={{ marginLeft: 2 }} />
                   )}
-                </Pressable>
+                </PressableScale>
               </View>
             </View>
           ) : (
             <View
-              className={`bg-white ${attachMenuOpen ? '' : 'border-t border-neutral-100'}`}
+              className={`bg-white dark:bg-wa-panelDeep ${attachMenuOpen ? '' : 'border-t border-neutral-100 dark:border-white/5'}`}
             >
               {replyTo ? (
-                <View className="flex-row items-center gap-2 border-b border-neutral-100 px-3 py-2">
+                <View className="flex-row items-center gap-2 border-b border-neutral-100 px-3 py-2 dark:border-white/5">
                   <View className="flex-1">
                     <ReplyQuoteBlock
                       reply={messageToReplyPreview(replyTo)}
@@ -847,8 +958,8 @@ export default function ChatScreen() {
                       isOutboundBubble={false}
                     />
                   </View>
-                  <Pressable onPress={() => setReplyTo(null)} hitSlop={8}>
-                    <Text className="text-lg text-neutral-400">✕</Text>
+                  <Pressable onPress={() => setReplyTo(null)} hitSlop={8} className="p-1">
+                    <Ionicons name="close" size={20} color={isDark ? '#8696A0' : '#9ca3af'} />
                   </Pressable>
                 </View>
               ) : null}
@@ -860,9 +971,13 @@ export default function ChatScreen() {
                 accessibilityLabel={
                   showKeyboardIcon ? 'Show keyboard' : 'Attach file'
                 }
-                className="mb-1 h-10 w-10 items-center justify-center rounded-full bg-neutral-100"
+                className="h-11 w-11 items-center justify-center rounded-full bg-neutral-100 dark:bg-transparent"
               >
-                {showKeyboardIcon ? <KeyboardIcon /> : <AttachIcon />}
+                {showKeyboardIcon ? (
+                  <KeyboardIcon color={isDark ? '#aebac1' : '#54656f'} />
+                ) : (
+                  <Ionicons name="attach" size={24} color={isDark ? '#aebac1' : '#54656f'} />
+                )}
               </Pressable>
               <Pressable
                 style={{ flex: 1 }}
@@ -882,32 +997,34 @@ export default function ChatScreen() {
                   pointerEvents={attachMenuOpen ? 'none' : 'auto'}
                   placeholder="Type a message"
                   multiline
-                  className="max-h-28 min-h-[44px] flex-1 rounded-3xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-[15px] leading-5 text-neutral-900"
-                  placeholderTextColor="#9ca3af"
+                  className="max-h-28 min-h-[44px] flex-1 rounded-3xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-[15px] leading-5 text-neutral-900 dark:border-transparent dark:bg-wa-elevated dark:text-wa-textDark"
+                  placeholderTextColor={isDark ? '#8696A0' : '#9ca3af'}
                 />
               </Pressable>
               {draft.trim() ? (
-                <Pressable
+                <PressableScale
                   onPress={onSendText}
+                  haptic="light"
                   disabled={sendText.isPending}
-                  className="mb-0.5 h-11 w-11 items-center justify-center rounded-full bg-wa-teal shadow-sm"
+                  className="h-11 w-11 items-center justify-center rounded-full bg-wa-teal shadow-sm"
                 >
-                  <SendIcon />
-                </Pressable>
+                  <Ionicons name="send" size={19} color="#ffffff" style={{ marginLeft: 2 }} />
+                </PressableScale>
               ) : (
-                <Pressable
+                <PressableScale
                   onPress={() => void startRecording()}
+                  haptic="none"
                   disabled={sendMedia.isPending || recordingOpen}
-                  className="mb-0.5 h-11 w-11 items-center justify-center rounded-full bg-wa-teal shadow-sm"
+                  className="h-11 w-11 items-center justify-center rounded-full bg-wa-teal shadow-sm"
                 >
-                  <MicIcon />
-                </Pressable>
+                  <Ionicons name="mic" size={23} color="#ffffff" />
+                </PressableScale>
               )}
             </View>
             </View>
           )
         ) : needsTemplate ? (
-          <View className="bg-white px-4 py-3">
+          <View className="bg-white px-4 py-3 dark:bg-wa-panelDeep">
             <Pressable
               onPress={() => setTemplateOpen(true)}
               className="items-center rounded-xl bg-wa-teal py-3"
@@ -948,6 +1065,11 @@ export default function ChatScreen() {
         }}
         onReply={onReplyToMessage}
         onForward={(m) => setForwardMessage(m)}
+        onCopy={(m) => {
+          if (!m.body) return
+          void Clipboard.setStringAsync(m.body)
+          toast.show('Copied to clipboard')
+        }}
       />
 
       <ForwardMessageSheet
@@ -963,9 +1085,19 @@ export default function ChatScreen() {
       <OverflowMenu
         open={menuOpen}
         onClose={() => setMenuOpen(false)}
+        status={conversation?.status}
         onResolve={() => {
           setMenuOpen(false)
           void resolveConversation()
+        }}
+        onReopen={async () => {
+          setMenuOpen(false)
+          try {
+            await update.mutateAsync({ status: 'open' })
+            toast.show('Conversation reopened', 'success')
+          } catch (err) {
+            toast.show(apiErrorMessage(err), 'error')
+          }
         }}
         onAssign={() => {
           setMenuOpen(false)
@@ -1013,11 +1145,26 @@ export default function ChatScreen() {
         onSend={confirmPendingLocation}
         onPermissionDenied={() => toast.show('Location permission denied', 'error')}
       />
-    </SafeAreaView>
+    </View>
   )
 }
 
 // --- Sub-sheets ---------------------------------------------------------------
+
+/** Gently pulsing red dot shown while a voice note is being recorded. */
+function RecordingPulse() {
+  const o = useSharedValue(1)
+  useEffect(() => {
+    o.value = withRepeat(withTiming(0.25, { duration: 700 }), -1, true)
+  }, [o])
+  const style = useAnimatedStyle(() => ({ opacity: o.value }))
+  return (
+    <Animated.View
+      style={style}
+      className="h-2.5 w-2.5 shrink-0 rounded-full bg-red-500"
+    />
+  )
+}
 
 function BottomSheet({
   open,
@@ -1036,16 +1183,48 @@ function BottomSheet({
           onPress={onClose}
           accessibilityLabel="Close"
         />
-        <View className="rounded-t-2xl bg-white pb-8 pt-2">{children}</View>
+        <View className="rounded-t-3xl bg-white pb-8 pt-2.5 dark:bg-wa-panel">
+          <View className="mb-1.5 h-1 w-10 self-center rounded-full bg-neutral-300 dark:bg-wa-elevated" />
+          {children}
+        </View>
       </View>
     </Modal>
   )
 }
 
-function Row({ label, onPress, danger }: { label: string; onPress: () => void; danger?: boolean }) {
+function Row({
+  label,
+  onPress,
+  danger,
+  icon,
+  iconColor,
+  trailing,
+}: {
+  label: string
+  onPress: () => void
+  danger?: boolean
+  icon?: keyof typeof Ionicons.glyphMap
+  iconColor?: string
+  trailing?: React.ReactNode
+}) {
   return (
-    <Pressable onPress={onPress} className="px-5 py-4 active:bg-neutral-50">
-      <Text className={`text-base ${danger ? 'text-red-600' : 'text-neutral-800'}`}>{label}</Text>
+    <Pressable
+      onPress={onPress}
+      className="flex-row items-center gap-3.5 px-5 py-3.5 active:bg-neutral-100 dark:active:bg-wa-elevated"
+    >
+      {icon ? (
+        <Ionicons
+          name={icon}
+          size={21}
+          color={iconColor ?? (danger ? '#ef4444' : '#54656f')}
+        />
+      ) : null}
+      <Text
+        className={`flex-1 text-[15px] ${danger ? 'text-red-600 dark:text-red-400' : 'text-neutral-800 dark:text-neutral-200'}`}
+      >
+        {label}
+      </Text>
+      {trailing}
     </Pressable>
   )
 }
@@ -1053,21 +1232,29 @@ function Row({ label, onPress, danger }: { label: string; onPress: () => void; d
 function OverflowMenu({
   open,
   onClose,
+  status,
   onResolve,
+  onReopen,
   onAssign,
   onAttribution,
 }: {
   open: boolean
   onClose: () => void
+  status?: string
   onResolve: () => void
+  onReopen: () => void
   onAssign: () => void
   onAttribution: () => void
 }) {
   return (
     <BottomSheet open={open} onClose={onClose}>
-      <Row label="✓  Resolve" onPress={onResolve} />
-      <Row label="👤  Assign to…" onPress={onAssign} />
-      <Row label="📊  View attribution" onPress={onAttribution} />
+      {status === 'resolved' ? (
+        <Row label="Reopen" icon="refresh" onPress={onReopen} />
+      ) : (
+        <Row label="Resolve" icon="checkmark-done" iconColor="#008069" onPress={onResolve} />
+      )}
+      <Row label="Assign to…" icon="person-add-outline" onPress={onAssign} />
+      <Row label="View attribution" icon="bar-chart-outline" onPress={onAttribution} />
     </BottomSheet>
   )
 }
@@ -1092,10 +1279,25 @@ function AssignSheet({
         Assign to
       </Text>
       <ScrollView style={{ maxHeight: 320 }}>
+        <Row
+          label="Unassigned"
+          icon="person-remove-outline"
+          onPress={async () => {
+            try {
+              await update.mutateAsync({ assignedTo: null })
+              toast.show('Unassigned', 'success')
+              onAssigned()
+            } catch (err) {
+              toast.show(apiErrorMessage(err), 'error')
+            }
+          }}
+        />
         {data?.members.map((m) => (
           <Row
             key={m.id}
-            label={`${m.isOnline ? '🟢' : '⚪'}  ${m.name}`}
+            label={m.name}
+            icon="person-circle-outline"
+            iconColor={m.isOnline ? '#25D366' : '#8696A0'}
             onPress={async () => {
               try {
                 await update.mutateAsync({ assignedTo: m.id })
@@ -1130,7 +1332,7 @@ function TemplateSheet({
         Message templates
       </Text>
       {isLoading ? (
-        <ActivityIndicator className="py-6" color="#128C7E" />
+        <ActivityIndicator className="py-6" color="#00A884" />
       ) : (
         <ScrollView style={{ maxHeight: 360 }}>
           {(data ?? []).map((t: WaTemplate) => (
@@ -1199,8 +1401,8 @@ function Field({ label, value }: { label: string; value: string | null }) {
   if (!value) return null
   return (
     <View>
-      <Text className="text-xs text-neutral-400">{label}</Text>
-      <Text className="text-[15px] text-neutral-800">{value}</Text>
+      <Text className="text-xs text-neutral-400 dark:text-neutral-500">{label}</Text>
+      <Text className="text-[15px] text-neutral-800 dark:text-neutral-200">{value}</Text>
     </View>
   )
 }

@@ -1,10 +1,12 @@
 import { memo, useCallback, useRef } from 'react'
 import { Animated, Pressable, Text, View } from 'react-native'
 import Swipeable from 'react-native-gesture-handler/Swipeable'
+import { Ionicons } from '@expo/vector-icons'
 import { ConversationItem } from '@/components/ConversationItem'
+import { hapticLight } from '@/lib/haptics'
 import type { ConversationListItem } from '@/types'
 
-const ACTION_WIDTH = 76
+const ACTION_WIDTH = 80
 const ACTIONS_WIDTH = ACTION_WIDTH * 2
 
 type SwipeableConversationItemProps = {
@@ -33,12 +35,14 @@ function SwipeableConversationItemBase({
   }, [])
 
   const handleReadToggle = useCallback(() => {
+    hapticLight()
     if (isUnread) onMarkRead(conversation.id)
     else onMarkUnread(conversation.id)
     close()
   }, [close, conversation.id, isUnread, onMarkRead, onMarkUnread])
 
   const handlePinToggle = useCallback(() => {
+    hapticLight()
     onTogglePin(conversation.id, !isPinned)
     close()
   }, [close, conversation.id, isPinned, onTogglePin])
@@ -54,21 +58,31 @@ function SwipeableConversationItemBase({
         extrapolate: 'clamp',
       })
 
-      const scale = progress.interpolate({
-        inputRange: [0, 1],
-        outputRange: [0.92, 1],
+      // Icons spring in from slightly small + faded for a smooth, premium reveal.
+      const iconScale = progress.interpolate({
+        inputRange: [0, 0.6, 1],
+        outputRange: [0.4, 0.85, 1],
+        extrapolate: 'clamp',
+      })
+      const iconOpacity = progress.interpolate({
+        inputRange: [0, 0.4, 1],
+        outputRange: [0, 0.6, 1],
         extrapolate: 'clamp',
       })
 
-      const readBg = isUnread ? '#128C7E' : '#6b7280'
-      const pinBg = isPinned ? '#d97706' : '#f59e0b'
+      const readBg = isUnread ? '#00A884' : '#5B7083'
+      const pinBg = isPinned ? '#C2791F' : '#F4A621'
+      const iconAnim = {
+        transform: [{ scale: iconScale }],
+        opacity: iconOpacity,
+      }
 
       return (
         <Animated.View
           style={{
             width: ACTIONS_WIDTH,
             flexDirection: 'row',
-            transform: [{ translateX }, { scale }],
+            transform: [{ translateX }],
           }}
         >
           <Pressable
@@ -78,10 +92,12 @@ function SwipeableConversationItemBase({
             accessibilityRole="button"
             accessibilityLabel={isPinned ? 'Unpin chat' : 'Pin chat'}
           >
-            <Text className="text-xl">{isPinned ? '📌' : '📍'}</Text>
-            <Text className="mt-0.5 text-[11px] font-semibold text-white">
-              {isPinned ? 'Unpin' : 'Pin'}
-            </Text>
+            <Animated.View style={iconAnim} className="items-center">
+              <Ionicons name={isPinned ? 'pin-outline' : 'pin'} size={22} color="#ffffff" />
+              <Text className="mt-1 text-[11px] font-semibold text-white">
+                {isPinned ? 'Unpin' : 'Pin'}
+              </Text>
+            </Animated.View>
           </Pressable>
           <Pressable
             onPress={handleReadToggle}
@@ -90,9 +106,16 @@ function SwipeableConversationItemBase({
             accessibilityRole="button"
             accessibilityLabel={isUnread ? 'Mark as read' : 'Mark as unread'}
           >
-            <Text className="text-sm font-semibold text-white">
-              {isUnread ? 'Read' : 'Unread'}
-            </Text>
+            <Animated.View style={iconAnim} className="items-center">
+              <Ionicons
+                name={isUnread ? 'checkmark-done' : 'ellipse'}
+                size={22}
+                color="#ffffff"
+              />
+              <Text className="mt-1 text-[11px] font-semibold text-white">
+                {isUnread ? 'Read' : 'Unread'}
+              </Text>
+            </Animated.View>
           </Pressable>
         </Animated.View>
       )
@@ -105,11 +128,12 @@ function SwipeableConversationItemBase({
       ref={swipeRef}
       renderLeftActions={renderLeftActions}
       overshootLeft={false}
-      friction={2}
-      leftThreshold={ACTION_WIDTH}
+      overshootFriction={8}
+      friction={1.8}
+      leftThreshold={ACTION_WIDTH * 0.7}
       onSwipeableWillOpen={() => onSwipeOpen?.(conversation.id, swipeRef.current)}
     >
-      <View className="bg-white">
+      <View className="bg-white dark:bg-wa-panelDeep">
         <ConversationItem conversation={conversation} onPress={onPress} />
       </View>
     </Swipeable>

@@ -1,13 +1,26 @@
 # Caddy reverse proxy with automatic HTTPS.
 # Replace your-domain.com with your real domain (DNS A record -> server IP).
 your-domain.com {
-	reverse_proxy localhost:3001
+	# Proxy-level throttle on auth endpoints (defense in depth on top of the
+	# app's in-memory limits). Requires Caddy v2.7+ with the rate_limit module
+	# (xcaddy build with github.com/mholt/caddy-ratelimit). If your Caddy build
+	# lacks the module, drop this block and rely on the app + Cloudflare WAF.
+	@auth path /api/auth/*
+	rate_limit @auth {
+		zone auth_zone {
+			key {remote_host}
+			events 30
+			window 1m
+		}
+	}
 
 	# Give the webhook a little more headroom for bursts.
 	@webhook path /api/webhook/*
 	handle @webhook {
 		reverse_proxy localhost:3001
 	}
+
+	reverse_proxy localhost:3001
 
 	encode gzip
 }

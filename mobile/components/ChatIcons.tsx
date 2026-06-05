@@ -154,7 +154,7 @@ export function CloseIcon({ size = 22, color = '#6b7280' }: IconProps) {
 }
 
 /** Curved reply arrow (swipe + menu). */
-export function ReplySwipeIcon({ size = 24, color = '#128C7E' }: IconProps) {
+export function ReplySwipeIcon({ size = 24, color = '#00A884' }: IconProps) {
   return (
     <Text
       pointerEvents="none"
@@ -209,7 +209,7 @@ export function DeleteActionIcon({ size = 22, color = '#dc2626' }: IconProps) {
   )
 }
 
-export function DocumentIcon({ size = 28, color = '#128C7E' }: IconProps) {
+export function DocumentIcon({ size = 28, color = '#00A884' }: IconProps) {
   const w = size * 0.65
   const h = size * 0.8
   return (

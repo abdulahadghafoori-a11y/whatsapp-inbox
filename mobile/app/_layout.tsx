@@ -1,5 +1,6 @@
 import '../global.css'
 import { useEffect } from 'react'
+import { useColorScheme } from 'nativewind'
 import { Stack, useRouter, useRootNavigationState, useSegments } from 'expo-router'
 import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client'
 import { GestureHandlerRootView } from 'react-native-gesture-handler'
@@ -12,12 +13,27 @@ import { ToastProvider } from '@/components/Toast'
 import { SocketBridge } from '@/components/SocketBridge'
 import { GlobalAudioHost } from '@/components/GlobalAudioHost'
 import { OfflineSyncBridge } from '@/components/OfflineSyncBridge'
+import { PushNotificationBridge } from '@/components/PushNotificationBridge'
 import { MediaCacheBridge } from '@/components/MediaCacheBridge'
 import { queryPersister, queryClient, shouldDehydrateQuery } from '@/lib/queryClient'
-import { modalPresentationOptions, stackTransitionOptions } from '@/lib/navigation'
+import { stackTransitionOptions } from '@/lib/navigation'
+import { initErrorReporting } from '@/lib/errorReporting'
+import { initTheme } from '@/lib/theme'
+
+initErrorReporting()
+void initTheme()
+
+if (__DEV__) {
+  const api = process.env.EXPO_PUBLIC_API_URL ?? '(not set — using localhost fallback)'
+  const socket = process.env.EXPO_PUBLIC_SOCKET_URL ?? api
+  console.log('[env] EXPO_PUBLIC_API_URL=', api)
+  console.log('[env] EXPO_PUBLIC_SOCKET_URL=', socket)
+}
 
 function AuthGate() {
   const router = useRouter()
+  const { colorScheme: scheme } = useColorScheme()
+  const isDark = scheme === 'dark'
   const segments = useSegments()
   const navigationReady = useRootNavigationState()?.key != null
   const segmentKey = segments.join('/')
@@ -59,27 +75,28 @@ function AuthGate() {
       {accessToken ? <SocketBridge /> : null}
       {accessToken ? <OfflineSyncBridge /> : null}
       {accessToken ? <MediaCacheBridge /> : null}
+      {accessToken ? <PushNotificationBridge /> : null}
       {accessToken ? <GlobalAudioHost /> : null}
-      <Stack screenOptions={{ headerShown: false, animation: 'fade', animationDuration: 200 }}>
+      <Stack
+        screenOptions={{
+          headerShown: false,
+          animation: 'fade',
+          animationDuration: 200,
+          contentStyle: { backgroundColor: isDark ? '#0B141A' : '#F7F8FA' },
+        }}
+      >
         <Stack.Screen name="index" options={{ headerShown: false }} />
         <Stack.Screen name="(auth)" />
         <Stack.Screen name="(tabs)" options={{ animation: 'fade' }} />
         <Stack.Screen name="conversation" options={stackTransitionOptions} />
-        <Stack.Screen
-          name="settings"
-          options={{
-            headerShown: true,
-            title: 'Settings',
-            ...modalPresentationOptions,
-          }}
-        />
+        <Stack.Screen name="search" options={{ headerShown: false, ...stackTransitionOptions }} />
       </Stack>
       {!isHydrated ? (
         <View
           style={StyleSheet.absoluteFillObject}
-          className="items-center justify-center bg-white"
+          className="items-center justify-center bg-white dark:bg-wa-panelDeep"
         >
-          <ActivityIndicator size="large" color="#128C7E" />
+          <ActivityIndicator size="large" color="#00A884" />
         </View>
       ) : null}
     </>
@@ -87,6 +104,7 @@ function AuthGate() {
 }
 
 export default function RootLayout() {
+  const { colorScheme: scheme } = useColorScheme()
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
@@ -100,7 +118,7 @@ export default function RootLayout() {
           }}
         >
           <ToastProvider>
-            <StatusBar style="dark" />
+            <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />
             <AuthGate />
           </ToastProvider>
         </PersistQueryClientProvider>

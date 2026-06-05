@@ -6,6 +6,7 @@ import {
   conversations,
   messages,
   conversationEvents,
+  teamMembers,
   type Contact,
   type Conversation,
 } from '../db/schema.js'
@@ -28,6 +29,7 @@ interface WaMedia {
   id: string
   mime_type?: string
   filename?: string
+  caption?: string
 }
 
 interface WaMessage {
@@ -37,6 +39,7 @@ interface WaMessage {
   timestamp: string
   type: string
   text?: { body: string }
+  context?: { id?: string; from?: string }
   referral?: {
     source_url?: string
     source_id?: string
@@ -91,6 +94,10 @@ export async function processWebhookPayload(
   payload: unknown,
 ): Promise<void> {
   const data = payload as WaPayload
+  // Collect per-change failures and re-throw at the end so the caller leaves the
+  // webhook_events row unprocessed (replayable). Was: errors were swallowed here,
+  // so a failed handler still marked the event processed -> silent data loss.
+  const errors: unknown[] = []
   for (const entry of data.entry ?? []) {
     for (const change of entry.changes ?? []) {
       const value = change.value
@@ -110,9 +117,17 @@ export async function processWebhookPayload(
           )
         }
       } catch (err) {
-        app.log.error({ err }, 'webhook change handling failed')
+        app.log.error({ err, field: change.field }, 'webhook change handling failed')
+        errors.push(err)
       }
     }
+  }
+
+  if (errors.length > 0) {
+    const summary = errors
+      .map((e) => (e instanceof Error ? e.message : String(e)))
+      .join('; ')
+    throw new Error(`webhook processing failed for ${errors.length} change(s): ${summary}`)
   }
 }
 
@@ -209,7 +224,7 @@ async function handleMessageEchoes(
         waMessageId: msg.id,
         direction: 'outbound',
         type: msg.type,
-        body: msg.type === 'text' ? msg.text?.body ?? null : null,
+        body: inboundBody(msg),
         mediaStatus: isMediaType(msg.type) ? 'pending' : null,
         metadata: { ...msg, source: 'message_echo' } as Record<string, unknown>,
         status: 'sent',
@@ -262,6 +277,20 @@ async function handleMessages(app: FastifyInstance, value: WaChangeValue): Promi
     const contact = await upsertContact(msg.from, waContact?.profile?.name)
     const conversation = await upsertConversation(contact.id)
 
+    // Resolve a reply-to (WhatsApp `context.id`) to a local message so the quote
+    // block renders for customer replies, not just our own outbound replies.
+    let replyToMessageId: string | null = null
+    if (msg.context?.id) {
+      const referenced = await db.query.messages.findFirst({
+        where: and(
+          eq(messages.conversationId, conversation.id),
+          eq(messages.waMessageId, msg.context.id),
+        ),
+        columns: { id: true },
+      })
+      replyToMessageId = referenced?.id ?? null
+    }
+
     // Idempotent insert: duplicate webhook deliveries hit the unique wa_message_id.
     const inserted = await db
       .insert(messages)
@@ -270,8 +299,9 @@ async function handleMessages(app: FastifyInstance, value: WaChangeValue): Promi
         waMessageId: msg.id,
         direction: 'inbound',
         type: msg.type,
-        body: msg.type === 'text' ? msg.text?.body ?? null : null,
+        body: inboundBody(msg),
         mediaStatus: isMediaType(msg.type) ? 'pending' : null,
+        replyToMessageId,
         metadata: msg as unknown as Record<string, unknown>,
         sentAt: new Date(Number(msg.timestamp) * 1000),
       })
@@ -294,6 +324,26 @@ async function handleMessages(app: FastifyInstance, value: WaChangeValue): Promi
             : {}),
         })
         .where(eq(conversations.id, conversation.id))
+
+      // Recover side effects that a crashed earlier attempt may have skipped after
+      // the row was already inserted: re-enqueue a stuck media download so the
+      // attachment isn't pending forever (otherwise nothing self-heals it).
+      if (isMediaType(msg.type)) {
+        const existing = await db.query.messages.findFirst({
+          where: eq(messages.waMessageId, msg.id),
+          columns: { id: true, mediaStatus: true, mediaUrl: true },
+        })
+        const media = msg[msg.type] as WaMedia | undefined
+        if (existing && existing.mediaStatus === 'pending' && !existing.mediaUrl && media?.id) {
+          await enqueueJob('download_media', {
+            messageId: existing.id,
+            conversationId: conversation.id,
+            waMediaId: media.id,
+            mimeType: media.mime_type ?? mimeForMediaType(msg.type, media.mime_type),
+            filename: media.filename ?? defaultFilename(msg.type),
+          })
+        }
+      }
       continue
     }
     const message = inserted[0]
@@ -352,12 +402,25 @@ async function handleMessages(app: FastifyInstance, value: WaChangeValue): Promi
       }
     }
 
-    // Route only when reopened or freshly created and currently unassigned.
+    // Route when unassigned; otherwise, if an AI agent owns the thread, enqueue a
+    // reply for this inbound. Was: AI only replied on first assignment, so every
+    // follow-up customer message went unanswered.
     const current = await db.query.conversations.findFirst({
       where: eq(conversations.id, conversation.id),
     })
     if (current && !current.assignedTo) {
       await routeConversation(current, app.io, app.log)
+    } else if (current && current.assignedTo && current.routingLock !== 'human_only') {
+      const assignee = await db.query.teamMembers.findFirst({
+        where: eq(teamMembers.id, current.assignedTo),
+        columns: { role: true },
+      })
+      if (assignee?.role === 'ai_agent') {
+        await enqueueJob('ai_agent_reply', {
+          conversationId: current.id,
+          agentId: current.assignedTo,
+        })
+      }
     }
   }
 }
@@ -393,7 +456,52 @@ async function upsertConversation(contactId: string): Promise<Conversation> {
 function getPreview(msg: WaMessage): string {
   if (msg.type === 'text') return (msg.text?.body ?? '').slice(0, 120)
   if (msg.type === 'location') return '📍 Location'
+  if (msg.type === 'contacts') return '👤 Contact'
+  if (msg.type === 'interactive') {
+    const interactive = msg.interactive as
+      | { type?: string; button_reply?: { title?: string }; list_reply?: { title?: string } }
+      | undefined
+    const title = interactive?.button_reply?.title ?? interactive?.list_reply?.title
+    if (title) return title.slice(0, 120)
+    return 'Interactive message'
+  }
+  if (msg.type === 'button') {
+    const button = msg.button as { text?: string } | undefined
+    return (button?.text ?? 'Button reply').slice(0, 120)
+  }
+  if (msg.type === 'image') return labelWithCaption('📷 Photo', msg.image?.caption)
+  if (msg.type === 'video') return labelWithCaption('🎥 Video', msg.video?.caption)
+  if (msg.type === 'audio') return '🎤 Audio'
+  if (msg.type === 'sticker') return 'Sticker'
+  if (msg.type === 'document') {
+    return labelWithCaption(`📄 ${msg.document?.filename ?? 'Document'}`, msg.document?.caption)
+  }
   return `[${msg.type}]`
+}
+
+function labelWithCaption(label: string, caption?: string): string {
+  const trimmed = caption?.trim()
+  return (trimmed ? trimmed : label).slice(0, 120)
+}
+
+function inboundBody(msg: WaMessage): string | null {
+  if (msg.type === 'text') return msg.text?.body ?? null
+  if (msg.type === 'button') {
+    const button = msg.button as { text?: string } | undefined
+    return button?.text ?? null
+  }
+  if (msg.type === 'interactive') {
+    const interactive = msg.interactive as
+      | { button_reply?: { title?: string }; list_reply?: { title?: string } }
+      | undefined
+    return interactive?.button_reply?.title ?? interactive?.list_reply?.title ?? null
+  }
+  // Media captions live on the type-specific block; persist them so they render
+  // under the media bubble and are reachable by message search.
+  if (msg.type === 'image') return msg.image?.caption ?? null
+  if (msg.type === 'video') return msg.video?.caption ?? null
+  if (msg.type === 'document') return msg.document?.caption ?? null
+  return null
 }
 
 function mimeForMediaType(type: string, fromPayload?: string): string {

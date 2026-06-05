@@ -10,6 +10,11 @@ const UPLOAD_HASH_INDEX_KEY = 'wa-media-hash-to-s3-v1'
 const MEDIA_DIR = `${FileSystem.documentDirectory ?? ''}wa-media/`
 const BLOB_DIR = `${MEDIA_DIR}blobs/`
 
+/** Max on-device media cache before oldest blobs are evicted (LRU by cachedAt). */
+const MEDIA_CACHE_BUDGET_BYTES = 250 * 1024 * 1024
+/** Delete leftover upload temp files older than this. */
+const UPLOAD_TEMP_MAX_AGE_MS = 60 * 60 * 1000
+
 export type BlobRecord = {
   localUri: string
   mimeType: string
@@ -146,10 +151,106 @@ async function reconcileStaleBlobs(index: MediaIndexV2) {
 export async function ensureMediaIndexLoaded(): Promise<MediaIndexV2> {
   const index = await loadIndex()
   if (!reconcilePromise) {
-    reconcilePromise = reconcileStaleBlobs(index)
+    reconcilePromise = reconcileStaleBlobs(index).then(() => enforceMediaCacheBudget(index))
   }
   await reconcilePromise
   return index
+}
+
+async function fileSize(uri: string): Promise<number> {
+  try {
+    const info = await FileSystem.getInfoAsync(uri)
+    return info.exists && 'size' in info && typeof info.size === 'number' ? info.size : 0
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * Bound on-device media growth: if total blob size exceeds the budget, evict the
+ * oldest blobs (by cachedAt) until under 90% of budget. Was: cache grew forever.
+ */
+export async function enforceMediaCacheBudget(index?: MediaIndexV2): Promise<void> {
+  const idx = index ?? (await loadIndex())
+  const entries = await Promise.all(
+    Object.entries(idx.blobs).map(async ([blobId, record]) => ({
+      blobId,
+      record,
+      size: await fileSize(record.localUri),
+      ts: Date.parse(record.cachedAt) || 0,
+    })),
+  )
+  let total = entries.reduce((sum, e) => sum + e.size, 0)
+  if (total <= MEDIA_CACHE_BUDGET_BYTES) return
+
+  const target = MEDIA_CACHE_BUDGET_BYTES * 0.9
+  entries.sort((a, b) => a.ts - b.ts) // oldest first
+  let changed = false
+  for (const entry of entries) {
+    if (total <= target) break
+    try {
+      await FileSystem.deleteAsync(entry.record.localUri, { idempotent: true })
+    } catch {
+      // ignore
+    }
+    delete idx.blobs[entry.blobId]
+    validatedBlobs.delete(entry.blobId)
+    for (const [messageId, blobId] of Object.entries(idx.messageToBlob)) {
+      if (blobId === entry.blobId) delete idx.messageToBlob[messageId]
+    }
+    total -= entry.size
+    changed = true
+  }
+  if (changed) {
+    await saveIndex(idx)
+    notifyCacheListeners()
+  }
+}
+
+/** Wipe all cached media + indexes (used on logout so the next agent starts clean). */
+export async function clearMediaCache(): Promise<void> {
+  try {
+    await FileSystem.deleteAsync(MEDIA_DIR, { idempotent: true })
+  } catch {
+    // ignore
+  }
+  indexMem = emptyIndex()
+  indexLoad = null
+  reconcilePromise = null
+  uploadHashMem = null
+  validatedBlobs.clear()
+  await appStorage.removeItem(INDEX_KEY)
+  await appStorage.removeItem(LEGACY_INDEX_KEY)
+  await appStorage.removeItem(UPLOAD_HASH_INDEX_KEY)
+  notifyCacheListeners()
+}
+
+/** Delete stale upload temp files (wa-upload-*) left in the cache directory. */
+export async function cleanupUploadTempFiles(): Promise<void> {
+  const dir = FileSystem.cacheDirectory
+  if (!dir) return
+  try {
+    const names = await FileSystem.readDirectoryAsync(dir)
+    const now = Date.now()
+    await Promise.all(
+      names
+        .filter((n) => n.startsWith('wa-upload-'))
+        .map(async (n) => {
+          // Filename embeds Date.now(); fall back to deleting if unparseable.
+          const match = n.match(/wa-upload-(\d+)/)
+          const ts = match ? Number(match[1]) : 0
+          if (!ts || now - ts > UPLOAD_TEMP_MAX_AGE_MS) {
+            try {
+              await FileSystem.deleteAsync(`${dir}${n}`, { idempotent: true })
+            } catch {
+              // ignore
+            }
+          }
+        }),
+    )
+  } catch {
+    // ignore
+  }
 }
 
 function getBlobUriSync(blobId: string): string | null {

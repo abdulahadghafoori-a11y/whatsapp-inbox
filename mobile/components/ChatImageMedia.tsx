@@ -53,7 +53,7 @@ export function ChatImageMedia({
       />
       {!pixelSize ? (
         <View style={styles.loading}>
-          <ActivityIndicator color="#128C7E" size="small" />
+          <ActivityIndicator color="#00A884" size="small" />
         </View>
       ) : null}
       {uploading ? <MessageSendingOverlay label="Uploading…" /> : null}

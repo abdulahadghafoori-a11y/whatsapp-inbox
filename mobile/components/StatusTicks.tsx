@@ -1,30 +1,9 @@
-import { View, Text } from 'react-native'
+import { Ionicons } from '@expo/vector-icons'
 import { MicIcon } from '@/components/ChatIcons'
 import type { MessageStatus, MessageType } from '@/types'
 
 const GRAY = '#8696a0'
 const BLUE = '#53bdeb'
-
-function Check({ color }: { color: string }) {
-  return <Text style={{ color, fontSize: 13, lineHeight: 14, fontWeight: '600' }}>✓</Text>
-}
-
-function DoubleCheck({ color }: { color: string }) {
-  return (
-    <View className="flex-row items-center" style={{ width: 18, height: 14 }}>
-      <View style={{ position: 'absolute', left: 0 }}>
-        <Check color={color} />
-      </View>
-      <View style={{ position: 'absolute', left: 5 }}>
-        <Check color={color} />
-      </View>
-    </View>
-  )
-}
-
-function PlayedMic() {
-  return <MicIcon size={14} color={BLUE} />
-}
 
 /**
  * WhatsApp outbound receipt UI:
@@ -42,23 +21,23 @@ export function StatusTicks({
   messageType?: MessageType
 }) {
   if (status === 'failed') {
-    return <Text style={{ color: '#ef4444', fontSize: 13, lineHeight: 14 }}>✕</Text>
+    return <Ionicons name="alert-circle" size={15} color="#ef4444" />
   }
   if (status === 'pending') {
-    return (
-      <Text style={{ color: '#128C7E', fontSize: 14, lineHeight: 16, fontWeight: '600' }}>
-        ◷
-      </Text>
-    )
+    return <Ionicons name="time-outline" size={14} color={GRAY} />
   }
   if (status === 'played') {
-    return messageType === 'audio' ? <PlayedMic /> : <DoubleCheck color={BLUE} />
+    return messageType === 'audio' ? (
+      <MicIcon size={14} color={BLUE} />
+    ) : (
+      <Ionicons name="checkmark-done" size={16} color={BLUE} />
+    )
   }
   if (status === 'read') {
-    return <DoubleCheck color={BLUE} />
+    return <Ionicons name="checkmark-done" size={16} color={BLUE} />
   }
   if (status === 'delivered') {
-    return <DoubleCheck color={GRAY} />
+    return <Ionicons name="checkmark-done" size={16} color={GRAY} />
   }
-  return <Check color={GRAY} />
+  return <Ionicons name="checkmark" size={15} color={GRAY} />
 }

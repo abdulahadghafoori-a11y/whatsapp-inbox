@@ -1,35 +1,47 @@
 import { View } from 'react-native'
 import { Tabs } from 'expo-router'
-import { Text } from 'react-native'
+import { useColorScheme } from 'nativewind'
+import { Ionicons } from '@expo/vector-icons'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NowPlayingBar } from '@/components/NowPlayingBar'
 import { InboxTabButton } from '@/components/InboxTabButton'
 import { getDefaultTabBarStyle } from '@/lib/navigation'
+import { hapticSelection } from '@/lib/haptics'
 
 export default function TabsLayout() {
   const insets = useSafeAreaInsets()
-  const defaultTabBarStyle = getDefaultTabBarStyle(insets.bottom)
+  const { colorScheme: scheme } = useColorScheme()
+  const isDark = scheme === 'dark'
+  const defaultTabBarStyle = {
+    ...getDefaultTabBarStyle(insets.bottom),
+    ...(isDark ? { backgroundColor: '#121B22', borderTopColor: '#2A3942' } : { borderTopColor: '#E9EDEF' }),
+  }
 
   return (
     <View style={{ flex: 1 }}>
       <Tabs
         screenOptions={{
           headerShown: false,
-          tabBarActiveTintColor: '#128C7E',
-          tabBarInactiveTintColor: '#9ca3af',
+          tabBarActiveTintColor: isDark ? '#00A884' : '#008069',
+          tabBarInactiveTintColor: isDark ? '#8696A0' : '#8696A0',
           tabBarStyle: defaultTabBarStyle,
           tabBarLabelStyle: { fontSize: 11, fontWeight: '600', marginBottom: 2 },
           tabBarHideOnKeyboard: true,
-          sceneStyle: { backgroundColor: '#f5f5f5' },
+          sceneStyle: { backgroundColor: isDark ? '#0B141A' : '#F7F8FA' },
         }}
+        screenListeners={{ tabPress: () => hapticSelection() }}
       >
         <Tabs.Screen
           name="inbox"
           options={{
             title: 'Inbox',
-            tabBarLabel: 'Inbox',
+            tabBarLabel: 'Chats',
             tabBarIcon: ({ color, focused }) => (
-              <Text style={{ color, fontSize: 22, opacity: focused ? 1 : 0.85 }}>💬</Text>
+              <Ionicons
+                name={focused ? 'chatbubbles' : 'chatbubbles-outline'}
+                size={24}
+                color={color}
+              />
             ),
             tabBarButton: (props) => <InboxTabButton {...props} />,
           }}
@@ -40,7 +52,25 @@ export default function TabsLayout() {
             title: 'Team',
             tabBarLabel: 'Team',
             tabBarIcon: ({ color, focused }) => (
-              <Text style={{ color, fontSize: 22, opacity: focused ? 1 : 0.85 }}>👥</Text>
+              <Ionicons
+                name={focused ? 'people' : 'people-outline'}
+                size={24}
+                color={color}
+              />
+            ),
+          }}
+        />
+        <Tabs.Screen
+          name="settings"
+          options={{
+            title: 'Settings',
+            tabBarLabel: 'Settings',
+            tabBarIcon: ({ color, focused }) => (
+              <Ionicons
+                name={focused ? 'settings' : 'settings-outline'}
+                size={23}
+                color={color}
+              />
             ),
           }}
         />

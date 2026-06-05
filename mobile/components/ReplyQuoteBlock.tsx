@@ -23,13 +23,13 @@ export function ReplyQuoteBlock({
   onPress?: (messageId: string) => void
 }) {
   const outbound = isOutboundBubble ?? false
-  const barColor = outbound ? '#128C7E' : '#06cf9c'
-  const nameColor = outbound ? '#128C7E' : '#06cf9c'
+  const barColor = outbound ? '#00A884' : '#06cf9c'
+  const nameColor = outbound ? '#00A884' : '#06cf9c'
   const bg = outbound ? 'rgba(18,140,126,0.08)' : 'rgba(0,0,0,0.04)'
   const showThumb = replyHasMediaThumb(reply)
   const cachedUri = useCachedMediaUri(reply.id)
   const remoteKey = reply.mediaUrl && !reply.localPreviewUri && !cachedUri ? reply.mediaUrl : null
-  const { data: remoteUrl } = useMediaUrl(remoteKey)
+  const { data: remoteUrl } = useMediaUrl(remoteKey, reply.id)
   const thumbUri = cachedUri ?? reply.localPreviewUri ?? remoteUrl ?? null
 
   const content = (
@@ -51,7 +51,7 @@ export function ReplyQuoteBlock({
           >
             {replyPreviewLabel(reply, contactName)}
           </Text>
-          <Text numberOfLines={showThumb ? 1 : 2} className="text-[13px] leading-[18px] text-neutral-600">
+          <Text numberOfLines={showThumb ? 1 : 2} className="text-[13px] leading-[18px] text-neutral-600 dark:text-neutral-400">
             {replyPreviewSnippet(reply)}
           </Text>
         </View>
