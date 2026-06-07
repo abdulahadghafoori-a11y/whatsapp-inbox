@@ -1,4 +1,5 @@
 import { formatDateLabel } from '@/lib/format'
+import { messageRenderEqual } from '@/lib/messageRenderEqual'
 import type { Message } from '@/types'
 
 export type ChatListItem =
@@ -50,7 +51,9 @@ export function stabilizeChatListItems(
       old.kind === row.kind &&
       (row.kind === 'date'
         ? old.kind === 'date' && old.label === row.label
-        : old.kind === 'message' && old.message === row.message)
+        : old.kind === 'message' &&
+          row.kind === 'message' &&
+          (old.message === row.message || messageRenderEqual(old.message, row.message)))
     ) {
       merged[i] = old
     } else {

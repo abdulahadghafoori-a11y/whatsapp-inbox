@@ -303,14 +303,22 @@ export default function ChatScreen() {
     useGlobalAudioStore.getState().pause()
   }, [isFocused])
 
+  const markReadAsync = markRead.mutateAsync
+  const markedReadForFocusRef = useRef<string | null>(null)
+
   useEffect(() => {
-    if (!conversationId || !isFocused) return
+    if (!conversationId || !isFocused) {
+      markedReadForFocusRef.current = null
+      return
+    }
+    if (markedReadForFocusRef.current === conversationId) return
+    markedReadForFocusRef.current = conversationId
     const task = InteractionManager.runAfterInteractions(() => {
       void warmWaFeedbackSounds()
-      void markRead.mutateAsync(conversationId).catch(() => undefined)
+      void markReadAsync(conversationId).catch(() => undefined)
     })
     return () => task.cancel()
-  }, [conversationId, isFocused, markRead])
+  }, [conversationId, isFocused, markReadAsync])
 
   useEffect(() => {
     return () => {

@@ -24,6 +24,7 @@ import {
   coerceMessagesInfiniteData,
   migrateMessagesCacheShape,
   flattenMessagesPages,
+  stabilizeMessageList,
   pageMessages,
   patchMessageFieldsInfinite,
   patchMessageStatusInfinite,
@@ -230,7 +231,13 @@ export function useMessages(conversationId: string) {
   })
 
   const infinite = coerceMessagesInfiniteData(query.data) ?? query.data
-  const messages = useMemo(() => flattenMessagesPages(infinite), [infinite])
+  const messagesRef = useRef<Message[]>([])
+  const messages = useMemo(() => {
+    const built = flattenMessagesPages(infinite)
+    const stabilized = stabilizeMessageList(messagesRef.current, built)
+    messagesRef.current = stabilized
+    return stabilized
+  }, [infinite])
   const nextCursor = infinite?.pages.at(-1)?.nextCursor ?? null
   const data = useMemo(
     () => (infinite ? { messages, nextCursor } : undefined),

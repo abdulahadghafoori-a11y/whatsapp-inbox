@@ -7,9 +7,92 @@ import { SwipeableMessageBubble } from '@/components/SwipeableMessageBubble'
 import { ChatDatePill } from '@/components/ChatDatePill'
 import type { ChatListItem } from '@/lib/chatListItems'
 import { formatDateLabel } from '@/lib/format'
+import { messageRenderEqual } from '@/lib/messageRenderEqual'
 import type { MessageAnchor } from '@/components/MessageActionsOverlay'
 import { syncVisibleMessageMedia } from '@/lib/messageMediaSync'
 import type { Message } from '@/types'
+
+type ChatListRowProps = {
+  item: ChatListItem
+  highlightMessageId: string | null
+  contactName: string
+  contactAvatarUrl?: string | null
+  onReply: (m: Message) => void
+  onReplyQuotePress: (messageId: string) => void
+  onSwipeOpen: (messageId: string, ref: Swipeable | null) => void
+  onRetry: (m: Message) => void
+  onLongPress: (m: Message, anchor: MessageAnchor) => void
+}
+
+function ChatListRowBase({
+  item,
+  highlightMessageId,
+  contactName,
+  contactAvatarUrl,
+  onReply,
+  onReplyQuotePress,
+  onSwipeOpen,
+  onRetry,
+  onLongPress,
+}: ChatListRowProps) {
+  if (item.kind === 'date') {
+    return <ChatDatePill label={item.label} />
+  }
+  const msg = item.message
+  return (
+    <SwipeableMessageBubble
+      message={msg}
+      contactName={contactName}
+      contactAvatarUrl={contactAvatarUrl}
+      onReply={onReply}
+      onReplyQuotePress={onReplyQuotePress}
+      highlight={highlightMessageId === msg.id}
+      onSwipeOpen={onSwipeOpen}
+      onRetry={onRetry}
+      onLongPress={onLongPress}
+    />
+  )
+}
+
+function chatListRowEqual(prev: ChatListRowProps, next: ChatListRowProps): boolean {
+  if (prev.item !== next.item) {
+    if (prev.item.kind !== next.item.kind || prev.item.id !== next.item.id) return false
+    if (
+      prev.item.kind === 'date' &&
+      next.item.kind === 'date' &&
+      prev.item.label !== next.item.label
+    ) {
+      return false
+    }
+    if (
+      prev.item.kind === 'message' &&
+      next.item.kind === 'message' &&
+      !messageRenderEqual(prev.item.message, next.item.message)
+    ) {
+      return false
+    }
+  }
+  if (prev.item.kind === 'message') {
+    const id = prev.item.message.id
+    if (
+      prev.highlightMessageId !== next.highlightMessageId &&
+      (prev.highlightMessageId === id || next.highlightMessageId === id)
+    ) {
+      return false
+    }
+  }
+  return (
+    prev.contactName === next.contactName &&
+    prev.contactAvatarUrl === next.contactAvatarUrl &&
+    prev.onReply === next.onReply &&
+    prev.onReplyQuotePress === next.onReplyQuotePress &&
+    prev.onSwipeOpen === next.onSwipeOpen &&
+    prev.onRetry === next.onRetry &&
+    prev.onLongPress === next.onLongPress
+  )
+}
+
+const ChatListRow = memo(ChatListRowBase, chatListRowEqual)
 
 export type ChatMessagesListProps = {
   listRef: RefObject<FlatList<ChatListItem> | null>
@@ -87,35 +170,40 @@ function ChatMessagesListBase({
     [onStickyDateChange],
   )
 
+  const onViewableItemsChangedRef = useRef(onViewableItemsChanged)
+  onViewableItemsChangedRef.current = onViewableItemsChanged
+  const onViewableItemsChangedStable = useCallback(
+    (info: { viewableItems: ViewToken[] }) => {
+      onViewableItemsChangedRef.current(info)
+    },
+    [],
+  )
+
   const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 10 }).current
   const viewabilityPairs = useRef([
-    { viewabilityConfig, onViewableItemsChanged },
+    { viewabilityConfig, onViewableItemsChanged: onViewableItemsChangedStable },
   ]).current
 
+  const highlightRef = useRef(highlightMessageId)
+  highlightRef.current = highlightMessageId
+
   const renderItem = useCallback(
-    ({ item }: { item: ChatListItem }) => {
-      if (item.kind === 'date') {
-        return <ChatDatePill label={item.label} />
-      }
-      const msg = item.message
-      return (
-        <SwipeableMessageBubble
-          message={msg}
-          contactName={contactName}
-          contactAvatarUrl={contactAvatarUrl}
-          onReply={onReply}
-          onReplyQuotePress={onReplyQuotePress}
-          highlight={highlightMessageId === msg.id}
-          onSwipeOpen={onSwipeOpen}
-          onRetry={onRetry}
-          onLongPress={onLongPress}
-        />
-      )
-    },
+    ({ item }: { item: ChatListItem }) => (
+      <ChatListRow
+        item={item}
+        highlightMessageId={highlightRef.current}
+        contactName={contactName}
+        contactAvatarUrl={contactAvatarUrl}
+        onReply={onReply}
+        onReplyQuotePress={onReplyQuotePress}
+        onSwipeOpen={onSwipeOpen}
+        onRetry={onRetry}
+        onLongPress={onLongPress}
+      />
+    ),
     [
       contactAvatarUrl,
       contactName,
-      highlightMessageId,
       onLongPress,
       onReply,
       onReplyQuotePress,
@@ -128,6 +216,7 @@ function ChatMessagesListBase({
     <FlatList
       ref={listRef}
       data={data}
+      extraData={highlightMessageId}
       inverted
       initialNumToRender={10}
       maxToRenderPerBatch={6}

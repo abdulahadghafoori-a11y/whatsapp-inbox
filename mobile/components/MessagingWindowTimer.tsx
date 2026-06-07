@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useMemo } from 'react'
 import { View, Text } from 'react-native'
+import { useSecondTick } from '@/hooks/useSecondTick'
 import {
   formatCountdown,
   messagingWindowState,
-  msUntil,
   showHeaderWindowChip,
   showUnderHeaderBar,
   type MessagingWindowKind,
@@ -71,33 +71,44 @@ export function MessagingWindowTimer({
   conversation: ConversationListItem | null | undefined
   variant?: 'header' | 'banner'
 }) {
-  const model = messagingWindowState(conversation)
-  const [, bump] = useState(0)
+  const model = useMemo(
+    () => messagingWindowState(conversation),
+    [
+      conversation?.windowExpiresAt,
+      conversation?.fepExpiresAt,
+      conversation?.ctwaStartedAt,
+      conversation?.canSendSession,
+      conversation?.isCtwaLead,
+      conversation?.isFepOpen,
+      conversation?.isWindowOpen,
+    ],
+  )
 
-  useEffect(() => {
-    if (!model?.expiresAt) return
-    const id = setInterval(() => bump((n) => n + 1), 1000)
-    return () => clearInterval(id)
-  }, [model?.expiresAt])
+  const headerChip = model && variant === 'header' ? HEADER_CHIP[model.kind] : null
+  const showHeader =
+    !!model && variant === 'header' && showHeaderWindowChip(model) && !!headerChip
+  const expiresAt = showHeader ? model?.expiresAt ?? null : null
+  const shouldRunClock = showHeader && !!expiresAt
+  const now = useSecondTick(shouldRunClock)
+  const remaining = expiresAt
+    ? Math.max(0, new Date(expiresAt).getTime() - now)
+    : 0
 
   if (!model) return null
 
   if (variant === 'header') {
-    if (!showHeaderWindowChip(model)) return null
-    const chip = HEADER_CHIP[model.kind]
-    if (!chip) return null
+    if (!showHeader || !headerChip) return null
 
-    const remaining = model.expiresAt ? msUntil(model.expiresAt) : 0
     const clock =
-      model.expiresAt && remaining > 0 ? formatCountdown(remaining) : '0:00'
+      expiresAt && remaining > 0 ? formatCountdown(remaining) : '0:00'
 
     return (
-      <View className={`mr-1 items-center rounded-xl px-2.5 py-1 ${chip.chipBg}`}>
-        <Text className={`text-[10px] font-semibold uppercase tracking-wide ${chip.labelColor}`}>
-          {chip.label}
+      <View className={`mr-1 items-center rounded-xl px-2.5 py-1 ${headerChip.chipBg}`}>
+        <Text className={`text-[10px] font-semibold uppercase tracking-wide ${headerChip.labelColor}`}>
+          {headerChip.label}
         </Text>
-        {model.expiresAt ? (
-          <Text className={`font-mono text-[15px] font-bold tabular-nums leading-tight ${chip.clockColor}`}>
+        {expiresAt ? (
+          <Text className={`font-mono text-[15px] font-bold tabular-nums leading-tight ${headerChip.clockColor}`}>
             {clock}
           </Text>
         ) : null}

@@ -1,4 +1,5 @@
 import type { InfiniteData, QueryClient } from '@tanstack/react-query'
+import { messageRenderEqual } from '@/lib/messageRenderEqual'
 import { mergeMessageStatus, normalizeMessageStatus } from '@/lib/messageStatus'
 import type { Message, MessageStatus, MessagesResponse } from '@/types'
 
@@ -120,6 +121,25 @@ export function flattenMessagesPages(data: MessagesInfinite | undefined): Messag
   if (!data?.pages.length) return []
   const merged = [...data.pages].reverse().flatMap((p) => pageMessages(p))
   return sortMessagesChronological(merged)
+}
+
+/** Keep the same messages array reference when flatten order and render fields are unchanged. */
+export function stabilizeMessageList(prev: Message[], next: Message[]): Message[] {
+  if (prev === next) return prev
+  if (prev.length !== next.length) return next
+  let stable = true
+  const merged: Message[] = new Array(next.length)
+  for (let i = 0; i < next.length; i++) {
+    const old = prev[i]
+    const row = next[i]
+    if (old && old.id === row.id && messageRenderEqual(old, row)) {
+      merged[i] = old
+    } else {
+      merged[i] = row
+      stable = false
+    }
+  }
+  return stable ? prev : merged
 }
 
 export function patchMessageStatusInfinite(
