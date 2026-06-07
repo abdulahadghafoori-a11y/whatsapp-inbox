@@ -55,11 +55,21 @@ type GlobalAudioState = {
   playback: AudioPlayback
   playbackRate: PlaybackSpeed
   _player: AudioPlayer | null
+  /** Consecutive voice-note runs in chat order (auto-advance stays within each run). */
+  voiceNoteRuns: string[][]
+  trackResolvers: Record<string, () => Promise<AudioTrack | null>>
   bindPlayer: (player: AudioPlayer | null) => void
   setPlayback: (patch: Partial<AudioPlayback>) => void
   setPlaybackRate: (rate: PlaybackSpeed) => void
   cyclePlaybackRate: () => void
   applyPlaybackRateToPlayer: () => void
+  setVoiceNoteRuns: (runs: string[][]) => void
+  registerTrackResolver: (
+    messageId: string,
+    resolver: () => Promise<AudioTrack | null>,
+  ) => void
+  unregisterTrackResolver: (messageId: string) => void
+  playNextInQueue: (currentMessageId: string) => Promise<boolean>
   play: (track: AudioTrack) => void
   pause: () => void
   /** Finished or paused — keep bubble UI, release native player. */
@@ -78,6 +88,8 @@ export const useGlobalAudioStore = create<GlobalAudioState>((set, get) => ({
   playback: idlePlayback,
   playbackRate: 1,
   _player: null,
+  voiceNoteRuns: [],
+  trackResolvers: {},
 
   bindPlayer: (player) => set({ _player: player }),
 
@@ -89,7 +101,7 @@ export const useGlobalAudioStore = create<GlobalAudioState>((set, get) => ({
         durationMs:
           (patch.durationMs ?? 0) > 0 ? patch.durationMs! : s.playback.durationMs,
         positionMs:
-          (patch.positionMs ?? 0) > 0 ? patch.positionMs! : s.playback.positionMs,
+          patch.positionMs !== undefined ? patch.positionMs : s.playback.positionMs,
         isLoaded: patch.isLoaded ?? s.playback.isLoaded,
       }
       if (s.track && playback.durationMs > 0) {
@@ -120,6 +132,37 @@ export const useGlobalAudioStore = create<GlobalAudioState>((set, get) => ({
     } catch {
       // native object gone
     }
+  },
+
+  setVoiceNoteRuns: (runs) => set({ voiceNoteRuns: runs }),
+
+  registerTrackResolver: (messageId, resolver) =>
+    set((s) => ({
+      trackResolvers: { ...s.trackResolvers, [messageId]: resolver },
+    })),
+
+  unregisterTrackResolver: (messageId) =>
+    set((s) => {
+      const next = { ...s.trackResolvers }
+      delete next[messageId]
+      return { trackResolvers: next }
+    }),
+
+  playNextInQueue: async (currentMessageId) => {
+    const { voiceNoteRuns, trackResolvers } = get()
+    for (const run of voiceNoteRuns) {
+      const idx = run.indexOf(currentMessageId)
+      if (idx < 0) continue
+      if (idx >= run.length - 1) return false
+      const nextId = run[idx + 1]
+      const resolve = trackResolvers[nextId]
+      if (!resolve) return false
+      const track = await resolve()
+      if (!track) return false
+      get().play(track)
+      return true
+    }
+    return false
   },
 
   play: (track) => {
@@ -208,6 +251,7 @@ export const useGlobalAudioStore = create<GlobalAudioState>((set, get) => ({
       engagedSession: null,
       wantPlaying: false,
       playback: idlePlayback,
+      voiceNoteRuns: [],
     })
   },
 

@@ -1,7 +1,7 @@
 import { View, Text, FlatList } from 'react-native'
+import { Redirect } from 'expo-router'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { StatusBar } from 'expo-status-bar'
-import { Ionicons } from '@expo/vector-icons'
 import { QueryError, QueryLoading } from '@/components/QueryState'
 import { Avatar } from '@/components/Avatar'
 import { useTeam } from '@/hooks/useTeam'
@@ -13,6 +13,11 @@ import type { Agent } from '@/types'
 export default function TeamScreen() {
   const { data, isLoading, isError, error, refetch, isRefetching } = useTeam()
   const me = useAuthStore((s) => s.agent)
+  const hydrated = useAuthStore((s) => s.hydrated)
+
+  if (hydrated && me?.role !== 'admin') {
+    return <Redirect href="/(tabs)/inbox" />
+  }
 
   return (
     <View className="flex-1 bg-[#F7F8FA] dark:bg-wa-panelDeep">
@@ -71,23 +76,7 @@ export default function TeamScreen() {
             <Text className="text-neutral-400 dark:text-neutral-500">No team members found</Text>
           </View>
         }
-        ListFooterComponent={
-          (data?.aiAgents.length ?? 0) > 0 ? (
-            <View className="mt-4 px-4">
-              <Text className="mb-1 text-xs font-semibold uppercase text-neutral-400">
-                AI agents
-              </Text>
-              {data?.aiAgents.map((a) => (
-                <View key={a.id} className="flex-row items-center gap-2.5 py-2">
-                  <View className="h-9 w-9 items-center justify-center rounded-full bg-purple-100 dark:bg-purple-500/20">
-                    <Ionicons name="sparkles" size={18} color="#9B59F6" />
-                  </View>
-                  <Text className="text-neutral-700 dark:text-neutral-300">{a.name}</Text>
-                </View>
-              ))}
-            </View>
-          ) : null
-        }
+        ListFooterComponent={null}
       />
       )}
       <View className="px-4 py-2">

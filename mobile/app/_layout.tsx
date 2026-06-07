@@ -70,6 +70,16 @@ function AuthGate() {
     return () => cancelAnimationFrame(id)
   }, [isHydrated, accessToken, segmentKey, navigationReady, router])
 
+  // Don't mount routes until auth hydration + navigation are ready — mounting
+  // screens earlier triggers NativeWind/navigation context crashes on Android.
+  if (!isHydrated || !navigationReady) {
+    return (
+      <View style={[StyleSheet.absoluteFillObject, styles.boot]}>
+        <ActivityIndicator size="large" color="#00A884" />
+      </View>
+    )
+  }
+
   return (
     <>
       {accessToken ? <SocketBridge /> : null}
@@ -91,17 +101,17 @@ function AuthGate() {
         <Stack.Screen name="conversation" options={stackTransitionOptions} />
         <Stack.Screen name="search" options={{ headerShown: false, ...stackTransitionOptions }} />
       </Stack>
-      {!isHydrated ? (
-        <View
-          style={StyleSheet.absoluteFillObject}
-          className="items-center justify-center bg-white dark:bg-wa-panelDeep"
-        >
-          <ActivityIndicator size="large" color="#00A884" />
-        </View>
-      ) : null}
     </>
   )
 }
+
+const styles = StyleSheet.create({
+  boot: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#F7F8FA',
+  },
+})
 
 export default function RootLayout() {
   const { colorScheme: scheme } = useColorScheme()

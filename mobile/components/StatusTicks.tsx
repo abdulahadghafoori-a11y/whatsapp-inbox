@@ -10,8 +10,8 @@ const BLUE = '#53bdeb'
  * - pending → clock
  * - sent → single gray ✓
  * - delivered → double gray ✓✓
- * - read (seen) → double blue ✓✓  (voice notes too — not the mic)
- * - played → blue mic (voice notes only, after recipient listens)
+ * - read → double blue ✓✓
+ * - played → blue mic (voice notes only)
  */
 export function StatusTicks({
   status,
@@ -28,7 +28,7 @@ export function StatusTicks({
   }
   if (status === 'played') {
     return messageType === 'audio' ? (
-      <MicIcon size={14} color={BLUE} />
+      <MicIcon size={15} color={BLUE} />
     ) : (
       <Ionicons name="checkmark-done" size={16} color={BLUE} />
     )

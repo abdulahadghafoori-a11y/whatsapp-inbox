@@ -50,6 +50,28 @@ async function refreshAccessToken(): Promise<string | null> {
   }
 }
 
+function jwtExpMs(token: string): number | null {
+  try {
+    const payload = token.split('.')[1]
+    if (!payload) return null
+    const json = JSON.parse(
+      atob(payload.replace(/-/g, '+').replace(/_/g, '/')),
+    ) as { exp?: number }
+    return typeof json.exp === 'number' ? json.exp * 1000 : null
+  } catch {
+    return null
+  }
+}
+
+/** Refresh before long uploads — access token may expire during on-device video prep. */
+export async function ensureAccessTokenFresh(skewMs = 60_000): Promise<void> {
+  const { accessToken, refreshToken } = useAuthStore.getState()
+  if (!refreshToken) return
+  const exp = accessToken ? jwtExpMs(accessToken) : null
+  if (exp != null && exp > Date.now() + skewMs) return
+  await refreshAccessToken()
+}
+
 api.interceptors.response.use(
   (res) => res,
   async (error: AxiosError) => {
@@ -71,6 +93,10 @@ api.interceptors.response.use(
       refreshing = refreshing ?? refreshAccessToken()
       const newToken = await refreshing
       refreshing = null
+      // Multipart bodies are consumed on first send — caller must rebuild FormData.
+      if (original.data instanceof FormData) {
+        return Promise.reject(error)
+      }
       if (newToken) {
         original.headers.Authorization = `Bearer ${newToken}`
         return api(original)

@@ -21,6 +21,8 @@ type InteractiveVideoPlayerProps = {
   compact?: boolean
   /** Start playback when mounted (fullscreen open). */
   autoPlay?: boolean
+  /** Loop playback inside this range (trim preview). */
+  playbackRange?: { startMs: number; endMs: number }
   /** Swipe down on the video area (not the control bar) to dismiss. */
   onSwipeDismiss?: () => void
 }
@@ -35,9 +37,15 @@ export function InteractiveVideoPlayer({
   expanded = false,
   compact = false,
   autoPlay = false,
+  playbackRange,
   onSwipeDismiss,
 }: InteractiveVideoPlayerProps) {
   const source = resolveUploadUri(url)
+  const rangeStartSec = (playbackRange?.startMs ?? 0) / 1000
+  const rangeEndSec = (playbackRange?.endMs ?? 0) / 1000
+  const hasRange = playbackRange != null && rangeEndSec > rangeStartSec
+  const rangeDurationSec = hasRange ? rangeEndSec - rangeStartSec : 0
+
   const player = useVideoPlayer(source, (p) => {
     p.loop = false
   })
@@ -56,16 +64,37 @@ export function InteractiveVideoPlayer({
     const id = setInterval(() => {
       if (scrubbingRef.current) return
       try {
-        setPosition(player.currentTime)
-        const d = player.duration
-        if (Number.isFinite(d) && d > 0) setDuration(d)
+        const current = player.currentTime
+        if (hasRange) {
+          if (current >= rangeEndSec - 0.05) {
+            player.currentTime = rangeStartSec
+            if (!player.playing) void player.play()
+          } else if (current < rangeStartSec - 0.05) {
+            player.currentTime = rangeStartSec
+          }
+          setPosition(Math.max(0, player.currentTime - rangeStartSec))
+          setDuration(rangeDurationSec)
+        } else {
+          setPosition(current)
+          const d = player.duration
+          if (Number.isFinite(d) && d > 0) setDuration(d)
+        }
         setPlaying(player.playing)
       } catch {
         // player released
       }
-    }, 200)
+    }, 100)
     return () => clearInterval(id)
-  }, [player])
+  }, [player, hasRange, rangeStartSec, rangeEndSec, rangeDurationSec])
+
+  useEffect(() => {
+    if (!hasRange) return
+    try {
+      player.currentTime = rangeStartSec
+    } catch {
+      // player not ready
+    }
+  }, [player, hasRange, rangeStartSec, playbackRange?.startMs, playbackRange?.endMs])
 
   useEffect(() => {
     if (!autoPlay || compact) return
@@ -73,8 +102,11 @@ export function InteractiveVideoPlayer({
     const id = setInterval(() => {
       if (cancelled) return
       try {
-        const d = player.duration
-        if (Number.isFinite(d) && d > 0) {
+        const ready = hasRange
+          ? rangeDurationSec > 0
+          : Number.isFinite(player.duration) && player.duration > 0
+        if (ready) {
+          if (hasRange) player.currentTime = rangeStartSec
           if (!player.playing) {
             player.play()
             setPlaying(true)
@@ -89,7 +121,7 @@ export function InteractiveVideoPlayer({
       cancelled = true
       clearInterval(id)
     }
-  }, [autoPlay, compact, player, source])
+  }, [autoPlay, compact, player, source, hasRange, rangeStartSec, rangeDurationSec])
 
   const togglePlay = useCallback(() => {
     if (player.playing) {
@@ -105,26 +137,30 @@ export function InteractiveVideoPlayer({
     (ratio: number) => {
       if (!duration || duration <= 0) return
       const clamped = Math.min(1, Math.max(0, ratio))
-      const next = clamped * duration
+      const next = hasRange
+        ? rangeStartSec + clamped * rangeDurationSec
+        : clamped * duration
       try {
         player.currentTime = next
-        setPosition(next)
+        setPosition(hasRange ? next - rangeStartSec : next)
       } catch {
-        setPosition(next)
+        setPosition(hasRange ? next - rangeStartSec : next)
       }
     },
-    [duration, player],
+    [duration, player, hasRange, rangeStartSec, rangeDurationSec],
   )
 
   const onSeekRatioDuringScrub = useCallback(
     (ratio: number) => {
       if (!duration || duration <= 0) return
       const clamped = Math.min(1, Math.max(0, ratio))
-      const seconds = clamped * duration
+      const seconds = hasRange
+        ? clamped * rangeDurationSec
+        : clamped * duration
       scrubPreviewRef.current = seconds
       setScrubPreview(seconds)
     },
-    [duration],
+    [duration, hasRange, rangeDurationSec],
   )
 
   const onScrubStart = useCallback(() => {
@@ -174,20 +210,18 @@ export function InteractiveVideoPlayer({
             <Text style={styles.playIcon}>▶</Text>
           </View>
         </View>
-      ) : (
+      ) : !playing && scrubPreview == null ? (
         <Pressable
           onPress={togglePlay}
           style={styles.tapLayer}
           accessibilityRole="button"
-          accessibilityLabel={playing ? 'Pause video' : 'Play video'}
+          accessibilityLabel="Play video"
         >
-          {!playing && scrubPreview == null ? (
-            <View style={[styles.playBtn, expanded && styles.playBtnLarge]}>
-              <Text style={[styles.playIcon, expanded && styles.playIconLarge]}>▶</Text>
-            </View>
-          ) : null}
+          <View style={[styles.playBtn, expanded && styles.playBtnLarge]}>
+            <Text style={[styles.playIcon, expanded && styles.playIconLarge]}>▶</Text>
+          </View>
         </Pressable>
-      )}
+      ) : null}
     </>
   )
 

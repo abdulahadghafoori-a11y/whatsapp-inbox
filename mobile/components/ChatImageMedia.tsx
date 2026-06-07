@@ -12,6 +12,7 @@ type ChatImageMediaProps = {
   uri: string
   sticker?: boolean
   uploading?: boolean
+  uploadLabel?: string
   onPress?: () => void
 }
 
@@ -19,6 +20,7 @@ export function ChatImageMedia({
   uri,
   sticker = false,
   uploading = false,
+  uploadLabel,
   onPress,
 }: ChatImageMediaProps) {
   const pixelSize = useImageDimensions(uri)
@@ -56,7 +58,7 @@ export function ChatImageMedia({
           <ActivityIndicator color="#00A884" size="small" />
         </View>
       ) : null}
-      {uploading ? <MessageSendingOverlay label="Uploading…" /> : null}
+      {uploading ? <MessageSendingOverlay label={uploadLabel ?? 'Uploading…'} /> : null}
     </Pressable>
   )
 }

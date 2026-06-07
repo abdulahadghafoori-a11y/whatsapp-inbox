@@ -28,7 +28,6 @@
     "@fastify/multipart": "^8.3.0",
     "@fastify/rate-limit": "^9.1.0",
     "@fastify/sensible": "^5.6.0",
-    "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@neondatabase/serverless": "^0.10.4",
     "@sentry/node": "^8.55.2",
     "bcryptjs": "^2.4.3",
@@ -36,10 +35,8 @@
     "drizzle-orm": "^0.36.4",
     "fastify": "^4.28.1",
     "fastify-plugin": "^4.5.1",
-    "ffmpeg-static": "^5.2.0",
     "form-data": "^4.0.5",
     "pino-pretty": "^11.3.0",
-    "sharp": "^0.34.5",
     "socket.io": "^4.8.1",
     "undici": "^6.21.0",
     "zod": "^3.23.8"

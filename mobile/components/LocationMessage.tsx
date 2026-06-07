@@ -26,6 +26,7 @@ export function LocationMessage({ message }: { message: Message }) {
   }
 
   const label = locationDisplayLabel(loc)
+  const hasAddress = !!(loc.address?.trim() || loc.name?.trim())
   const sending =
     message.direction === 'outbound' && message.status === 'pending'
 
@@ -33,7 +34,7 @@ export function LocationMessage({ message }: { message: Message }) {
     <>
       <Pressable
         onPress={() => setDetailOpen(true)}
-        style={[styles.card, isDark && { backgroundColor: '#233138' }]}
+        style={styles.card}
         accessibilityRole="button"
         accessibilityLabel="View location on map"
       >
@@ -48,12 +49,14 @@ export function LocationMessage({ message }: { message: Message }) {
             showMarker
           />
         </View>
-        <View style={[styles.footer, isDark && { borderTopColor: 'rgba(255,255,255,0.08)' }]}>
-          <Text numberOfLines={2} style={[styles.title, isDark && { color: '#e5e5e5' }]}>
+        {hasAddress ? (
+          <Text
+            numberOfLines={2}
+            style={[styles.address, isDark && styles.addressDark]}
+          >
             {label}
           </Text>
-          <Text style={[styles.hint, isDark && { color: '#8a9aa1' }]}>Tap to view on map</Text>
-        </View>
+        ) : null}
       </Pressable>
 
       <LocationDetailSheet
@@ -69,14 +72,24 @@ const styles = StyleSheet.create({
   card: {
     width: MAP_W,
     overflow: 'hidden',
-    borderRadius: 12,
-    backgroundColor: '#fff',
+    borderRadius: 10,
   },
   mapClip: {
     width: MAP_W,
     height: MAP_H,
     overflow: 'hidden',
     position: 'relative',
+  },
+  address: {
+    paddingHorizontal: 10,
+    paddingTop: 8,
+    paddingBottom: 6,
+    fontSize: 14,
+    lineHeight: 19,
+    color: '#111b21',
+  },
+  addressDark: {
+    color: '#e9edef',
   },
   unavailable: {
     minWidth: 220,
@@ -88,21 +101,5 @@ const styles = StyleSheet.create({
   unavailableText: {
     fontSize: 14,
     color: '#737373',
-  },
-  footer: {
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: 'rgba(0,0,0,0.06)',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-  },
-  title: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#171717',
-  },
-  hint: {
-    marginTop: 2,
-    fontSize: 11,
-    color: '#a3a3a3',
   },
 })

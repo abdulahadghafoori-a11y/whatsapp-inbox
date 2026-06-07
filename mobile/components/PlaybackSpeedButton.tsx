@@ -1,4 +1,4 @@
-import { Pressable, Text } from 'react-native'
+import { Pressable, Text, StyleSheet } from 'react-native'
 import { useGlobalAudioStore } from '@/stores/globalAudioStore'
 import { formatPlaybackSpeed } from '@/lib/playbackSpeed'
 
@@ -7,15 +7,37 @@ export function PlaybackSpeedButton({
   visible = true,
   outbound = false,
 }: {
-  variant?: 'bubble' | 'mini'
+  variant?: 'bubble' | 'mini' | 'avatar'
   visible?: boolean
-  /** Tune contrast for the green outbound bubble (light + dark). */
   outbound?: boolean
 }) {
   const playbackRate = useGlobalAudioStore((s) => s.playbackRate)
   const cyclePlaybackRate = useGlobalAudioStore((s) => s.cyclePlaybackRate)
 
   if (!visible) return null
+
+  if (variant === 'avatar') {
+    return (
+      <Pressable
+        onPress={cyclePlaybackRate}
+        accessibilityRole="button"
+        accessibilityLabel={`Playback speed ${formatPlaybackSpeed(playbackRate)}`}
+        style={[
+          styles.avatarBtn,
+          outbound ? styles.avatarBtnOut : styles.avatarBtnIn,
+        ]}
+      >
+        <Text
+          style={[
+            styles.avatarText,
+            outbound ? styles.avatarTextOut : styles.avatarTextIn,
+          ]}
+        >
+          {formatPlaybackSpeed(playbackRate)}
+        </Text>
+      </Pressable>
+    )
+  }
 
   const pillClass =
     variant === 'mini'
@@ -42,3 +64,30 @@ export function PlaybackSpeedButton({
     </Pressable>
   )
 }
+
+const styles = StyleSheet.create({
+  avatarBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarBtnIn: {
+    backgroundColor: 'rgba(0, 0, 0, 0.07)',
+  },
+  avatarBtnOut: {
+    backgroundColor: 'rgba(255, 255, 255, 0.22)',
+  },
+  avatarText: {
+    fontSize: 10,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
+  avatarTextIn: {
+    color: '#008069',
+  },
+  avatarTextOut: {
+    color: '#ffffff',
+  },
+})

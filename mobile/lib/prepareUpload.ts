@@ -24,6 +24,19 @@ async function waitForFile(fileUri: string): Promise<FileSystem.FileInfo> {
   return info
 }
 
+/** Decode %20-style names from gallery pickers; strip path segments. */
+export function sanitizeUploadFilename(name: string): string {
+  let decoded = name
+  try {
+    decoded = decodeURIComponent(name)
+  } catch {
+    /* keep */
+  }
+  const base = decoded.split(/[/\\]/).pop() ?? 'file'
+  const safe = base.replace(/[^\w.\- ()[\]]+/g, '_').slice(0, 200)
+  return safe || `file-${Date.now()}`
+}
+
 function extFromName(name: string, fallback: string): string {
   if (!name.includes('.')) return fallback
   return name.split('.').pop() ?? fallback
@@ -57,7 +70,7 @@ export async function prepareUploadFile(
 }
 
 /**
- * Copy gallery/camera media to cache — preserves image/video MIME (server compresses images).
+ * Copy gallery/camera media to cache — images are compressed separately via prepareImageSend.
  */
 export async function prepareMediaFileForUpload(
   uri: string,
@@ -77,16 +90,17 @@ export async function prepareMediaFileForUpload(
   const dest = `${FileSystem.cacheDirectory}wa-upload-${Date.now()}.${ext}`
   await FileSystem.copyAsync({ from: sourceUri, to: dest })
 
-  return { uri: dest, name, mimeType }
+  return { uri: dest, name: sanitizeUploadFilename(name), mimeType }
 }
 
-/** Read prepared audio as base64 — avoids React Native FormData corrupting binary uploads. */
+/** Read OGG Opus voice note as base64 for JSON upload. */
 export async function readPreparedAudioBase64(
   uri: string,
   name: string,
   mimeType: string,
 ): Promise<{ name: string; mimeType: string; data: string }> {
-  const prepared = await prepareUploadFile(uri, name, mimeType)
+  const { prepareVoiceForSend } = await import('@/lib/prepareVoiceForSend')
+  const prepared = await prepareVoiceForSend(uri, name, mimeType)
   const data = await FileSystem.readAsStringAsync(prepared.uri, {
     encoding: FileSystem.EncodingType.Base64,
   })

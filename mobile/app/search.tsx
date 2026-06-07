@@ -17,12 +17,7 @@ import {
   type MessageSearchResult,
 } from '@/hooks/useGlobalMessageSearch'
 import { Avatar } from '@/components/Avatar'
-
-function formatWhen(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
+import { formatTime } from '@/lib/format'
 
 function snippet(result: MessageSearchResult): string {
   if (result.body?.trim()) return result.body.trim()
@@ -103,7 +98,7 @@ export default function SearchScreen() {
                     {item.contactName ?? item.contactWaId}
                   </Text>
                   <Text className="ml-2 text-xs text-neutral-400 dark:text-wa-subDark">
-                    {formatWhen(item.sentAt)}
+                    {formatTime(item.sentAt)}
                   </Text>
                 </View>
                 <Text className="mt-0.5 text-[14px] text-neutral-600 dark:text-wa-subDark" numberOfLines={2}>

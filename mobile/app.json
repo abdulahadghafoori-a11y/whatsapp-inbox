@@ -28,8 +28,13 @@
           "comgooglemaps",
           "waze",
           "citymapper",
+          "uber",
+          "comgooglemaps",
+          "waze",
+          "citymapper",
           "uber"
-        ]
+        ],
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
@@ -41,13 +46,14 @@
         "backgroundColor": "#ffffff"
       },
       "permissions": [
-        "CAMERA",
-        "READ_MEDIA_IMAGES",
-        "READ_MEDIA_VIDEO",
-        "RECORD_AUDIO",
-        "POST_NOTIFICATIONS",
-        "ACCESS_FINE_LOCATION",
-        "ACCESS_COARSE_LOCATION"
+        "android.permission.CAMERA",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
       ]
     },
     "plugins": [
@@ -77,15 +83,19 @@
           "locationWhenInUsePermission": "Share your current location with customers."
         }
       ],
-      "@sentry/react-native"
+      "@sentry/react-native",
+      "react-native-compressor",
+      "./plugins/withFfmpeg16Kb.js",
+      "expo-build-properties"
     ],
     "extra": {
       "router": {
         "origin": false
       },
       "eas": {
-        "projectId": "00000000-0000-0000-0000-000000000000"
+        "projectId": "760a2758-79ee-4477-956b-f1253a2b5c12"
       }
-    }
+    },
+    "owner": "aag2026"
   }
 }

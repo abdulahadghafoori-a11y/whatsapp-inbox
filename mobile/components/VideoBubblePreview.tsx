@@ -10,6 +10,7 @@ type VideoBubblePreviewProps = {
   width: number
   height: number
   uploading?: boolean
+  uploadLabel?: string
   /** When set, skips regenerating a thumbnail (from useVideoDimensions). */
   thumbUri?: string
 }
@@ -20,6 +21,7 @@ export function VideoBubblePreview({
   width,
   height,
   uploading = false,
+  uploadLabel,
   thumbUri: thumbUriProp,
 }: VideoBubblePreviewProps) {
   const [thumbUri, setThumbUri] = useState<string | null>(thumbUriProp ?? null)
@@ -40,10 +42,14 @@ export function VideoBubblePreview({
 
     void (async () => {
       try {
-        const { uri: generated } = await VideoThumbnails.getThumbnailAsync(source, {
+        const thumbTask = VideoThumbnails.getThumbnailAsync(source, {
           time: 500,
           quality: 0.65,
         })
+        const timeout = new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('thumbnail_timeout')), 12_000)
+        })
+        const { uri: generated } = await Promise.race([thumbTask, timeout])
         if (!cancelled) setThumbUri(generated)
       } catch {
         if (!cancelled) setThumbUri(null)
@@ -80,7 +86,7 @@ export function VideoBubblePreview({
         </View>
       </View>
 
-      {uploading ? <MessageSendingOverlay label="Uploading…" /> : null}
+      {uploading ? <MessageSendingOverlay label={uploadLabel ?? 'Uploading…'} /> : null}
     </View>
   )
 }

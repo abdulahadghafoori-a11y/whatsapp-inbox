@@ -20,7 +20,8 @@ interface OutboundMediaArgs {
   conversationId: string
   to: string
   type: 'image' | 'video' | 'audio' | 'document' | 'sticker'
-  mediaId: string
+  /** Omitted when WhatsApp upload is deferred to the send job (large client uploads). */
+  mediaId?: string
   s3Key: string
   mimeType: string
   filename: string
@@ -162,7 +163,7 @@ export async function createOutboundMedia(
     type: args.type,
     conversationId: args.conversationId,
     messageId: message.id,
-    mediaId: args.mediaId,
+    ...(args.mediaId ? { mediaId: args.mediaId } : { s3Key: args.s3Key }),
     caption: args.caption,
     voiceNote: args.voiceNote,
     replyToWaMessageId: args.replyToWaMessageId,
@@ -217,7 +218,7 @@ export async function resendOutboundMessage(
   io: SocketIOServer,
   message: Message,
   to: string,
-  opts: { mediaId?: string; voiceNote?: boolean },
+  opts: { mediaId?: string; s3Key?: string; voiceNote?: boolean },
 ): Promise<Message> {
   const [updated] = await db
     .update(messages)
@@ -234,14 +235,14 @@ export async function resendOutboundMessage(
       body: message.body ?? '',
     })
   } else {
-    if (!opts.mediaId) throw new Error('Media id required to resend')
+    if (!opts.mediaId && !opts.s3Key) throw new Error('mediaId or s3Key required to resend')
     const mediaType = message.type as JobPayloads['send_whatsapp_message']['type']
     await enqueueJob('send_whatsapp_message', {
       to,
       type: mediaType,
       conversationId: message.conversationId,
       messageId: message.id,
-      mediaId: opts.mediaId,
+      ...(opts.mediaId ? { mediaId: opts.mediaId } : { s3Key: opts.s3Key! }),
       caption: message.body ?? undefined,
       voiceNote: opts.voiceNote,
     })

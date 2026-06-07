@@ -7,13 +7,23 @@ export const WA_AUDIO_MAX_BYTES = 16 * 1024 * 1024
 export const WA_DOCUMENT_MAX_BYTES = 100 * 1024 * 1024
 
 export const WA_PHOTO_MAX_EDGE = 1600
+/** HD chat photos (client-side prep; mirrors WhatsApp HD toggle). */
+export const WA_PHOTO_HD_MAX_EDGE = 4096
 export const WA_STICKER_MAX_EDGE = 512
 
 /** Long edge for outbound video (WhatsApp-style downscale before send). */
 export const WA_VIDEO_MAX_EDGE = 1280
 export const WA_VIDEO_MAX_DURATION_SEC = 16 * 60
 
+/** Prepared image/audio/sticker uploads WA+S3 in parallel in the HTTP handler (above 5MB image cap). */
+export const OUTBOUND_FAST_PATH_MAX_BYTES = 8 * 1024 * 1024
+
 export type WaMediaKind = 'image' | 'video' | 'audio' | 'document' | 'sticker'
+
+export function useOutboundFastPath(kind: WaMediaKind, preparedBytes: number): boolean {
+  if (kind === 'video' || kind === 'document') return false
+  return preparedBytes <= OUTBOUND_FAST_PATH_MAX_BYTES
+}
 
 export const MEDIA_CAPS: Record<WaMediaKind, number> = {
   image: WA_IMAGE_MAX_BYTES,

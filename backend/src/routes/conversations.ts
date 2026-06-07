@@ -24,14 +24,13 @@ import {
   createOutboundText,
   resendOutboundMessage,
 } from '../services/outbound.js'
-import { whatsapp } from '../services/whatsapp.js'
 import { resolveMessagingState, shapeMessagingFields } from '../utils/messaging-windows.js'
 import { attachReplyPreviews } from '../utils/message-shape.js'
-import { prepareOutboundMedia } from '../utils/prepare-outbound-media.js'
 import {
   sendOutboundMediaBuffer,
   sendOutboundMediaFromS3Key,
 } from '../services/outbound-media-buffer.js'
+import { voiceNoteFromMime } from '../utils/stored-media.js'
 import { forwardMessageToConversation } from '../services/forward-message.js'
 import { resolveReplyTargets } from '../utils/resolve-reply.js'
 
@@ -478,6 +477,7 @@ export async function conversationRoutes(app: FastifyInstance) {
             sentBy: request.agent.id,
             replyToMessageId: replyCtx.replyToMessageId,
             replyToWaMessageId: replyCtx.replyToWaMessageId,
+            passthrough: true,
           })
           const shaped = (await attachReplyPreviews([message]))[0]
           return reply.code(201).send({ message: shaped })
@@ -594,31 +594,17 @@ export async function conversationRoutes(app: FastifyInstance) {
       throw errors.validation('Only failed outbound messages can be resent')
     }
 
-    let mediaId: string | undefined
-    let voiceNote = false
-    if (message.type !== 'text') {
-      if (!message.mediaUrl || !message.mediaMimeType) {
-        throw errors.validation('Message media is missing')
-      }
-      const raw = await app.s3.downloadFromS3(message.mediaUrl)
-      const prepared = await prepareOutboundMedia(
-        raw,
-        message.mediaFilename ?? 'upload',
-        message.mediaMimeType ?? 'application/octet-stream',
-        { conversationId: id, s3: app.s3, log: app.log },
-      )
-      voiceNote = prepared.voiceNote
-      const uploaded = await whatsapp.uploadMedia(
-        app.log,
-        prepared.buffer,
-        prepared.mime,
-        prepared.filename,
-      )
-      mediaId = uploaded.id
+    if (message.type !== 'text' && !message.mediaUrl) {
+      throw errors.validation('Message media is missing')
     }
 
+    const voiceNote =
+      message.type === 'audio' &&
+      !!message.mediaMimeType &&
+      voiceNoteFromMime(message.mediaMimeType)
+
     const updated = await resendOutboundMessage(app.io, message, conversation.contact.waId, {
-      mediaId,
+      s3Key: message.mediaUrl ?? undefined,
       voiceNote,
     })
     return reply.send({ message: updated })

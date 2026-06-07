@@ -7,7 +7,6 @@ import { useGlobalAudioStore } from '@/stores/globalAudioStore'
 
 function GlobalAudioPlayerInner({ uri }: { uri: string }) {
   const source = resolveUploadUri(uri)
-  const isRemote = source.startsWith('http://') || source.startsWith('https://')
   const wantPlaying = useGlobalAudioStore((s) => s.wantPlaying)
   const playbackRate = useGlobalAudioStore((s) => s.playbackRate)
   const bindPlayer = useGlobalAudioStore((s) => s.bindPlayer)
@@ -18,7 +17,8 @@ function GlobalAudioPlayerInner({ uri }: { uri: string }) {
 
   const player = useAudioPlayer(source, {
     updateInterval: 150,
-    downloadFirst: isRemote,
+    // Stream remote voice notes — downloadFirst blocked play until the full file cached.
+    downloadFirst: false,
   })
   const status = useAudioPlayerStatus(player)
 
@@ -53,7 +53,7 @@ function GlobalAudioPlayerInner({ uri }: { uri: string }) {
       isPlaying: status.playing,
       isLoaded: status.isLoaded,
       durationMs: durationMs > 0 ? durationMs : prev.durationMs,
-      positionMs: positionMs > 0 ? positionMs : prev.positionMs,
+      positionMs: status.isLoaded ? positionMs : prev.positionMs,
       didJustFinish: status.didJustFinish,
     })
   }, [
@@ -74,7 +74,14 @@ function GlobalAudioPlayerInner({ uri }: { uri: string }) {
 
     if (atEnd) {
       safePause(player)
-      finishPlayback()
+      const finishedId = useGlobalAudioStore.getState().track?.messageId
+      if (finishedId) {
+        void useGlobalAudioStore.getState().playNextInQueue(finishedId).then((advanced) => {
+          if (!advanced) finishPlayback()
+        })
+      } else {
+        finishPlayback()
+      }
       return
     }
 

@@ -9,6 +9,8 @@ import { normalizeConversation } from '@/lib/conversation'
 import { normalizeMessage } from '@/lib/normalizeMessage'
 import {
   type MessagesInfinite,
+  coerceAndPatchMessagesInfinite,
+  coerceMessagesInfiniteData,
   flattenMessagesPages,
   mapMessagesInfinite,
   patchMessageMediaInfinite,
@@ -41,6 +43,7 @@ type MessageStatusPayload = {
   waMessageId?: string
   status: string
   scope?: string
+  errorMessage?: string | null
 }
 
 function messagePreview(message: Message): string {
@@ -144,7 +147,8 @@ export function useSocketSync() {
       const normalized = normalizeMessage(message as Message & Record<string, unknown>)
       queryClient.setQueryData<MessagesInfinite>(
         ['messages', conversationId],
-        (old) => upsertMessageInfinite(old, normalized),
+        (old) =>
+          upsertMessageInfinite(coerceMessagesInfiniteData(old), normalized),
       )
 
       const hasMessaging =
@@ -174,11 +178,13 @@ export function useSocketSync() {
     const onMessageStatus = (payload: MessageStatusPayload) => {
       if (payload.scope === 'inbound') return
 
-      const patch = (old: MessagesInfinite | undefined) =>
-        patchMessagesStatusInfinite(old, payload)
+      const patch = (old: unknown) =>
+        coerceAndPatchMessagesInfinite(old, (data) =>
+          patchMessagesStatusInfinite(data, payload),
+        )
 
       if (payload.conversationId) {
-        queryClient.setQueryData<MessagesInfinite>(
+        queryClient.setQueryData(
           ['messages', payload.conversationId],
           patch,
         )
@@ -211,14 +217,16 @@ export function useSocketSync() {
       messageId: string
       mediaUrl: string
     }) => {
-      const patch = (old: MessagesInfinite | undefined) =>
-        patchMessageMediaInfinite(old, messageId, { mediaUrl, mediaStatus: 'uploaded' })
+      const patch = (old: unknown) =>
+        coerceAndPatchMessagesInfinite(old, (data) =>
+          patchMessageMediaInfinite(data, messageId, {
+            mediaUrl,
+            mediaStatus: 'uploaded',
+          }),
+        )
 
       if (conversationId) {
-        queryClient.setQueryData<MessagesInfinite>(
-          ['messages', conversationId],
-          patch,
-        )
+        queryClient.setQueryData(['messages', conversationId], patch)
       } else {
         queryClient.setQueriesData<MessagesInfinite>({ queryKey: ['messages'] }, patch)
       }

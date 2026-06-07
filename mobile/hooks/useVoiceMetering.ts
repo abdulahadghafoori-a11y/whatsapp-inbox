@@ -3,14 +3,8 @@ import type { VoiceRecording } from '@/lib/voiceRecording'
 import { meteringToLevel } from '@/lib/metering'
 
 const DEFAULT_BARS = 32
-/**
- * One bar per ~65ms. WhatsApp scrolls the live waveform at roughly this rate,
- * so each bar maps to a consistent slice of speech — that's what makes it read
- * as "in sync" with your voice (vs. one bar per render frame, which scrolls
- * ~4x too fast and looks like noise).
- */
 const SAMPLE_MS = 65
-const IDLE = 0.12
+const IDLE = 0.14
 
 export function useVoiceMetering(
   recorder: VoiceRecording | null,
@@ -21,8 +15,10 @@ export function useVoiceMetering(
   const [levels, setLevels] = useState<number[]>(() => Array(count).fill(IDLE))
   const levelsRef = useRef(levels)
   const smoothed = useRef(IDLE)
+  const staleMeteringTicks = useRef(0)
 
   useEffect(() => {
+    if (levelsRef.current.length === count) return
     const idle = Array(count).fill(IDLE)
     levelsRef.current = idle
     smoothed.current = IDLE
@@ -34,19 +30,37 @@ export function useVoiceMetering(
   }, [levels])
 
   useEffect(() => {
-    if (!active || !recorder) return
+    if (!active || !recorder) {
+      staleMeteringTicks.current = 0
+      return
+    }
 
     const tick = () => {
       let level = IDLE
       try {
         const status = recorder.getStatus()
-        level = meteringToLevel(status.metering)
+        const raw = status.metering
+        if (raw == null || Number.isNaN(raw)) {
+          staleMeteringTicks.current += 1
+        } else {
+          staleMeteringTicks.current = 0
+          level = meteringToLevel(raw)
+        }
       } catch {
-        level = IDLE
+        staleMeteringTicks.current += 1
       }
-      // Light attack/decay smoothing keeps the trace fluid instead of jittery.
+
+      // When the platform omits metering, synthesize a gentle pulse so bars stay alive.
+      if (staleMeteringTicks.current > 2) {
+        const t = Date.now() / 1000
+        level = 0.18 + Math.abs(Math.sin(t * 4.2)) * 0.35 + Math.abs(Math.sin(t * 2.1)) * 0.15
+      }
+
       const prevSmooth = smoothed.current
-      const next = level > prevSmooth ? prevSmooth + (level - prevSmooth) * 0.6 : prevSmooth + (level - prevSmooth) * 0.4
+      const next =
+        level > prevSmooth
+          ? prevSmooth + (level - prevSmooth) * 0.65
+          : prevSmooth + (level - prevSmooth) * 0.42
       smoothed.current = next
 
       const prev = levelsRef.current
@@ -58,6 +72,7 @@ export function useVoiceMetering(
       setLevels(updated)
     }
 
+    tick()
     const id = setInterval(tick, SAMPLE_MS)
     return () => clearInterval(id)
   }, [active, recorder, count])

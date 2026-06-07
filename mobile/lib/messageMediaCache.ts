@@ -1,7 +1,7 @@
 import * as FileSystem from 'expo-file-system/legacy'
 import { Image as RNImage } from 'react-native'
 import { appStorage } from '@/lib/appStorage'
-import { hashBlobId } from '@/lib/mediaContentHash'
+import { hashBlobId, hashPreparedFile } from '@/lib/mediaContentHash'
 import { resolveUploadUri } from '@/lib/uploadUri'
 
 const INDEX_KEY = 'wa-message-media-v2'
@@ -32,17 +32,36 @@ let indexMem: MediaIndexV2 | null = null
 let indexLoad: Promise<MediaIndexV2> | null = null
 let reconcilePromise: Promise<void> | null = null
 const validatedBlobs = new Set<string>()
-const cacheListeners = new Set<() => void>()
+const messageCacheListeners = new Map<string, Set<() => void>>()
 let uploadHashMem: Record<string, string> | null = null
 
-function notifyCacheListeners() {
-  cacheListeners.forEach((l) => l())
+function notifyMessageCacheListeners(messageIds: Iterable<string>) {
+  for (const messageId of messageIds) {
+    messageCacheListeners.get(messageId)?.forEach((listener) => listener())
+  }
 }
 
-export function subscribeMediaCache(listener: () => void): () => void {
-  cacheListeners.add(listener)
+function notifyAllMessageCacheListeners() {
+  messageCacheListeners.forEach((listeners) => {
+    listeners.forEach((listener) => listener())
+  })
+}
+
+/** Subscribe to cache updates for one message (avoids rebroadcasting to the whole chat list). */
+export function subscribeMessageMediaCache(
+  messageId: string | undefined,
+  listener: () => void,
+): () => void {
+  if (!messageId) return () => undefined
+  let listeners = messageCacheListeners.get(messageId)
+  if (!listeners) {
+    listeners = new Set()
+    messageCacheListeners.set(messageId, listeners)
+  }
+  listeners.add(listener)
   return () => {
-    cacheListeners.delete(listener)
+    listeners!.delete(listener)
+    if (listeners!.size === 0) messageCacheListeners.delete(messageId)
   }
 }
 
@@ -136,22 +155,28 @@ async function reconcileStaleBlobs(index: MediaIndexV2) {
     }
   }
 
+  const removedMessageIds: string[] = []
   if (deadBlobIds.size > 0) {
     for (const [messageId, blobId] of Object.entries(index.messageToBlob)) {
       if (deadBlobIds.has(blobId)) {
         delete index.messageToBlob[messageId]
+        removedMessageIds.push(messageId)
         changed = true
       }
     }
   }
 
   if (changed) await saveIndex(index)
+  if (removedMessageIds.length) notifyMessageCacheListeners(removedMessageIds)
 }
 
 export async function ensureMediaIndexLoaded(): Promise<MediaIndexV2> {
   const index = await loadIndex()
   if (!reconcilePromise) {
-    reconcilePromise = reconcileStaleBlobs(index).then(() => enforceMediaCacheBudget(index))
+    reconcilePromise = reconcileStaleBlobs(index).then(async () => {
+      await enforceMediaCacheBudget(index)
+      if (indexMem) notifyMessageCacheListeners(Object.keys(indexMem.messageToBlob))
+    })
   }
   await reconcilePromise
   return index
@@ -186,6 +211,7 @@ export async function enforceMediaCacheBudget(index?: MediaIndexV2): Promise<voi
   const target = MEDIA_CACHE_BUDGET_BYTES * 0.9
   entries.sort((a, b) => a.ts - b.ts) // oldest first
   let changed = false
+  const evictedMessageIds: string[] = []
   for (const entry of entries) {
     if (total <= target) break
     try {
@@ -196,14 +222,17 @@ export async function enforceMediaCacheBudget(index?: MediaIndexV2): Promise<voi
     delete idx.blobs[entry.blobId]
     validatedBlobs.delete(entry.blobId)
     for (const [messageId, blobId] of Object.entries(idx.messageToBlob)) {
-      if (blobId === entry.blobId) delete idx.messageToBlob[messageId]
+      if (blobId === entry.blobId) {
+        delete idx.messageToBlob[messageId]
+        evictedMessageIds.push(messageId)
+      }
     }
     total -= entry.size
     changed = true
   }
   if (changed) {
     await saveIndex(idx)
-    notifyCacheListeners()
+    notifyMessageCacheListeners(evictedMessageIds)
   }
 }
 
@@ -222,7 +251,7 @@ export async function clearMediaCache(): Promise<void> {
   await appStorage.removeItem(INDEX_KEY)
   await appStorage.removeItem(LEGACY_INDEX_KEY)
   await appStorage.removeItem(UPLOAD_HASH_INDEX_KEY)
-  notifyCacheListeners()
+  notifyAllMessageCacheListeners()
 }
 
 /** Delete stale upload temp files (wa-upload-*) left in the cache directory. */
@@ -339,7 +368,7 @@ async function linkMessageToBlob(
   index.messageToBlob[messageId] = blobId
   validatedBlobs.add(blobId)
   await saveIndex(index)
-  notifyCacheListeners()
+  notifyMessageCacheListeners([messageId])
   return record.localUri
 }
 
@@ -358,7 +387,7 @@ export async function getCachedMediaEntry(messageId: string) {
   delete index.messageToBlob[messageId]
   validatedBlobs.delete(blobId)
   await saveIndex(index)
-  notifyCacheListeners()
+  notifyMessageCacheListeners([messageId])
   return null
 }
 
@@ -397,7 +426,7 @@ export async function aliasMessageToBlob(
   index.messageToBlob[messageId] = blobId
   validatedBlobs.add(blobId)
   await saveIndex(index)
-  notifyCacheListeners()
+  notifyMessageCacheListeners([messageId])
   return record.localUri
 }
 
@@ -496,11 +525,43 @@ export async function cacheMediaFromRemoteUrl(
   const dims =
     dimensions ?? (mimeType.startsWith('image/') ? await probeImageSize(dest) : null)
 
-  return linkMessageToBlob(messageId, id, {
+  const record: BlobRecord = {
     localUri: dest,
     mimeType,
     width: dims?.width,
     height: dims?.height,
     cachedAt: new Date().toISOString(),
-  })
+  }
+
+  const uri = await linkMessageToBlob(messageId, id, record)
+
+  // Dedup alias by content hash — deferred so chat scroll is not blocked on large files.
+  void registerInboundContentHashAlias(dest, id, record)
+
+  return uri
+}
+
+async function registerInboundContentHashAlias(
+  dest: string,
+  blobId: string,
+  record: BlobRecord,
+): Promise<void> {
+  const contentHash = await hashPreparedFile(dest)
+  if (!contentHash) return
+
+  const hashId = hashBlobId(contentHash)
+  if (hashId === blobId) return
+
+  const fresh = await loadIndex()
+  if (fresh.blobs[hashId]) {
+    try {
+      await FileSystem.deleteAsync(dest, { idempotent: true })
+    } catch {
+      /* ignore */
+    }
+    return
+  }
+
+  fresh.blobs[hashId] = fresh.blobs[blobId] ?? record
+  await saveIndex(fresh)
 }

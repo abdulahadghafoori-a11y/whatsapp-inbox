@@ -1,10 +1,21 @@
 import type { FastifyBaseLogger } from 'fastify'
-import type { S3Service } from '../services/s3.js'
 import { errors } from './errors.js'
+
+function sanitizeFilename(filename: string): string {
+  let name = filename
+  try {
+    name = decodeURIComponent(filename)
+  } catch {
+    /* keep */
+  }
+  const base = name.split(/[/\\]/).pop() ?? 'file'
+  const safe = base.replace(/[^\w.\- ()[\]]+/g, '_').slice(0, 200)
+  return safe || `file-${Date.now()}`
+}
 import { normalizeWhatsAppMime } from './mime-normalize.js'
-import { prepareAudioForWhatsApp } from './transcode-audio.js'
-import { prepareImageForWhatsApp } from './prepare-image.js'
-import { prepareVideoForWhatsApp } from './prepare-video.js'
+import { validateAudioForWhatsApp } from './validate-audio.js'
+import { validateImageForWhatsApp } from './prepare-image.js'
+import { validateVideoForWhatsApp } from './validate-video.js'
 import { prepareDocumentForWhatsApp } from './prepare-document.js'
 import { analyzeAudioBuffer } from './inbound-audio-profile.js'
 import {
@@ -23,14 +34,12 @@ export type PreparedOutboundMedia = {
 }
 
 type PrepareOpts = {
-  conversationId?: string
-  s3?: S3Service
   log?: FastifyBaseLogger
 }
 
 /**
- * Single entry point: normalize, transcode/compress, and enforce WhatsApp limits
- * for every outbound media type (image, video, audio, document, sticker).
+ * Single entry point: validate outbound media before WhatsApp upload.
+ * Images, video, and voice are prepared on the mobile client; server validates caps/format.
  */
 export async function prepareOutboundMedia(
   buffer: Buffer,
@@ -41,15 +50,11 @@ export async function prepareOutboundMedia(
   const sourceBytes = buffer.length
   let mime = normalizeWhatsAppMime(mimeHint, filename)
   let outBuffer = buffer
-  let outName = filename
+  let outName = sanitizeFilename(filename)
   let voiceNote = false
 
   if (mime.startsWith('audio/')) {
-    const prepared = await prepareAudioForWhatsApp(buffer, filename, {
-      conversationId: opts.conversationId,
-      s3: opts.s3,
-      log: opts.log,
-    })
+    const prepared = validateAudioForWhatsApp(buffer, filename, mime)
     outBuffer = prepared.buffer
     mime = prepared.mime.split(';')[0].trim()
     outName = prepared.filename
@@ -68,16 +73,16 @@ export async function prepareOutboundMedia(
     )
   } else if (mime.startsWith('image/')) {
     const kind = mediaKindFromMime(mime) === 'sticker' ? 'sticker' : 'image'
-    const prepared = await prepareImageForWhatsApp(buffer, filename, mime, { kind })
+    const prepared = await validateImageForWhatsApp(buffer, filename, mime, { kind })
     outBuffer = prepared.buffer
     mime = prepared.mime
     outName = prepared.filename
     opts.log?.info(
       { mime, bytes: outBuffer.length, filename: outName, sourceBytes, kind },
-      'outbound_image_prepared',
+      'outbound_image_validated',
     )
   } else if (mime.startsWith('video/')) {
-    const prepared = await prepareVideoForWhatsApp(buffer, filename, mime)
+    const prepared = validateVideoForWhatsApp(buffer, filename, mime)
     outBuffer = prepared.buffer
     mime = prepared.mime
     outName = prepared.filename

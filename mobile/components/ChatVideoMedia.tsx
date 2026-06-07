@@ -11,6 +11,7 @@ type ChatVideoMediaProps = {
   uri: string
   messageId: string
   uploading?: boolean
+  uploadLabel?: string
   onPress?: () => void
 }
 
@@ -18,6 +19,7 @@ export function ChatVideoMedia({
   uri,
   messageId,
   uploading = false,
+  uploadLabel,
   onPress,
 }: ChatVideoMediaProps) {
   const videoMeta = useVideoDimensions(uri, messageId)
@@ -42,6 +44,7 @@ export function ChatVideoMedia({
         width={layout.width}
         height={layout.height}
         uploading={uploading}
+        uploadLabel={uploadLabel}
         thumbUri={videoMeta?.thumbUri}
       />
     </Pressable>

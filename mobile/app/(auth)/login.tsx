@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   View,
   Text,
@@ -6,6 +6,8 @@ import {
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
+  Pressable,
+  StyleSheet,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { StatusBar } from 'expo-status-bar'
@@ -15,9 +17,25 @@ import { api, apiErrorMessage } from '@/services/api'
 import { useAuthStore } from '@/stores/authStore'
 import { registerForPushNotifications } from '@/lib/push'
 import { useToast } from '@/components/Toast'
-import { PressableScale } from '@/components/PressableScale'
 import { hapticError, hapticSuccess } from '@/lib/haptics'
 import type { AuthResponse } from '@/types'
+
+const C = {
+  bgLight: '#F7F8FA',
+  bgDark: '#111B21',
+  panelDark: '#202C33',
+  teal: '#008069',
+  textLight: '#171717',
+  textDark: '#E9EDEF',
+  subLight: '#737373',
+  subDark: '#8696A0',
+  borderLight: '#e5e5e5',
+  disabledLight: '#d4d4d4',
+  disabledDark: '#2A3942',
+  white: '#ffffff',
+  iconMutedLight: '#9ca3af',
+  iconMutedDark: '#8696A0',
+} as const
 
 export default function LoginScreen() {
   const [email, setEmail] = useState('')
@@ -28,6 +46,7 @@ export default function LoginScreen() {
   const isDark = colorScheme === 'dark'
   const toast = useToast()
 
+  const styles = useMemo(() => makeStyles(isDark), [isDark])
   const canSubmit = email.trim().length > 0 && password.length > 0 && !loading
 
   async function onSubmit() {
@@ -50,27 +69,23 @@ export default function LoginScreen() {
   }
 
   return (
-    <SafeAreaView className="flex-1 bg-[#F7F8FA] dark:bg-wa-panelDeep">
+    <SafeAreaView style={styles.screen}>
       <StatusBar style={isDark ? 'light' : 'dark'} />
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        className="flex-1 justify-center px-6"
+        style={styles.body}
       >
-        <View className="mb-12 items-center">
-          <View className="h-20 w-20 items-center justify-center rounded-3xl bg-wa-teal shadow-lg">
-            <Ionicons name="chatbubble-ellipses" size={40} color="#ffffff" />
+        <View style={styles.header}>
+          <View style={styles.logo}>
+            <Ionicons name="chatbubble-ellipses" size={40} color={C.white} />
           </View>
-          <Text className="mt-5 text-[26px] font-bold tracking-tight text-neutral-900 dark:text-wa-textDark">
-            Sales Inbox
-          </Text>
-          <Text className="mt-1 text-[15px] text-neutral-500 dark:text-wa-subDark">
-            Sign in to your team account
-          </Text>
+          <Text style={styles.title}>Sales Inbox</Text>
+          <Text style={styles.subtitle}>Sign in to your team account</Text>
         </View>
 
-        <View className="gap-3">
-          <View className="flex-row items-center gap-2.5 rounded-2xl border border-neutral-200 bg-white px-4 dark:border-white/5 dark:bg-wa-panel">
-            <Ionicons name="mail-outline" size={19} color={isDark ? '#8696A0' : '#9ca3af'} />
+        <View style={styles.form}>
+          <View style={styles.field}>
+            <Ionicons name="mail-outline" size={19} color={styles.iconMuted.color} />
             <TextInput
               placeholder="Email"
               autoCapitalize="none"
@@ -78,40 +93,116 @@ export default function LoginScreen() {
               autoComplete="email"
               value={email}
               onChangeText={setEmail}
-              className="flex-1 py-3.5 text-base text-neutral-900 dark:text-wa-textDark"
-              placeholderTextColor={isDark ? '#8696A0' : '#9ca3af'}
+              style={styles.input}
+              placeholderTextColor={styles.placeholder.color}
             />
           </View>
-          <View className="flex-row items-center gap-2.5 rounded-2xl border border-neutral-200 bg-white px-4 dark:border-white/5 dark:bg-wa-panel">
-            <Ionicons name="lock-closed-outline" size={19} color={isDark ? '#8696A0' : '#9ca3af'} />
+          <View style={styles.field}>
+            <Ionicons name="lock-closed-outline" size={19} color={styles.iconMuted.color} />
             <TextInput
               placeholder="Password"
               secureTextEntry
               value={password}
               onChangeText={setPassword}
               onSubmitEditing={onSubmit}
-              className="flex-1 py-3.5 text-base text-neutral-900 dark:text-wa-textDark"
-              placeholderTextColor={isDark ? '#8696A0' : '#9ca3af'}
+              style={styles.input}
+              placeholderTextColor={styles.placeholder.color}
             />
           </View>
 
-          <PressableScale
+          <Pressable
             onPress={onSubmit}
-            haptic="none"
             disabled={!canSubmit}
-            scaleTo={0.97}
-            className={`mt-2 items-center rounded-2xl py-4 ${
-              canSubmit ? 'bg-wa-teal shadow-md' : 'bg-neutral-300 dark:bg-wa-elevated'
-            }`}
+            style={[styles.button, canSubmit ? styles.buttonOn : styles.buttonOff]}
           >
             {loading ? (
-              <ActivityIndicator color="#fff" />
+              <ActivityIndicator color={C.white} />
             ) : (
-              <Text className="text-base font-semibold text-white">Sign In</Text>
+              <Text style={styles.buttonText}>Sign In</Text>
             )}
-          </PressableScale>
+          </Pressable>
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
   )
+}
+
+function makeStyles(isDark: boolean) {
+  return StyleSheet.create({
+    screen: {
+      flex: 1,
+      backgroundColor: isDark ? C.bgDark : C.bgLight,
+    },
+    body: {
+      flex: 1,
+      justifyContent: 'center',
+      paddingHorizontal: 24,
+    },
+    header: {
+      alignItems: 'center',
+      marginBottom: 48,
+    },
+    logo: {
+      height: 80,
+      width: 80,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderRadius: 24,
+      backgroundColor: C.teal,
+    },
+    title: {
+      marginTop: 20,
+      fontSize: 26,
+      fontWeight: '700',
+      letterSpacing: -0.5,
+      color: isDark ? C.textDark : C.textLight,
+    },
+    subtitle: {
+      marginTop: 4,
+      fontSize: 15,
+      color: isDark ? C.subDark : C.subLight,
+    },
+    form: {
+      gap: 12,
+    },
+    field: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: isDark ? 'rgba(255,255,255,0.05)' : C.borderLight,
+      backgroundColor: isDark ? C.panelDark : C.white,
+      paddingHorizontal: 16,
+    },
+    input: {
+      flex: 1,
+      paddingVertical: 14,
+      fontSize: 16,
+      color: isDark ? C.textDark : C.textLight,
+    },
+    placeholder: {
+      color: isDark ? C.iconMutedDark : C.iconMutedLight,
+    },
+    iconMuted: {
+      color: isDark ? C.iconMutedDark : C.iconMutedLight,
+    },
+    button: {
+      marginTop: 8,
+      alignItems: 'center',
+      borderRadius: 16,
+      paddingVertical: 16,
+    },
+    buttonOn: {
+      backgroundColor: C.teal,
+    },
+    buttonOff: {
+      backgroundColor: isDark ? C.disabledDark : C.disabledLight,
+    },
+    buttonText: {
+      fontSize: 16,
+      fontWeight: '600',
+      color: C.white,
+    },
+  })
 }

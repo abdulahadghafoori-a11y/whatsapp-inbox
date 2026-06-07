@@ -5,12 +5,15 @@ import { Ionicons } from '@expo/vector-icons'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NowPlayingBar } from '@/components/NowPlayingBar'
 import { InboxTabButton } from '@/components/InboxTabButton'
+import { inboxScrollToTop } from '@/lib/inboxScroll'
 import { getDefaultTabBarStyle } from '@/lib/navigation'
 import { hapticSelection } from '@/lib/haptics'
+import { useAuthStore } from '@/stores/authStore'
 
 export default function TabsLayout() {
   const insets = useSafeAreaInsets()
   const { colorScheme: scheme } = useColorScheme()
+  const isAdmin = useAuthStore((s) => s.agent?.role === 'admin')
   const isDark = scheme === 'dark'
   const defaultTabBarStyle = {
     ...getDefaultTabBarStyle(insets.bottom),
@@ -45,10 +48,18 @@ export default function TabsLayout() {
             ),
             tabBarButton: (props) => <InboxTabButton {...props} />,
           }}
+          listeners={({ navigation }) => ({
+            tabPress: () => {
+              if (navigation.isFocused()) {
+                inboxScrollToTop()
+              }
+            },
+          })}
         />
         <Tabs.Screen
           name="team"
           options={{
+            href: isAdmin ? undefined : null,
             title: 'Team',
             tabBarLabel: 'Team',
             tabBarIcon: ({ color, focused }) => (

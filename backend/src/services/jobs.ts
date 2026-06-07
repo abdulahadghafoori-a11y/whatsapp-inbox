@@ -18,6 +18,8 @@ export interface JobPayloads {
     messageId: string // local message row to update with wa id / status
     body?: string
     mediaId?: string
+    /** Upload to WhatsApp inside the job when mediaId is not pre-assigned. */
+    s3Key?: string
     caption?: string
     replyToWaMessageId?: string
     voiceNote?: boolean

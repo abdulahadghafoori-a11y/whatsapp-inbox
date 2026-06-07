@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import {
   keepPreviousData,
   useInfiniteQuery,
@@ -10,25 +11,27 @@ import {
 import { api } from '@/services/api'
 import { isOnline } from '@/lib/network'
 import { enqueueTextSend } from '@/lib/offlineQueue'
+import { enqueueMediaSend } from '@/lib/offlineMediaQueue'
+import { postMediaMessage } from '@/lib/postMediaMessage'
+import type { MediaSendPhase } from '@/lib/mediaSendPhase'
+import { clientSendMetadata, readClientSendMeta } from '@/lib/mediaSendMeta'
+import { mediaSendErrorMessage } from '@/lib/mediaSendErrors'
 import axios from 'axios'
 import { normalizeConversation } from '@/lib/conversation'
 import { messageTypeFromMime, normalizeUploadMime } from '@/lib/mediaMime'
 import {
   type MessagesInfinite,
   coerceMessagesInfiniteData,
+  flattenMessagesPages,
+  pageMessages,
+  patchMessageFieldsInfinite,
   patchMessageStatusInfinite,
   upsertMessageInfinite,
 } from '@/lib/messagesQueryCache'
 import { playWaFeedback, playWaFeedbackAsync } from '@/lib/waFeedbackSounds'
 import { normalizeMessage, normalizeMessagesResponse } from '@/lib/normalizeMessage'
-import { prepareMediaFileForUpload, readPreparedAudioBase64 } from '@/lib/prepareUpload'
-import { assertMediaUploadable } from '@/lib/waMediaLimits'
+import type { MediaQualityTier } from '@/lib/imageQualityPreference'
 import { syncMessageMedia } from '@/lib/messageMediaSync'
-import { hashMediaFile } from '@/lib/mediaContentHash'
-import {
-  rememberContentHashS3Key,
-  getS3KeyForContentHash,
-} from '@/lib/messageMediaCache'
 import type {
   ConversationDetail,
   ConversationListItem,
@@ -160,11 +163,12 @@ function patchMessageInCacheInfinite(
   return {
     ...old,
     pages: old.pages.map((page) => {
-      const exists = page.messages.some((m) => m.id === message.id)
+      const list = pageMessages(page)
+      const exists = list.some((m) => m.id === message.id)
       if (!exists) return page
       return {
         ...page,
-        messages: page.messages.map((m) =>
+        messages: list.map((m) =>
           m.id === message.id
             ? {
                 ...m,
@@ -229,12 +233,16 @@ export function useMessages(conversationId: string) {
   })
 
   const infinite = coerceMessagesInfiniteData(query.data) ?? query.data
-  const messages = infinite?.pages.flatMap((p) => p.messages) ?? []
+  const messages = useMemo(() => flattenMessagesPages(infinite), [infinite])
   const nextCursor = infinite?.pages.at(-1)?.nextCursor ?? null
+  const data = useMemo(
+    () => (infinite ? { messages, nextCursor } : undefined),
+    [infinite, messages, nextCursor],
+  )
 
   return {
     ...query,
-    data: { messages, nextCursor },
+    data,
     fetchOlderMessages: query.fetchNextPage,
     hasOlderMessages: query.hasNextPage,
     isFetchingOlder: query.isFetchingNextPage,
@@ -482,10 +490,21 @@ export interface MediaUpload {
   name: string
   mimeType: string
   caption?: string
+  imageQuality?: MediaQualityTier
+  videoQuality?: MediaQualityTier
   replyToMessageId?: string
   replyToPreview?: Message['replyTo']
   /** Retry in place: update this message to pending instead of adding a new bubble. */
   replaceMessageId?: string
+  /** Set when video was trimmed before upload. */
+  videoTrim?: { startMs: number; endMs: number }
+  /** Skip video transcode; send as document (up to 100MB). */
+  sendAsDocument?: boolean
+  /** Skip trim/compress — preparedUri is ready to upload. */
+  skipPrepare?: boolean
+  preparedUri?: string
+  /** Stable id for optimistic bubble + phase updates. */
+  clientMessageId?: string
 }
 
 function buildOptimisticMediaMessage(
@@ -494,13 +513,14 @@ function buildOptimisticMediaMessage(
   media: MediaUpload,
 ): Message {
   const mimeType = normalizeUploadMime(media.mimeType, media.name)
+  const type = media.sendAsDocument ? 'document' : messageTypeFromMime(mimeType)
   return {
     id: optimisticId,
     conversationId,
     waMessageId: null,
     sentBy: null,
     direction: 'outbound',
-    type: messageTypeFromMime(mimeType),
+    type,
     body: media.caption ?? null,
     mediaUrl: null,
     mediaMimeType: mimeType,
@@ -513,84 +533,95 @@ function buildOptimisticMediaMessage(
     sentAt: new Date().toISOString(),
     createdAt: new Date().toISOString(),
     localPreviewUri: media.uri,
+    metadata: clientSendMetadata(media),
   }
 }
 
 export function useSendMedia(conversationId: string) {
   const qc = useQueryClient()
+
+  function patchPhase(messageId: string | undefined, phase: MediaSendPhase) {
+    if (!messageId) return
+    qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
+      patchMessageFieldsInfinite(old, messageId, { sendPhase: phase }),
+    )
+  }
+
+  function patchPreparedUri(messageId: string | undefined, preparedUri: string, media: MediaUpload) {
+    if (!messageId) return
+    qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
+      patchMessageFieldsInfinite(old, messageId, {
+        localPreviewUri: preparedUri,
+        metadata: clientSendMetadata({
+          uri: media.uri,
+          videoTrim: media.videoTrim,
+          sendAsDocument: media.sendAsDocument,
+          imageQuality: media.imageQuality,
+          videoQuality: media.videoQuality,
+          preparedUri,
+        }),
+      }),
+    )
+  }
+
   return useMutation({
     mutationFn: async (media: MediaUpload) => {
-      const mimeHint = normalizeUploadMime(media.mimeType, media.name)
-
-      if (mimeHint.startsWith('audio/')) {
-        const audio = await readPreparedAudioBase64(media.uri, media.name, media.mimeType)
-        const res = await api.post<{ message: Message }>(
-          `/conversations/${conversationId}/messages`,
-          {
-            type: 'audio' as const,
-            filename: audio.name,
-            mimeType: normalizeUploadMime(audio.mimeType, audio.name),
-            data: audio.data,
-            ...(media.caption ? { caption: media.caption } : {}),
-            ...(media.replyToMessageId
-              ? { replyToMessageId: media.replyToMessageId }
-              : {}),
-          },
-          { timeout: 120_000 },
-        )
-        return normalizeMessage(res.data.message as Message & Record<string, unknown>)
+      const online = await isOnline()
+      const trackingId = media.clientMessageId ?? media.replaceMessageId
+      if (!online) {
+        const queued = await enqueueMediaSend({
+          id: media.clientMessageId,
+          conversationId,
+          sourceUri: media.uri,
+          name: media.name,
+          mimeType: media.mimeType,
+          caption: media.caption,
+          replyToMessageId: media.replyToMessageId,
+          imageQuality: media.imageQuality,
+          videoTrim: media.videoTrim,
+          videoQuality: media.videoQuality,
+          sendAsDocument: media.sendAsDocument,
+        })
+        throw Object.assign(new Error('QUEUED_OFFLINE'), { queued })
       }
 
-      await assertMediaUploadable(media.uri, mimeHint, media.name)
-      const prepared = await prepareMediaFileForUpload(media.uri, media.name, media.mimeType)
-      const mimeType = normalizeUploadMime(prepared.mimeType, prepared.name)
-      const contentHash = await hashMediaFile(prepared.uri)
-      if (contentHash) {
-        const reuseS3Key = await getS3KeyForContentHash(contentHash)
-        if (reuseS3Key) {
-          const res = await api.post<{ message: Message }>(
-            `/conversations/${conversationId}/messages`,
-            {
-              type: 'media_reuse' as const,
-              reuseS3Key,
-              filename: prepared.name,
-              mimeType,
-              ...(media.caption ? { caption: media.caption } : {}),
-              ...(media.replyToMessageId
-                ? { replyToMessageId: media.replyToMessageId }
-                : {}),
-            },
-            { timeout: 120_000 },
-          )
-          const message = normalizeMessage(
-            res.data.message as Message & Record<string, unknown>,
-          )
-          if (message.mediaUrl) {
-            await rememberContentHashS3Key(contentHash, message.mediaUrl)
+      const uploadUri = media.skipPrepare && media.preparedUri ? media.preparedUri : media.uri
+      return postMediaMessage(conversationId, {
+        uri: uploadUri,
+        name: media.name,
+        mimeType: media.mimeType,
+        caption: media.caption,
+        replyToMessageId: media.replyToMessageId,
+        imageQuality: media.imageQuality,
+        videoQuality: media.videoQuality,
+        videoTrim: media.skipPrepare ? undefined : media.videoTrim,
+        sendAsDocument: media.sendAsDocument,
+        skipPrepare: media.skipPrepare,
+        onPhase: (phase) => patchPhase(trackingId, phase),
+        onCompressProgress: (progress) => {
+          qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) => {
+            const existing = flattenMessagesPages(old).find((m) => m.id === trackingId)
+            return patchMessageFieldsInfinite(old, trackingId!, {
+              sendPhase: 'preparing',
+              metadata: { ...(existing?.metadata ?? {}), compressProgress: progress },
+            })
+          })
+        },
+        onUploadProgress: (progress) => {
+          qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) => {
+            const existing = flattenMessagesPages(old).find((m) => m.id === trackingId)
+            return patchMessageFieldsInfinite(old, trackingId!, {
+              sendPhase: 'uploading',
+              metadata: { ...(existing?.metadata ?? {}), uploadProgress: progress },
+            })
+          })
+        },
+        onPrepared: (prepared) => {
+          if (!media.skipPrepare) {
+            patchPreparedUri(trackingId, prepared.fileUri, media)
           }
-          return message
-        }
-      }
-      const form = new FormData()
-      form.append('file', {
-        uri: prepared.uri,
-        name: prepared.name,
-        type: mimeType,
-      } as unknown as Blob)
-      if (media.caption) form.append('caption', media.caption)
-      if (media.replyToMessageId) {
-        form.append('replyToMessageId', media.replyToMessageId)
-      }
-      const res = await api.post<{ message: Message }>(
-        `/conversations/${conversationId}/messages`,
-        form,
-        { timeout: 120_000 },
-      )
-      const message = normalizeMessage(res.data.message as Message & Record<string, unknown>)
-      if (contentHash && message.mediaUrl) {
-        await rememberContentHashS3Key(contentHash, message.mediaUrl)
-      }
-      return message
+        },
+      })
     },
     onMutate: async (media) => {
       const mime = normalizeUploadMime(media.mimeType, media.name)
@@ -600,7 +631,11 @@ export function useSendMedia(conversationId: string) {
       const previous = qc.getQueryData<MessagesInfinite>(['messages', conversationId])
       if (media.replaceMessageId) {
         qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
-          patchMessageStatusInfinite(old, media.replaceMessageId!, 'pending'),
+          patchMessageStatusInfinite(old, media.replaceMessageId!, 'pending', {
+            sendPhase: 'preparing',
+            errorMessage: null,
+            sentAt: new Date().toISOString(),
+          }),
         )
         return {
           previous,
@@ -608,31 +643,87 @@ export function useSendMedia(conversationId: string) {
           localUri: media.uri,
         }
       }
-      const optimisticId = `pending-media-${Date.now()}`
-      const optimistic = buildOptimisticMediaMessage(conversationId, optimisticId, media)
+      const optimisticId = media.clientMessageId ?? `pending-media-${Date.now()}`
+      const optimistic = {
+        ...buildOptimisticMediaMessage(conversationId, optimisticId, media),
+        sendPhase: 'preparing' as const,
+      }
       qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
         upsertMessageInfinite(old, optimistic),
       )
       return { previous, optimisticId, localUri: media.uri }
     },
-    onError: (_err, media, ctx) => {
+    onError: (err, media, ctx) => {
+      if (err instanceof Error && err.message === 'QUEUED_OFFLINE') {
+        const queued = (err as Error & { queued?: { id: string; createdAt: string } }).queued
+        if (queued && ctx?.optimisticId) {
+          qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
+            patchMessageFieldsInfinite(old, ctx.optimisticId!, {
+              sendPhase: 'queued',
+              status: 'pending',
+            }),
+          )
+        }
+        return
+      }
+      const errMsg = mediaSendErrorMessage(err)
+      const trackingId = ctx?.replaceMessageId ?? ctx?.optimisticId
+      const cached = trackingId
+        ? flattenMessagesPages(
+            qc.getQueryData<MessagesInfinite>(['messages', conversationId]),
+          ).find((m) => m.id === trackingId)
+        : undefined
+      const clientSend = cached ? readClientSendMeta(cached) : undefined
+      const previewUri = clientSend?.preparedUri ?? cached?.localPreviewUri ?? ctx?.localUri
+
       if (ctx?.replaceMessageId) {
         qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
-          patchMessageStatusInfinite(old, ctx.replaceMessageId!, 'failed'),
+          patchMessageStatusInfinite(old, ctx.replaceMessageId!, 'failed', {
+            errorMessage: errMsg,
+            sendPhase: undefined,
+            localPreviewUri: previewUri,
+          }),
         )
         return
       }
       if (!ctx?.optimisticId) return
       const failed = buildOptimisticMediaMessage(conversationId, ctx.optimisticId, media)
       qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
-        upsertMessageInfinite(old, { ...failed, status: 'failed' }, { localPreviewUri: ctx.localUri }),
+        upsertMessageInfinite(
+          old,
+          {
+            ...failed,
+            status: 'failed',
+            errorMessage: errMsg,
+            sendPhase: undefined,
+            localPreviewUri: previewUri,
+            metadata: cached?.metadata ?? failed.metadata,
+          },
+          { localPreviewUri: previewUri },
+        ),
       )
     },
     onSuccess: (message, _media, ctx) => {
       if (message.type === 'audio' && message.status === 'sent') {
         void playWaFeedbackAsync('sent')
       }
+      const trackingId = ctx?.replaceMessageId ?? ctx?.optimisticId
+      const cached = trackingId
+        ? flattenMessagesPages(
+            qc.getQueryData<MessagesInfinite>(['messages', conversationId]),
+          ).find((m) => m.id === trackingId)
+        : undefined
+      const previewUri =
+        readClientSendMeta(cached ?? message)?.preparedUri ??
+        cached?.localPreviewUri ??
+        ctx?.localUri
       qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) => {
+        const enriched = {
+          ...message,
+          sendPhase: message.status === 'sent' ? undefined : ('sending' as const),
+          localPreviewUri: previewUri,
+          metadata: cached?.metadata ?? message.metadata,
+        }
         if (ctx?.replaceMessageId && old?.pages.length) {
           const pages = [...old.pages]
           const first = pages[0]
@@ -640,11 +731,11 @@ export function useSendMedia(conversationId: string) {
             ...first,
             messages: first.messages.filter((m) => m.id !== ctx.replaceMessageId),
           }
-          return upsertMessageInfinite({ ...old, pages }, message, { localPreviewUri: ctx.localUri })
+          return upsertMessageInfinite({ ...old, pages }, enriched, { localPreviewUri: previewUri })
         }
-        return upsertMessageInfinite(old, message, {
+        return upsertMessageInfinite(old, enriched, {
           removeId: ctx?.optimisticId,
-          localPreviewUri: ctx?.localUri,
+          localPreviewUri: previewUri,
         })
       })
       if (message.mediaUrl) {

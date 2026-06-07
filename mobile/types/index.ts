@@ -110,6 +110,8 @@ export interface Message {
   createdAt: string
   /** Client-only: show local file while outbound upload is in flight. */
   localPreviewUri?: string
+  /** Client-only: preparing / uploading / sending / queued (offline). */
+  sendPhase?: 'preparing' | 'uploading' | 'sending' | 'queued'
   /** Client-only: permanent on-device copy (see messageMediaCache). */
   localCacheUri?: string
   metadata?: Record<string, unknown> | null

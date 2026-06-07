@@ -1,15 +1,51 @@
+/** Force Gregorian calendar regardless of device locale (avoids Shamsi/Jalali on fa-IR devices). */
+const LOCALE = 'en-US'
+
+const timeOpts: Intl.DateTimeFormatOptions = {
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+}
+
+const dateOpts: Intl.DateTimeFormatOptions = {
+  month: 'short',
+  day: 'numeric',
+  calendar: 'gregory',
+}
+
+/** Time only (HH:MM) for message footers — day context comes from date separators. */
+export function formatMessageTime(iso: string | null): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  return d.toLocaleTimeString(LOCALE, timeOpts)
+}
+
 export function formatTime(iso: string | null): string {
   if (!iso) return ''
   const d = new Date(iso)
   const now = new Date()
   const sameDay = d.toDateString() === now.toDateString()
   if (sameDay) {
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    return d.toLocaleTimeString(LOCALE, timeOpts)
   }
   const yesterday = new Date(now)
   yesterday.setDate(now.getDate() - 1)
   if (d.toDateString() === yesterday.toDateString()) return 'Yesterday'
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+  return d.toLocaleDateString(LOCALE, dateOpts)
+}
+
+export function formatDateLabel(iso: string | null): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  const now = new Date()
+  if (d.toDateString() === now.toDateString()) return 'Today'
+  const yesterday = new Date(now)
+  yesterday.setDate(now.getDate() - 1)
+  if (d.toDateString() === yesterday.toDateString()) return 'Yesterday'
+  return d.toLocaleDateString(LOCALE, {
+    ...dateOpts,
+    year: d.getFullYear() !== now.getFullYear() ? 'numeric' : undefined,
+  })
 }
 
 export function formatDuration(seconds: number): string {

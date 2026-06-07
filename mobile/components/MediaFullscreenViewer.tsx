@@ -1,6 +1,6 @@
 import { StatusBar } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
-import Animated, { FadeIn, ZoomIn } from 'react-native-reanimated'
+import Animated, { FadeIn } from 'react-native-reanimated'
 import { ZoomableImageViewer } from '@/components/ZoomableImageViewer'
 import { ReplyQuoteBlock } from '@/components/ReplyQuoteBlock'
 import { PresentationModal } from '@/components/PresentationModal'
@@ -25,7 +25,7 @@ export function MediaFullscreenViewer({
     <PresentationModal visible={visible} onClose={onClose} animationType="fade" transparent>
       <StatusBar barStyle="light-content" />
       <Animated.View
-        entering={FadeIn.duration(180)}
+        entering={FadeIn.duration(140)}
         style={{ flex: 1, backgroundColor: '#000' }}
       >
         {replyTo && contactName ? (
@@ -45,10 +45,7 @@ export function MediaFullscreenViewer({
             />
           </SafeAreaView>
         ) : null}
-        <Animated.View
-          style={{ flex: 1 }}
-          entering={ZoomIn.springify().damping(20).stiffness(180)}
-        >
+        <Animated.View style={{ flex: 1 }} entering={FadeIn.duration(160)}>
           <ZoomableImageViewer
             uri={uri}
             onRequestClose={onClose}

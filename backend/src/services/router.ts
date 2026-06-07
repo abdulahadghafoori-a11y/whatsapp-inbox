@@ -17,6 +17,7 @@ export function bucket(id: string): number {
 }
 
 function shouldUseAI(conversation: Conversation): boolean {
+  if (!config.AI_AGENT_ENABLED) return false
   if (conversation.routingLock === 'human_only') return false
   if (conversation.aiHandled) return false
   return bucket(conversation.id) < Math.round(config.AI_ROUTING_FRACTION * 100)

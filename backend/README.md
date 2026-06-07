@@ -99,18 +99,17 @@ no binaries are stored in the jobs table.
 
 ## Outbound media (WhatsApp-aligned)
 
-All uploads go through `prepareOutboundMedia` before Cloud API upload:
+All uploads go through `prepareOutboundMedia` before Cloud API upload (validate caps/format; no server transcoding):
 
-| Type | Server processing | Limit |
-|------|-------------------|-------|
-| Image | EXIF rotate, resize (1600px), JPEG/PNG re-encode | 5MB |
-| Sticker | WebP, 512px | 500KB |
-| Video | H.264 + AAC MP4, adaptive bitrate/scale | 16MB, 16 min |
-| Audio (voice) | FFmpeg → OGG Opus (voice flag) | 16MB |
-| Document | Filename sanitize, blocked executables | 100MB |
+| Type | Client preparation | Server | Limit |
+|------|-------------------|--------|-------|
+| Image | Resize/re-encode (expo-image-manipulator) | Validate | 5MB |
+| Sticker | WebP, 512px | Validate | 500KB |
+| Video | Trim + hardware compress (native) | Validate MP4 | 16MB, 16 min |
+| Audio (voice) | Opus encode → OGG (`@imcooder/opuslib`) | Validate | 16MB |
+| Document | — | Filename sanitize, blocked executables | 100MB |
 
-Multipart accepts up to 100MB (documents); images/videos are compressed when needed.
-Requires `ffmpeg-static` on the server for audio and video.
+Multipart accepts up to 100MB (documents). Video/voice require a dev build (native modules).
 
 ## Deployment (single instance)
 

@@ -1,10 +1,7 @@
-import sharp from 'sharp'
 import { errors } from './errors.js'
 import {
   WA_IMAGE_MAX_BYTES,
   WA_STICKER_MAX_BYTES,
-  WA_PHOTO_MAX_EDGE,
-  WA_STICKER_MAX_EDGE,
 } from './wa-media-limits.js'
 
 export {
@@ -14,14 +11,14 @@ export {
   WA_STICKER_MAX_EDGE,
 } from './wa-media-limits.js'
 
-const JPEG_QUALITIES = [85, 78, 72, 65, 58, 52] as const
-const WEBP_QUALITIES = [80, 72, 65, 58, 50] as const
-
 export type PreparedImage = {
   buffer: Buffer
   mime: string
   filename: string
 }
+
+const ALLOWED_IMAGE_MIMES = new Set(['image/jpeg', 'image/png'])
+const ALLOWED_STICKER_MIMES = new Set(['image/webp'])
 
 function baseName(filename: string): string {
   const i = filename.lastIndexOf('.')
@@ -33,137 +30,68 @@ function withExt(filename: string, ext: string): string {
 }
 
 function isStickerMime(mime: string, filename: string): boolean {
-  const m = mime.toLowerCase()
+  const m = mime.toLowerCase().split(';')[0].trim()
   if (m === 'image/webp') return true
   return filename.toLowerCase().endsWith('.webp') && m.startsWith('image/')
 }
 
-async function encodeUnderCap(
-  build: (quality: number) => Promise<Buffer>,
-  maxBytes: number,
-  qualities: readonly number[],
-): Promise<Buffer | null> {
-  for (const q of qualities) {
-    const buf = await build(q)
-    if (buf.length <= maxBytes) return buf
-  }
-  return null
-}
-
-async function shrinkPhotoToCap(
-  input: sharp.Sharp,
-  maxBytes: number,
-  hasAlpha: boolean,
-): Promise<Buffer> {
-  let edge = WA_PHOTO_MAX_EDGE
-
-  for (let attempt = 0; attempt < 6; attempt++) {
-    let pipeline = input.clone().resize({
-      width: edge,
-      height: edge,
-      fit: 'inside',
-      withoutEnlargement: true,
-    })
-
-    if (hasAlpha) {
-      const level = Math.min(9, 3 + attempt)
-      const buf = await pipeline.png({ compressionLevel: level, effort: 8 }).toBuffer()
-      if (buf.length <= maxBytes) return buf
-    } else {
-      const buf = await encodeUnderCap(
-        (q) => pipeline.jpeg({ quality: q, mozjpeg: true }).toBuffer(),
-        maxBytes,
-        JPEG_QUALITIES,
-      )
-      if (buf) return buf
-    }
-
-    edge = Math.round(edge * 0.82)
-  }
-
-  throw errors.mediaTooLarge(
-    'Image is too large to send on WhatsApp even after compression. Try a smaller photo.',
-  )
-}
-
-async function shrinkStickerToCap(input: sharp.Sharp, maxBytes: number): Promise<Buffer> {
-  let edge = WA_STICKER_MAX_EDGE
-
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const pipeline = input.clone().resize({
-      width: edge,
-      height: edge,
-      fit: 'inside',
-      withoutEnlargement: true,
-    })
-
-    const buf = await encodeUnderCap(
-      (q) => pipeline.webp({ quality: q }).toBuffer(),
-      maxBytes,
-      WEBP_QUALITIES,
-    )
-    if (buf) return buf
-
-    edge = Math.round(edge * 0.85)
-  }
-
-  throw errors.mediaTooLarge(
-    'Sticker is too large to send on WhatsApp even after compression.',
-  )
+function sanitizeFilename(filename: string): string {
+  const base = filename.replace(/[/\\]/g, '_').replace(/[\x00-\x1f]/g, '').trim()
+  return base.slice(0, 240) || `image-${Date.now()}.jpg`
 }
 
 /**
- * Resize, re-encode, and compress images like the WhatsApp client before Cloud API upload.
- * Large originals are reduced until they fit Meta limits — not rejected outright.
+ * Validate client-prepared images (no server re-encode).
+ * Mobile compresses with expo-image-manipulator before upload.
  */
-export async function prepareImageForWhatsApp(
+export async function validateImageForWhatsApp(
   buffer: Buffer,
   filename: string,
   mimeHint: string,
   opts?: { kind?: 'image' | 'sticker' },
 ): Promise<PreparedImage> {
-  let rotated: sharp.Sharp
-  try {
-    rotated = sharp(buffer, { failOn: 'none' }).rotate()
-    await rotated.metadata()
-  } catch {
-    throw errors.validation('File is not a valid image.')
+  if (buffer.length < 1) {
+    throw errors.validation('Image file is empty.')
   }
 
-  const meta = await rotated.metadata()
-  const hasAlpha = !!meta.hasAlpha
+  const mime = mimeHint.toLowerCase().split(';')[0].trim()
+  const safeName = sanitizeFilename(filename)
   const sticker =
     opts?.kind === 'sticker' || (opts?.kind !== 'image' && isStickerMime(mimeHint, filename))
 
   if (sticker) {
-    const out = await shrinkStickerToCap(rotated, WA_STICKER_MAX_BYTES)
-    return {
-      buffer: out,
-      mime: 'image/webp',
-      filename: withExt(filename, 'webp'),
+    if (!ALLOWED_STICKER_MIMES.has(mime)) {
+      throw errors.validation('Stickers must be WebP.')
     }
-  }
-
-  const maxBytes = WA_IMAGE_MAX_BYTES
-  const longEdge = Math.max(meta.width ?? 0, meta.height ?? 0)
-  const mime = mimeHint.toLowerCase()
-  const alreadySmall =
-    buffer.length <= maxBytes &&
-    longEdge > 0 &&
-    longEdge <= WA_PHOTO_MAX_EDGE &&
-    ((mime === 'image/jpeg' && !hasAlpha) || (mime === 'image/png' && hasAlpha))
-
-  if (alreadySmall) {
+    if (buffer.length > WA_STICKER_MAX_BYTES) {
+      throw errors.mediaTooLarge(
+        `Sticker exceeds WhatsApp's ${Math.round(WA_STICKER_MAX_BYTES / 1024)}KB limit.`,
+      )
+    }
     return {
       buffer,
-      mime: hasAlpha ? 'image/png' : 'image/jpeg',
-      filename: withExt(filename, hasAlpha ? 'png' : 'jpg'),
+      mime: 'image/webp',
+      filename: withExt(safeName, 'webp'),
     }
   }
 
-  const out = await shrinkPhotoToCap(rotated, maxBytes, hasAlpha)
-  if (hasAlpha) {
-    return { buffer: out, mime: 'image/png', filename: withExt(filename, 'png') }
+  if (!ALLOWED_IMAGE_MIMES.has(mime)) {
+    throw errors.validation('Images must be JPEG or PNG. Re-send from the app gallery.')
   }
-  return { buffer: out, mime: 'image/jpeg', filename: withExt(filename, 'jpg') }
+
+  if (buffer.length > WA_IMAGE_MAX_BYTES) {
+    throw errors.mediaTooLarge(
+      `Image exceeds WhatsApp's ${Math.round(WA_IMAGE_MAX_BYTES / (1024 * 1024))}MB limit.`,
+    )
+  }
+
+  const ext = mime === 'image/png' ? 'png' : 'jpg'
+  return {
+    buffer,
+    mime,
+    filename: withExt(safeName, ext),
+  }
 }
+
+/** @deprecated Use validateImageForWhatsApp — kept for import compatibility during transition */
+export const prepareImageForWhatsApp = validateImageForWhatsApp

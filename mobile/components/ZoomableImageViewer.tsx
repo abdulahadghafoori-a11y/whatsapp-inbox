@@ -63,29 +63,37 @@ export function ZoomableImageViewer({
       savedScale.value = scale.value
     })
 
-  const pan = Gesture.Pan()
+  const panZoom = Gesture.Pan()
     .onUpdate((e) => {
       if (scale.value > 1.02) {
         translateX.value = e.translationX
         translateY.value = e.translationY
-        return
-      }
-      if (enableDismissGesture) {
-        dismissY.value = e.translationY
       }
     })
     .onEnd(() => {
       if (scale.value > 1.02) {
         translateX.value = withSpring(0)
         translateY.value = withSpring(0)
-        return
       }
+    })
+
+  const panDismiss = Gesture.Pan()
+    .enabled(enableDismissGesture && !!onRequestClose)
+    .activeOffsetY(16)
+    .failOffsetX([-22, 22])
+    .onUpdate((e) => {
+      if (scale.value <= 1.02 && e.translationY > 0) {
+        dismissY.value = e.translationY
+      }
+    })
+    .onEnd((e) => {
+      if (scale.value > 1.02) return
       if (
-        enableDismissGesture &&
-        dismissY.value > DISMISS_THRESHOLD &&
-        onRequestClose
+        dismissY.value > DISMISS_THRESHOLD ||
+        e.velocityY > 900
       ) {
         runOnJS(close)()
+        dismissY.value = 0
         return
       }
       dismissY.value = withSpring(0)
@@ -106,7 +114,7 @@ export function ZoomableImageViewer({
       }
     })
 
-  const gesture = Gesture.Simultaneous(pinch, pan, doubleTap)
+  const gesture = Gesture.Simultaneous(pinch, panZoom, panDismiss, doubleTap)
 
   const imageAnim = useAnimatedStyle(() => {
     const ty = scale.value > 1.02 ? translateY.value : dismissY.value

@@ -60,11 +60,13 @@ export const useAuthStore = create<AuthState>((set) => ({
       const [
         { queryClient, queryPersister },
         { clearOutboundQueue },
+        { clearMediaQueue },
         { clearMediaCache, cleanupUploadTempFiles },
         { disconnectSocket },
       ] = await Promise.all([
         import('@/lib/queryClient'),
         import('@/lib/offlineQueue'),
+        import('@/lib/offlineMediaQueue'),
         import('@/lib/messageMediaCache'),
         import('@/lib/socket'),
       ])
@@ -72,6 +74,7 @@ export const useAuthStore = create<AuthState>((set) => ({
       queryClient.clear()
       await queryPersister.removeClient()
       await clearOutboundQueue()
+      await clearMediaQueue()
       await clearMediaCache()
       await cleanupUploadTempFiles()
     } catch {

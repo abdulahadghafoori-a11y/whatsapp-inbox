@@ -8,6 +8,7 @@ export type MessageStatusSocketPayload = {
   waMessageId?: string
   status: string
   scope?: 'inbound' | 'outbound'
+  errorMessage?: string | null
 }
 
 export type MessagingSocketPayload = {

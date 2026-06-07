@@ -24,14 +24,30 @@ const envSchema = z.object({
   DATABASE_URL: z.string().url(),
   DATABASE_URL_UNPOOLED: z.string().url().optional(),
 
-  AWS_ACCESS_KEY_ID: z.string().min(1),
-  AWS_SECRET_ACCESS_KEY: z.string().min(1),
+  /** Cloudflare R2 or AWS S3 — prefer STORAGE_*; AWS_* kept for backward compatibility. */
+  STORAGE_ENDPOINT: z.string().url().optional(),
+  STORAGE_ACCESS_KEY_ID: z.string().min(1).optional(),
+  STORAGE_SECRET_ACCESS_KEY: z.string().min(1).optional(),
+  STORAGE_BUCKET_NAME: z.string().min(1).optional(),
+  STORAGE_REGION: z.string().optional(),
+
+  AWS_ACCESS_KEY_ID: z.string().min(1).optional(),
+  AWS_SECRET_ACCESS_KEY: z.string().min(1).optional(),
   AWS_REGION: z.string().default('ap-south-1'),
-  S3_BUCKET_NAME: z.string().min(1),
-  // Set true to apply the 30-day media/ lifecycle rule on startup (needs IAM + network).
+  S3_BUCKET_NAME: z.string().min(1).optional(),
+  // Set true to apply the 30-day media/ lifecycle rule on startup (AWS S3 only).
   S3_ENSURE_LIFECYCLE: booleanish,
 
+  /** Shared secret for worker → API internal socket-emit bridge. */
+  WORKER_INTERNAL_SECRET: z.string().min(16).default('dev-worker-internal-secret'),
+  /** Base URL the worker uses to reach the API (e.g. http://127.0.0.1:3001). */
+  API_INTERNAL_URL: z.string().url().default('http://127.0.0.1:3001'),
+  WORKER_PORT: z.coerce.number().int().positive().default(3002),
+  DEFAULT_ORGANIZATION_ID: z.string().uuid().optional(),
+
   ANTHROPIC_API_KEY: z.string().min(1),
+  /** When false, conversations are never auto-assigned to AI and ai_agent_reply jobs are skipped. */
+  AI_AGENT_ENABLED: booleanish,
   AI_ROUTING_FRACTION: z.coerce.number().min(0).max(1).default(0.1),
 
   /** Optional Sentry DSN for error tracking. When unset, Sentry stays disabled. */
@@ -43,6 +59,13 @@ const envSchema = z.object({
 
   // Allow skipping external integration validation during local typecheck/tests.
   SKIP_ENV_VALIDATION: booleanish,
+
+  /**
+   * Optional public CDN origin for media (e.g. https://cdn.example.com).
+   * When set, GET /api/media presigned URLs are rewritten for lower latency.
+   * Bucket must allow the CDN to fetch from S3/R2.
+   */
+  STORAGE_CDN_PUBLIC_BASE: z.string().url().optional(),
 
   /** Comma-separated DNS servers for WhatsApp media CDN (lookaside.fbsbx.com). */
   WHATSAPP_MEDIA_DNS_SERVERS: z
@@ -69,12 +92,22 @@ function loadConfig(): AppConfig {
       WHATSAPP_APP_SECRET: process.env.WHATSAPP_APP_SECRET ?? 'test',
       DATABASE_URL: process.env.DATABASE_URL ?? 'postgres://localhost:5432/test',
       DATABASE_URL_UNPOOLED: process.env.DATABASE_URL_UNPOOLED,
+      STORAGE_ENDPOINT: process.env.STORAGE_ENDPOINT,
+      STORAGE_ACCESS_KEY_ID: process.env.STORAGE_ACCESS_KEY_ID,
+      STORAGE_SECRET_ACCESS_KEY: process.env.STORAGE_SECRET_ACCESS_KEY,
+      STORAGE_BUCKET_NAME: process.env.STORAGE_BUCKET_NAME,
+      STORAGE_REGION: process.env.STORAGE_REGION,
       AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID ?? 'test',
       AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY ?? 'test',
       AWS_REGION: process.env.AWS_REGION ?? 'ap-south-1',
       S3_BUCKET_NAME: process.env.S3_BUCKET_NAME ?? 'test',
       S3_ENSURE_LIFECYCLE: process.env.S3_ENSURE_LIFECYCLE === 'true',
+      WORKER_INTERNAL_SECRET: process.env.WORKER_INTERNAL_SECRET ?? 'dev-worker-internal-secret',
+      API_INTERNAL_URL: process.env.API_INTERNAL_URL ?? 'http://127.0.0.1:3001',
+      WORKER_PORT: Number(process.env.WORKER_PORT ?? 3002),
+      DEFAULT_ORGANIZATION_ID: process.env.DEFAULT_ORGANIZATION_ID,
       ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? 'test',
+      AI_AGENT_ENABLED: process.env.AI_AGENT_ENABLED === 'true' || process.env.AI_AGENT_ENABLED === '1',
       AI_ROUTING_FRACTION: Number(process.env.AI_ROUTING_FRACTION ?? 0.1),
       SENTRY_DSN: process.env.SENTRY_DSN,
       WEBHOOK_SKIP_SIGNATURE: process.env.WEBHOOK_SKIP_SIGNATURE === 'true',
@@ -106,6 +139,7 @@ function loadConfig(): AppConfig {
     console.error('\nJWT_SECRET must be at least 64 characters in production.\n')
     process.exit(1)
   }
+  requireStorageFields(data)
   return data
 }
 
@@ -117,4 +151,47 @@ export function corsOrigins(): string | string[] | boolean {
   if (!isProd) return true // reflect request origin in dev
   if (config.CORS_ORIGINS === '*') return '*'
   return config.CORS_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean)
+}
+
+export type StorageProviderConfig = {
+  provider: 'r2' | 's3'
+  endpoint: string | undefined
+  region: string
+  bucket: string
+  accessKeyId: string
+  secretAccessKey: string
+  forcePathStyle: boolean
+}
+
+/** Resolved object storage credentials (R2 when STORAGE_ENDPOINT is set). */
+export function storageConfig(): StorageProviderConfig {
+  const accessKeyId =
+    config.STORAGE_ACCESS_KEY_ID ?? config.AWS_ACCESS_KEY_ID ?? ''
+  const secretAccessKey =
+    config.STORAGE_SECRET_ACCESS_KEY ?? config.AWS_SECRET_ACCESS_KEY ?? ''
+  const bucket = config.STORAGE_BUCKET_NAME ?? config.S3_BUCKET_NAME ?? ''
+  const endpoint = config.STORAGE_ENDPOINT
+  const isR2 = !!endpoint
+
+  return {
+    provider: isR2 ? 'r2' : 's3',
+    endpoint,
+    region: isR2 ? (config.STORAGE_REGION ?? 'auto') : config.AWS_REGION,
+    bucket,
+    accessKeyId,
+    secretAccessKey,
+    forcePathStyle: isR2,
+  }
+}
+
+function requireStorageFields(data: AppConfig): void {
+  const accessKeyId = data.STORAGE_ACCESS_KEY_ID ?? data.AWS_ACCESS_KEY_ID
+  const secretAccessKey = data.STORAGE_SECRET_ACCESS_KEY ?? data.AWS_SECRET_ACCESS_KEY
+  const bucket = data.STORAGE_BUCKET_NAME ?? data.S3_BUCKET_NAME
+  if (!accessKeyId || !secretAccessKey || !bucket) {
+    console.error(
+      '\nStorage config incomplete: set STORAGE_* (R2) or AWS_* + S3_BUCKET_NAME.\n',
+    )
+    process.exit(1)
+  }
 }

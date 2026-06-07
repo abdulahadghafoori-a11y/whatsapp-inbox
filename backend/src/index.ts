@@ -29,21 +29,6 @@ import {
   replayUnprocessedWebhooks,
   startWebhookReplayLoop,
 } from './services/webhook-inbox.js'
-import { getFfmpegPath } from './utils/ffmpeg-path.js'
-import { spawnSync } from 'child_process'
-
-function logFfmpegAtStartup(log: { info: (o: object, msg: string) => void }): void {
-  const bin = getFfmpegPath()
-  const ver = spawnSync(bin, ['-version'], { encoding: 'utf8' })
-  log.info(
-    {
-      ffmpeg: bin,
-      version: ver.stdout?.split('\n')[0]?.trim() ?? ver.stderr?.slice(0, 120),
-    },
-    'ffmpeg_ready',
-  )
-}
-
 async function buildServer() {
   const app = Fastify({
     logger: {
@@ -190,7 +175,6 @@ async function buildServer() {
 async function main() {
   initObservability()
   const app = await buildServer()
-  logFfmpegAtStartup(app.log)
   const stopProcessor = startJobProcessor(app)
 
   const replayed = await replayUnprocessedWebhooks(app)

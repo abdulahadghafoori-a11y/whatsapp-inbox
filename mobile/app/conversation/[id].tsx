@@ -13,13 +13,11 @@ import {
   Keyboard,
   InteractionManager,
 } from 'react-native'
-import { FlatList } from 'react-native-gesture-handler'
+import type { FlatList } from 'react-native-gesture-handler'
 import type Swipeable from 'react-native-gesture-handler/Swipeable'
 import Animated, {
   runOnJS,
   runOnUI,
-  useAnimatedRef,
-  useAnimatedScrollHandler,
   useAnimatedStyle,
   useSharedValue,
   withRepeat,
@@ -44,7 +42,7 @@ import { PressableScale } from '@/components/PressableScale'
 import { hapticLight, hapticMedium, hapticWarning } from '@/lib/haptics'
 import { clearDraft, loadDraft, saveDraft } from '@/lib/drafts'
 import { ForwardMessageSheet } from '@/components/ForwardMessageSheet'
-import { SwipeableMessageBubble } from '@/components/SwipeableMessageBubble'
+import { ChatMessagesList } from '@/components/ChatMessagesList'
 import { ReplyQuoteBlock } from '@/components/ReplyQuoteBlock'
 import { messageToReplyPreview } from '@/lib/replyPreview'
 import { MessagingWindowTimer } from '@/components/MessagingWindowTimer'
@@ -52,12 +50,16 @@ import { messagingWindowState, showUnderHeaderBar } from '@/lib/messagingWindow'
 import { KeyboardIcon } from '@/components/ChatIcons'
 import { AttachPanel, ATTACH_TRAY_HEIGHT } from '@/components/AttachMenu'
 import { MediaPreviewSheet, type PendingMedia } from '@/components/MediaPreviewSheet'
+import { VideoTrimSheet, type VideoTrimSource } from '@/components/VideoTrimSheet'
+import { getVideoSourceInfo, videoNeedsTrim } from '@/lib/prepareVideoForSend'
+import { isStalePendingMessage } from '@/lib/messageStalePending'
 import {
   LocationPickerSheet,
   type PendingLocation,
 } from '@/components/LocationPickerSheet'
 import type { MessageLocation } from '@/lib/messageLocation'
 import { VoiceRecordingWaveform } from '@/components/VoiceRecordingWaveform'
+import { VoiceRecordButton } from '@/components/VoiceRecordButton'
 import { QueryError } from '@/components/QueryState'
 import { useToast } from '@/components/Toast'
 import { messageTypeFromMime, normalizeUploadMime } from '@/lib/mediaMime'
@@ -82,6 +84,8 @@ import { useTypingEmitter, useTypingIndicator } from '@/hooks/useTyping'
 import { useMessageSearch } from '@/hooks/useConversations'
 import { useTeam } from '@/hooks/useTeam'
 import { api, apiErrorMessage } from '@/services/api'
+import { mediaSendErrorMessage } from '@/lib/mediaSendErrors'
+import { readClientSendMeta } from '@/lib/mediaSendMeta'
 import { userFacingLoadError } from '@/lib/userFacingError'
 import { SocketConnectionBanner } from '@/components/SocketConnectionBanner'
 import {
@@ -93,19 +97,22 @@ import {
 import { formatDuration } from '@/lib/format'
 import { prepareMediaFileForUpload } from '@/lib/prepareUpload'
 import { resolveUploadUri } from '@/lib/uploadUri'
+import { buildVoiceNoteRuns } from '@/lib/voiceNoteQueue'
 import {
   playWaFeedback,
   playWaFeedbackAsync,
   warmWaFeedbackSounds,
 } from '@/lib/waFeedbackSounds'
-import { ChatScrollScrubber } from '@/components/ChatScrollScrubber'
 import { ScrollToLatestButton } from '@/components/ScrollToLatestButton'
+import { useGlobalAudioStore } from '@/stores/globalAudioStore'
+import { ChatDatePill, ChatStickyDateBar } from '@/components/ChatDatePill'
+import {
+  buildChatListItems,
+  stabilizeChatListItems,
+  type ChatListItem,
+} from '@/lib/chatListItems'
+import { formatDateLabel } from '@/lib/format'
 import type { Message } from '@/types'
-
-const ReanimatedFlatList = Animated.createAnimatedComponent(
-  FlatList,
-) as typeof FlatList<Message>
-
 export default function ChatScreen() {
   const { id } = useLocalSearchParams<{ id: string }>()
   const conversationId = id as string
@@ -178,6 +185,8 @@ export default function ChatScreen() {
   const [templateOpen, setTemplateOpen] = useState(false)
   const [attribOpen, setAttribOpen] = useState(false)
   const [pendingMedia, setPendingMedia] = useState<PendingMedia | null>(null)
+  const [videoTrimSource, setVideoTrimSource] = useState<VideoTrimSource | null>(null)
+  const [videoTrimRestore, setVideoTrimRestore] = useState<VideoTrimSource | null>(null)
   const [pendingLocation, setPendingLocation] = useState<PendingLocation | null>(null)
   const [recordingOpen, setRecordingOpen] = useState(false)
   const [micReady, setMicReady] = useState(false)
@@ -187,16 +196,10 @@ export default function ChatScreen() {
   const voiceRecorder = useRef<VoiceRecording | null>(null)
   const [voiceRecorderLive, setVoiceRecorderLive] = useState<VoiceRecording | null>(null)
   const voiceStartInFlight = useRef(false)
-  const messagesListRef = useAnimatedRef<FlatList<Message>>()
-  const scrollY = useSharedValue(0)
-  const maxScrollY = useSharedValue(0)
-  const [scrubVisible, setScrubVisible] = useState(false)
+  const messagesListRef = useRef<FlatList<ChatListItem>>(null)
+  const [stickyDateLabel, setStickyDateLabel] = useState('')
   const [showScrollFab, setShowScrollFab] = useState(false)
-  const scrubHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const scrubbingRef = useRef(false)
-  const [listContentHeight, setListContentHeight] = useState(0)
-  const [listViewportHeight, setListViewportHeight] = useState(0)
-  const [listScrubbing, setListScrubbing] = useState(false)
+  const canLoadOlderRef = useRef(true)
   const [highlightMessageId, setHighlightMessageId] = useState<string | null>(null)
   const openMessageSwipeRef = useRef<Swipeable | null>(null)
   const retriedFailedMedia = useRef(new Set<string>())
@@ -287,6 +290,15 @@ export default function ChatScreen() {
     }
   }, [isFocused, messagesData?.messages])
 
+  const setVoiceNoteRuns = useGlobalAudioStore((s) => s.setVoiceNoteRuns)
+
+  // Voice-note auto-advance: only consecutive voice notes (no text/media between).
+  useEffect(() => {
+    if (!isFocused) return
+    setVoiceNoteRuns(buildVoiceNoteRuns(messagesData?.messages ?? []))
+    return () => setVoiceNoteRuns([])
+  }, [isFocused, messagesData?.messages, setVoiceNoteRuns])
+
   useEffect(() => {
     if (!conversationId) return
     const task = InteractionManager.runAfterInteractions(() => {
@@ -317,9 +329,8 @@ export default function ChatScreen() {
     recordingStartedAt.current = 0
   }
 
-  function openRecordingUi() {
-    setRecordingOpen(true)
-    setMicReady(false)
+  function startRecordingTimer() {
+    if (recordingTimer.current) return
     setRecordingMs(0)
     recordingStartedAt.current = Date.now()
     recordingTimer.current = setInterval(() => {
@@ -327,41 +338,83 @@ export default function ChatScreen() {
     }, 250)
   }
 
-  // Inverted list wants newest first; API returns oldest-first.
-  const inverted = useMemo(() => {
+  function dismissChatSearch() {
+    setSearchOpen(false)
+    setSearchTerm('')
+    Keyboard.dismiss()
+  }
+
+  async function waitForVoiceRecorder(maxMs = 3500): Promise<VoiceRecording | null> {
+    const deadline = Date.now() + maxMs
+    while (Date.now() < deadline) {
+      if (voiceRecorder.current) return voiceRecorder.current
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    return voiceRecorder.current
+  }
+
+  async function ensureVoiceRecorder(): Promise<VoiceRecording | null> {
+    if (voiceRecorder.current) return voiceRecorder.current
+    if (voiceStartInFlight.current) return waitForVoiceRecorder()
+
+    voiceStartInFlight.current = true
+    try {
+      await playWaFeedbackAsync('recordStart')
+      const rec = await startVoiceRecording()
+      voiceRecorder.current = rec
+      setVoiceRecorderLive(rec)
+      setMicReady(true)
+      return rec
+    } catch (err) {
+      clearRecordingUi()
+      voiceRecorder.current = null
+      toast.show(err instanceof Error ? err.message : 'Could not start recording', 'error')
+      return null
+    } finally {
+      voiceStartInFlight.current = false
+    }
+  }
+
+  const chatListItemsRef = useRef<ChatListItem[]>([])
+  const chatListItems = useMemo((): ChatListItem[] => {
     const list =
       searchTerm.trim().length >= 2
         ? (searchHits ?? [])
         : (messagesData?.messages ?? [])
-    return list.slice().reverse()
-  }, [messagesData, searchHits, searchTerm])
+    const built =
+      searchTerm.trim().length >= 2
+        ? [...list].reverse().map((message) => ({
+            kind: 'message' as const,
+            id: message.id,
+            message,
+          }))
+        : buildChatListItems(list)
+    const stabilized = stabilizeChatListItems(chatListItemsRef.current, built)
+    chatListItemsRef.current = stabilized
+    return stabilized
+  }, [messagesData?.messages, searchHits, searchTerm])
 
-  const bumpScrubVisible = useCallback(() => {
-    setScrubVisible(true)
-    if (scrubHideTimer.current) clearTimeout(scrubHideTimer.current)
-    scrubHideTimer.current = setTimeout(() => {
-      if (!scrubbingRef.current) setScrubVisible(false)
-    }, 900)
-  }, [])
-
-  const updateScrollFab = useCallback((offsetY: number) => {
-    setShowScrollFab(offsetY > 72)
-  }, [])
+  const stickyDateRef = useRef('')
 
   useEffect(() => {
-    maxScrollY.value = Math.max(0, listContentHeight - listViewportHeight)
-  }, [listContentHeight, listViewportHeight, maxScrollY])
+    stickyDateRef.current = ''
+    setStickyDateLabel('')
+  }, [conversationId])
 
-  const scrollHandler = useAnimatedScrollHandler({
-    onScroll: (e) => {
-      scrollY.value = e.contentOffset.y
-      runOnJS(bumpScrubVisible)()
-      runOnJS(updateScrollFab)(e.contentOffset.y)
-    },
-    onBeginDrag: () => {
-      runOnJS(bumpScrubVisible)()
-    },
-  })
+  const onStickyDateChange = useCallback((label: string) => {
+    if (label === stickyDateRef.current) return
+    stickyDateRef.current = label
+    setStickyDateLabel(label)
+  }, [])
+
+  const showScrollFabRef = useRef(false)
+
+  const onMessagesScroll = useCallback((offsetY: number) => {
+    const next = offsetY > 72
+    if (showScrollFabRef.current === next) return
+    showScrollFabRef.current = next
+    setShowScrollFab(next)
+  }, [])
 
   const scrollToLatest = useCallback(() => {
     setShowScrollFab(false)
@@ -370,23 +423,22 @@ export default function ChatScreen() {
     })
   }, [])
 
-  const scrollToQuotedMessage = useCallback(
-    (messageId: string) => {
-      const index = inverted.findIndex((m) => m.id === messageId)
-      if (index < 0) {
-        toast.show('Original message is not in this chat', 'error')
-        return
-      }
-      messagesListRef.current?.scrollToIndex({
-        index,
-        animated: true,
-        viewPosition: 0.5,
-      })
-      setHighlightMessageId(messageId)
-      setTimeout(() => setHighlightMessageId(null), 2200)
-    },
-    [inverted, toast],
-  )
+  const scrollToQuotedMessage = useCallback((messageId: string) => {
+    const index = chatListItemsRef.current.findIndex(
+      (row) => row.kind === 'message' && row.message.id === messageId,
+    )
+    if (index < 0) {
+      toast.show('Original message is not in this chat', 'error')
+      return
+    }
+    messagesListRef.current?.scrollToIndex({
+      index,
+      animated: true,
+      viewPosition: 0.5,
+    })
+    setHighlightMessageId(messageId)
+    setTimeout(() => setHighlightMessageId(null), 2200)
+  }, [toast])
 
   const canSendSession = conversation?.canSendSession ?? conversation?.isWindowOpen ?? false
   const needsTemplate = conversation?.needsTemplateForReply ?? !canSendSession
@@ -450,6 +502,7 @@ export default function ChatScreen() {
   }
 
   function openLocationPreview() {
+    closeAttachMenu()
     setPendingLocation({ loading: true })
   }
 
@@ -458,6 +511,7 @@ export default function ChatScreen() {
   }
 
   function confirmPendingLocation(loc: MessageLocation & { name?: string }) {
+    closeAttachMenu()
     const savedReply = replyTo
     const replyToMessageId = savedReply?.id
     const replyToPreview = savedReply ? messageToReplyPreview(savedReply) : undefined
@@ -487,6 +541,7 @@ export default function ChatScreen() {
   }
 
   async function pickImage(fromCamera: boolean) {
+    closeAttachMenu()
     try {
       const perm = fromCamera
         ? await ImagePicker.requestCameraPermissionsAsync()
@@ -499,12 +554,12 @@ export default function ChatScreen() {
         ? await ImagePicker.launchCameraAsync({
             mediaTypes: ['images', 'videos'],
             quality: 0.8,
-            videoQuality: ImagePicker.UIImagePickerControllerQualityType.Medium,
+            videoQuality: ImagePicker.UIImagePickerControllerQualityType.High,
             exif: false,
           })
         : await ImagePicker.launchImageLibraryAsync({
             quality: 0.8,
-            videoQuality: ImagePicker.UIImagePickerControllerQualityType.Medium,
+            videoQuality: ImagePicker.UIImagePickerControllerQualityType.High,
             mediaTypes: ['images', 'videos'],
           })
       if (result.canceled || !result.assets?.[0]) return
@@ -512,11 +567,25 @@ export default function ChatScreen() {
       const name = asset.fileName ?? `photo-${Date.now()}.jpg`
       const mimeType = normalizeUploadMime(asset.mimeType ?? 'image/jpeg', name)
       const prepared = await prepareMediaFileForUpload(asset.uri, name, mimeType)
+      const type = messageTypeFromMime(prepared.mimeType)
+      if (type === 'video') {
+        const info = await getVideoSourceInfo(prepared.uri)
+        if (videoNeedsTrim(info)) {
+          setVideoTrimSource({
+            uri: prepared.uri,
+            name: prepared.name,
+            mimeType: prepared.mimeType,
+            durationMs: info.durationMs || 60_000,
+            sizeBytes: info.sizeBytes,
+          })
+          return
+        }
+      }
       setPendingMedia({
         uri: prepared.uri,
         name: prepared.name,
         mimeType: prepared.mimeType,
-        type: messageTypeFromMime(prepared.mimeType),
+        type,
       })
     } catch (err) {
       toast.show(err instanceof Error ? err.message : 'Could not open picker', 'error')
@@ -524,6 +593,7 @@ export default function ChatScreen() {
   }
 
   async function pickDocument() {
+    closeAttachMenu()
     try {
       const result = await DocumentPicker.getDocumentAsync({
         copyToCacheDirectory: true,
@@ -556,6 +626,7 @@ export default function ChatScreen() {
     mimeType: string,
     caption?: string,
   ) {
+    closeAttachMenu()
     const normalized = normalizeUploadMime(mimeType, name)
     const savedReply = replyTo
     const replyToMessageId = savedReply?.id
@@ -580,24 +651,32 @@ export default function ChatScreen() {
     }
   }
 
-  function onRetryMessage(m: Message) {
-    const stalePending =
-      m.status === 'pending' &&
-      Date.now() - new Date(m.sentAt).getTime() > 45_000
+  const onRetryMessage = useCallback((m: Message) => {
+    const stalePending = isStalePendingMessage(m.status, m.sentAt, m.type, m.sendPhase)
     if (m.status === 'pending' && !stalePending) return
     if (m.status !== 'failed' && !stalePending) return
-    // Offline text queue is retried by the sync worker, not this handler.
     if (m.id.startsWith('pending-text-')) return
+    if (m.sendPhase === 'queued') return
 
     const onError = (err: unknown) => {
-      toast.show(apiErrorMessage(err), 'error')
+      toast.show(mediaSendErrorMessage(err), 'error')
     }
 
-    if (m.localPreviewUri) {
+    const clientSend = readClientSendMeta(m)
+
+    // Server already has media on S3 — re-queue WhatsApp delivery only.
+    if (m.mediaUrl) {
+      resendMessage.mutate(m.id, { onError })
+      return
+    }
+
+    if (m.localPreviewUri || clientSend?.sourceUri) {
       const name = m.mediaFilename ?? `resend-${Date.now()}`
+      const preparedUri = clientSend?.preparedUri
+      const sourceUri = preparedUri ?? m.localPreviewUri ?? clientSend?.sourceUri!
       sendMedia.mutate(
         {
-          uri: resolveUploadUri(m.localPreviewUri),
+          uri: resolveUploadUri(sourceUri),
           name,
           mimeType: normalizeUploadMime(
             m.mediaMimeType ?? 'application/octet-stream',
@@ -605,6 +684,12 @@ export default function ChatScreen() {
           ),
           caption: m.body ?? undefined,
           replaceMessageId: m.id,
+          videoTrim: preparedUri ? undefined : clientSend?.videoTrim,
+          sendAsDocument: clientSend?.sendAsDocument,
+          imageQuality: clientSend?.imageQuality,
+          videoQuality: clientSend?.videoQuality,
+          skipPrepare: !!preparedUri,
+          preparedUri,
         },
         { onError },
       )
@@ -612,11 +697,78 @@ export default function ChatScreen() {
     }
 
     resendMessage.mutate(m.id, { onError })
+  }, [resendMessage, sendMedia, toast])
+
+  const onMessageLongPress = useCallback((m: Message, anchor: MessageAnchor) => {
+    setActionMessage(m)
+    setActionAnchor(anchor)
+    setActionsOpen(true)
+  }, [])
+
+  const dismissChatSearchStable = useCallback(() => {
+    dismissChatSearch()
+  }, [])
+
+  const onFetchOlderMessages = useCallback(() => {
+    void fetchOlderMessages()
+  }, [fetchOlderMessages])
+
+  function confirmVideoTrim(range: { startMs: number; endMs: number }) {
+    if (!videoTrimSource) return
+    const src = videoTrimSource
+    setVideoTrimRestore({ ...src, initialRange: range })
+    setVideoTrimSource(null)
+    setPendingMedia({
+      uri: src.uri,
+      name: src.name,
+      mimeType: src.mimeType,
+      type: 'video',
+      videoTrim: range,
+      fromTrim: true,
+    })
   }
 
-  function confirmPendingMedia(caption?: string) {
+  function sendTrimmedVideoAsDocument(range: { startMs: number; endMs: number }) {
+    if (!videoTrimSource) return
+    const src = videoTrimSource
+    setVideoTrimRestore(null)
+    setVideoTrimSource(null)
+    closeAttachMenu()
+    const clientMessageId = `pending-media-${Date.now()}`
+    sendMedia.mutate(
+      {
+        uri: resolveUploadUri(src.uri),
+        name: src.name,
+        mimeType: normalizeUploadMime(src.mimeType, src.name),
+        videoTrim: range,
+        sendAsDocument: true,
+        clientMessageId,
+      },
+      {
+        onSuccess: () => scrollToLatest(),
+        onError: (err) => {
+          if (err instanceof Error && err.message === 'QUEUED_OFFLINE') return
+          toast.show(mediaSendErrorMessage(err), 'error')
+        },
+      },
+    )
+  }
+
+  function backToVideoTrim() {
+    if (!videoTrimRestore) return
+    setPendingMedia(null)
+    setVideoTrimSource(videoTrimRestore)
+  }
+
+  function confirmPendingMedia(opts?: {
+    caption?: string
+    imageQuality?: 'standard' | 'hd'
+    videoQuality?: 'standard' | 'hd'
+    sendAsDocument?: boolean
+  }) {
     if (!pendingMedia) return
-    const { uri, name, mimeType } = pendingMedia
+    closeAttachMenu()
+    const { uri, name, mimeType, videoTrim } = pendingMedia
     const normalized = normalizeUploadMime(mimeType, name)
     const savedReply = replyTo
     const replyToMessageId = savedReply?.id
@@ -624,43 +776,38 @@ export default function ChatScreen() {
     setPendingMedia(null)
     if (replyToMessageId) setReplyTo(null)
     scrollToLatest()
+    const clientMessageId = `pending-media-${Date.now()}`
     sendMedia.mutate(
       {
         uri: resolveUploadUri(uri),
         name,
         mimeType: normalized,
-        caption,
+        caption: opts?.caption,
+        imageQuality: opts?.imageQuality,
+        videoQuality: opts?.videoQuality,
+        videoTrim,
+        sendAsDocument: opts?.sendAsDocument,
+        clientMessageId,
         replyToMessageId,
         replyToPreview,
       },
       {
         onSuccess: () => scrollToLatest(),
         onError: (err) => {
-          toast.show(apiErrorMessage(err), 'error')
+          if (err instanceof Error && err.message === 'QUEUED_OFFLINE') return
+          toast.show(mediaSendErrorMessage(err), 'error')
           if (savedReply) setReplyTo(savedReply)
         },
       },
     )
   }
 
-  async function startRecording() {
-    if (recordingOpen || voiceStartInFlight.current) return
-    voiceStartInFlight.current = true
-    hapticMedium()
-    openRecordingUi()
-    try {
-      await playWaFeedbackAsync('recordStart')
-      const rec = await startVoiceRecording()
-      voiceRecorder.current = rec
-      setVoiceRecorderLive(rec)
-      setMicReady(true)
-    } catch (err) {
-      clearRecordingUi()
-      voiceRecorder.current = null
-      toast.show(err instanceof Error ? err.message : 'Could not start recording', 'error')
-    } finally {
-      voiceStartInFlight.current = false
-    }
+  function startRecording() {
+    if (recordingOpen) return
+    startRecordingTimer()
+    setRecordingOpen(true)
+    void import('@/lib/prepareVoiceForSend')
+    void ensureVoiceRecorder()
   }
 
   function cancelRecording() {
@@ -673,10 +820,15 @@ export default function ChatScreen() {
   }
 
   async function finishVoiceRecording() {
-    if (!recordingOpen) return
-    const rec = voiceRecorder.current
+    let rec = voiceRecorder.current
+    if (!rec && recordingOpen) {
+      rec = await waitForVoiceRecorder(3500)
+    }
     if (!rec) {
-      toast.show('Microphone is still starting…', 'error')
+      if (recordingOpen) {
+        toast.show('Microphone is still starting…', 'error')
+        clearRecordingUi()
+      }
       return
     }
     if (recordingTimer.current) {
@@ -690,8 +842,8 @@ export default function ChatScreen() {
       const { uri, durationMs, filename, mimeType } = await stopVoiceRecording(rec, elapsedMs)
       voiceRecorder.current = null
       clearRecordingUi()
-      if (durationMs < 500) {
-        toast.show('Record a longer message (at least 1 second)', 'error')
+      if (durationMs < 400) {
+        toast.show('Recording too short', 'error')
         return
       }
       setSendingVoice(true)
@@ -731,7 +883,10 @@ export default function ChatScreen() {
       <SafeAreaView edges={['top']} className="bg-wa-teal dark:bg-wa-headerDark">
         <View className="flex-row items-center gap-1 px-2 py-2.5">
           <Pressable
-            onPress={() => router.back()}
+            onPress={() => {
+              if (searchOpen) dismissChatSearch()
+              else router.back()
+            }}
             hitSlop={8}
             className="h-10 w-10 items-center justify-center rounded-full active:bg-white/15"
           >
@@ -773,10 +928,11 @@ export default function ChatScreen() {
           <TextInput
             value={searchTerm}
             onChangeText={setSearchTerm}
-            placeholder="Search in conversation"
+            placeholder="Search"
             placeholderTextColor={isDark ? '#8696A0' : '#9ca3af'}
             className="rounded-lg bg-neutral-100 px-3 py-2 text-[15px] text-neutral-900 dark:bg-wa-elevated dark:text-wa-textDark"
             autoFocus
+            returnKeyType="search"
           />
         </View>
       ) : null}
@@ -813,78 +969,35 @@ export default function ChatScreen() {
               <ActivityIndicator color="#00A884" />
             </View>
           ) : (
-            <View className="min-h-0 flex-1" onLayout={(e) => setListViewportHeight(e.nativeEvent.layout.height)}>
-            <ReanimatedFlatList
-              ref={messagesListRef}
-              data={inverted}
-              inverted
-              initialNumToRender={18}
-              maxToRenderPerBatch={12}
-              windowSize={9}
-              removeClippedSubviews
-              scrollEnabled={!listScrubbing}
-              keyExtractor={(m) => m.id}
-              onEndReachedThreshold={0.2}
-              onEndReached={() => {
-                if (hasOlderMessages && !isFetchingOlder) void fetchOlderMessages()
-              }}
-              ListFooterComponent={
-                isFetchingOlder ? (
-                  <View className="items-center py-3">
-                    <ActivityIndicator color="#00A884" size="small" />
-                  </View>
-                ) : null
-              }
-              keyboardShouldPersistTaps="handled"
-              directionalLockEnabled
-              showsVerticalScrollIndicator={false}
-              onContentSizeChange={(_w, h) => setListContentHeight(h)}
-              onScroll={scrollHandler}
-              scrollEventThrottle={16}
-              onScrollToIndexFailed={({ index }) => {
-                messagesListRef.current?.scrollToOffset({
-                  offset: Math.max(0, index * 72),
-                  animated: true,
-                })
-              }}
-              renderItem={({ item }: { item: Message }) => (
-                <SwipeableMessageBubble
-                  message={item}
-                  contactName={contactName}
-                  onReply={onReplyToMessage}
-                  onReplyQuotePress={scrollToQuotedMessage}
-                  highlight={highlightMessageId === item.id}
-                  onSwipeOpen={onMessageSwipeOpen}
-                  onRetry={(m) => void onRetryMessage(m)}
-                  onLongPress={(m, anchor) => {
-                    setActionMessage(m)
-                    setActionAnchor(anchor)
-                    setActionsOpen(true)
-                  }}
-                />
-              )}
-              contentContainerStyle={{ paddingVertical: 6, paddingHorizontal: 6 }}
+            <View className="min-h-0 flex-1">
+            <ChatStickyDateBar
+              label={stickyDateLabel}
+              visible={!searchOpen && stickyDateLabel.length > 0}
+            />
+            <ChatMessagesList
+              listRef={messagesListRef}
+              data={chatListItems}
+              highlightMessageId={highlightMessageId}
+              contactName={contactName}
+              contactAvatarUrl={conversation?.contact?.profilePictureUrl}
+              searchOpen={searchOpen}
+              isFetchingOlder={isFetchingOlder}
+              hasOlderMessages={!!hasOlderMessages}
+              canLoadOlderRef={canLoadOlderRef}
+              onFetchOlder={onFetchOlderMessages}
+              onDismissSearch={dismissChatSearchStable}
+              onStickyDateChange={onStickyDateChange}
+              onScrollOffset={onMessagesScroll}
+              onReply={onReplyToMessage}
+              onReplyQuotePress={scrollToQuotedMessage}
+              onSwipeOpen={onMessageSwipeOpen}
+              onRetry={onRetryMessage}
+              onLongPress={onMessageLongPress}
             />
             <ScrollToLatestButton
               visible={showScrollFab && !recordingOpen}
               onPress={scrollToLatest}
               bottomInset={12}
-            />
-            <ChatScrollScrubber
-              listRef={messagesListRef}
-              messages={inverted}
-              contentHeight={listContentHeight}
-              viewportHeight={listViewportHeight}
-              scrollY={scrollY}
-              maxOffset={maxScrollY}
-              visible={scrubVisible}
-              onScrollActivity={bumpScrubVisible}
-              onScrollOffset={updateScrollFab}
-              onScrubbingChange={(scrubbing) => {
-                scrubbingRef.current = scrubbing
-                setListScrubbing(scrubbing)
-                if (scrubbing) setScrubVisible(true)
-              }}
             />
             </View>
           )}
@@ -920,7 +1033,7 @@ export default function ChatScreen() {
                   <RecordingPulse />
                   <VoiceRecordingWaveform
                     recorder={voiceRecorderLive}
-                    active={micReady}
+                    active={!!voiceRecorderLive}
                   />
                   <Text className="shrink-0 text-sm font-medium tabular-nums text-neutral-700 dark:text-neutral-300">
                     {formatDuration(recordingMs / 1000)}
@@ -963,7 +1076,7 @@ export default function ChatScreen() {
                   </Pressable>
                 </View>
               ) : null}
-            <View className="flex-row items-end gap-2 px-3 py-2.5">
+            <View className="flex-row items-center gap-2 px-3 py-2.5">
               <Pressable
                 onPress={onComposerSidePress}
                 hitSlop={12}
@@ -971,7 +1084,7 @@ export default function ChatScreen() {
                 accessibilityLabel={
                   showKeyboardIcon ? 'Show keyboard' : 'Attach file'
                 }
-                className="h-11 w-11 items-center justify-center rounded-full bg-neutral-100 dark:bg-transparent"
+                className="h-11 w-11 shrink-0 items-center justify-center rounded-full bg-neutral-100 dark:bg-transparent"
               >
                 {showKeyboardIcon ? (
                   <KeyboardIcon color={isDark ? '#aebac1' : '#54656f'} />
@@ -997,7 +1110,8 @@ export default function ChatScreen() {
                   pointerEvents={attachMenuOpen ? 'none' : 'auto'}
                   placeholder="Type a message"
                   multiline
-                  className="max-h-28 min-h-[44px] flex-1 rounded-3xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-[15px] leading-5 text-neutral-900 dark:border-transparent dark:bg-wa-elevated dark:text-wa-textDark"
+                  textAlignVertical="center"
+                  className="max-h-28 min-h-[44px] flex-1 rounded-3xl border border-neutral-200 bg-neutral-50 px-4 py-2 text-[15px] leading-5 text-neutral-900 dark:border-transparent dark:bg-wa-elevated dark:text-wa-textDark"
                   placeholderTextColor={isDark ? '#8696A0' : '#9ca3af'}
                 />
               </Pressable>
@@ -1006,19 +1120,15 @@ export default function ChatScreen() {
                   onPress={onSendText}
                   haptic="light"
                   disabled={sendText.isPending}
-                  className="h-11 w-11 items-center justify-center rounded-full bg-wa-teal shadow-sm"
+                  className="h-11 w-11 shrink-0 items-center justify-center rounded-full bg-wa-teal shadow-sm"
                 >
                   <Ionicons name="send" size={19} color="#ffffff" style={{ marginLeft: 2 }} />
                 </PressableScale>
               ) : (
-                <PressableScale
-                  onPress={() => void startRecording()}
-                  haptic="none"
-                  disabled={sendMedia.isPending || recordingOpen}
-                  className="h-11 w-11 items-center justify-center rounded-full bg-wa-teal shadow-sm"
-                >
-                  <Ionicons name="mic" size={23} color="#ffffff" />
-                </PressableScale>
+                <VoiceRecordButton
+                  disabled={sendMedia.isPending || sendingVoice || recordingOpen}
+                  onPress={startRecording}
+                />
               )}
             </View>
             </View>
@@ -1134,8 +1244,19 @@ export default function ChatScreen() {
 
       <MediaPreviewSheet
         media={previewMedia}
-        onCancel={() => setPendingMedia(null)}
-        onSend={(caption) => confirmPendingMedia(caption)}
+        onCancel={() => {
+          setPendingMedia(null)
+          setVideoTrimRestore(null)
+        }}
+        onBackToTrim={pendingMedia?.fromTrim ? backToVideoTrim : undefined}
+        onSend={(opts) => confirmPendingMedia(opts)}
+      />
+
+      <VideoTrimSheet
+        source={videoTrimSource}
+        onCancel={() => setVideoTrimSource(null)}
+        onConfirm={(range) => void confirmVideoTrim(range)}
+        onSendAsDocument={(range) => void sendTrimmedVideoAsDocument(range)}
       />
 
       <LocationPickerSheet

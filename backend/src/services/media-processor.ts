@@ -4,7 +4,8 @@ import type { FastifyBaseLogger } from 'fastify'
 import { db } from '../db/index.js'
 import { messages } from '../db/schema.js'
 import { whatsapp } from './whatsapp.js'
-import { buildMediaKey, type S3Service } from './s3.js'
+import type { S3Service } from './s3.js'
+import { contentAddressedKey } from '../utils/content-addressed-key.js'
 import { emitMediaReady } from './socket-events.js'
 
 const EXT_BY_MIME: Record<string, string> = {
@@ -45,9 +46,9 @@ export async function processDownloadMedia(
   const buffer = await whatsapp.downloadMedia(log, url)
 
   const filename = deriveFilename(payload.filename, payload.mimeType, payload.messageId)
-  const key = buildMediaKey(payload.conversationId, payload.messageId, filename)
+  const key = contentAddressedKey(buffer, filename, payload.mimeType)
 
-  await s3.uploadToS3(key, buffer, payload.mimeType)
+  await s3.uploadToS3IfMissing(key, buffer, payload.mimeType)
 
   await db
     .update(messages)

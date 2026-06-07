@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
+import { config } from '../config.js'
 import { db } from '../db/index.js'
 import { jobs, messages, type Job } from '../db/schema.js'
 import { whatsapp } from '../services/whatsapp.js'
@@ -13,6 +14,7 @@ import { captureException } from '../utils/observability.js'
 
 const POLL_INTERVAL_MS = 5000
 const BATCH_SIZE = 10
+const DOWNLOAD_MEDIA_CONCURRENCY = 5
 const STALE_PROCESSING_MIN = 2
 const WORKER_ID = randomUUID()
 
@@ -72,7 +74,16 @@ async function processNextBatch(app: FastifyInstance): Promise<void> {
     RETURNING *
   `)
 
-  for (const job of claimed.rows as Job[]) {
+  const rows = claimed.rows as Job[]
+  const downloads = rows.filter((j) => j.type === 'download_media')
+  const rest = rows.filter((j) => j.type !== 'download_media')
+
+  for (let i = 0; i < downloads.length; i += DOWNLOAD_MEDIA_CONCURRENCY) {
+    const chunk = downloads.slice(i, i + DOWNLOAD_MEDIA_CONCURRENCY)
+    await Promise.all(chunk.map((job) => runJob(app, job)))
+  }
+
+  for (const job of rest) {
     await runJob(app, job)
   }
 }
@@ -126,6 +137,7 @@ async function dispatch(app: FastifyInstance, job: Job): Promise<void> {
         job.payload as JobPayloads['send_push_notification'],
       )
     case 'ai_agent_reply':
+      if (!config.AI_AGENT_ENABLED) return
       return processAIAgentReply(
         app.io,
         app.log,
@@ -206,6 +218,34 @@ async function handleSendMessage(
         replyToWaMessageId: p.replyToWaMessageId,
       })
     } else {
+      let mediaId = p.mediaId
+      if (!mediaId) {
+        const s3Key = p.s3Key
+        if (!s3Key) throw new Error('mediaId or s3Key required for media send')
+        const row = await db.query.messages.findFirst({
+          where: eq(messages.id, p.messageId),
+          columns: { mediaMimeType: true, mediaFilename: true },
+        })
+        if (!row?.mediaMimeType) throw new Error('Message media metadata missing')
+        const waStart = Date.now()
+        const waBuffer = await app.s3.downloadFromS3(s3Key)
+        const uploaded = await whatsapp.uploadMedia(
+          app.log,
+          waBuffer,
+          row.mediaMimeType,
+          row.mediaFilename ?? 'upload',
+        )
+        mediaId = uploaded.id
+        app.log.info(
+          {
+            path: 'deferred',
+            messageId: p.messageId,
+            preparedBytes: waBuffer.length,
+            waUploadMs: Date.now() - waStart,
+          },
+          'outbound_media_wa_upload',
+        )
+      }
       const mediaOpts: { voice?: boolean; replyToWaMessageId?: string } = {}
       if (p.replyToWaMessageId) mediaOpts.replyToWaMessageId = p.replyToWaMessageId
       if (p.type === 'audio' && p.voiceNote) mediaOpts.voice = true
@@ -213,7 +253,7 @@ async function handleSendMessage(
         app.log,
         p.to,
         p.type,
-        p.mediaId ?? '',
+        mediaId,
         p.caption,
         mediaOpts,
       )
@@ -264,6 +304,7 @@ async function onPermanentFailure(app: FastifyInstance, job: Job): Promise<void>
       conversationId: p.conversationId,
       messageId: p.messageId,
       status: 'failed',
+      errorMessage: job.lastError,
     })
   }
 }

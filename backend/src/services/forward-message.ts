@@ -6,7 +6,7 @@ import { errors } from '../utils/errors.js'
 import { resolveMessagingState } from '../utils/messaging-windows.js'
 import { attachReplyPreviews } from '../utils/message-shape.js'
 import { createOutboundLocation, createOutboundText } from './outbound.js'
-import { sendOutboundMediaBuffer } from './outbound-media-buffer.js'
+import { sendOutboundMediaFromS3Key } from './outbound-media-buffer.js'
 
 /** Re-send an existing message into another conversation (forward). */
 export async function forwardMessageToConversation(
@@ -64,15 +64,16 @@ export async function forwardMessageToConversation(
   }
 
   if (source.type !== 'text' && source.mediaUrl) {
-    const buffer = await app.s3.downloadFromS3(source.mediaUrl)
-    const raw = await sendOutboundMediaBuffer(app, {
+    // Stored media was client-prepared on first send — re-upload bytes as-is.
+    const raw = await sendOutboundMediaFromS3Key(app, {
       conversationId: target.id,
       contactWaId: target.contact.waId,
-      buffer,
+      s3Key: source.mediaUrl,
       filename: source.mediaFilename ?? 'forward',
-      mimeHint: source.mediaMimeType ?? 'application/octet-stream',
+      mimeType: source.mediaMimeType ?? 'application/octet-stream',
       caption: source.body ?? undefined,
       sentBy: opts.sentBy,
+      passthrough: true,
     })
     return (await attachReplyPreviews([raw]))[0]
   }

@@ -1,6 +1,5 @@
 import { useCallback } from 'react'
-import { Pressable, type PressableProps, type ViewStyle } from 'react-native'
-import { cssInterop } from 'nativewind'
+import { Pressable, View, type PressableProps, type ViewStyle } from 'react-native'
 import Animated, {
   useAnimatedStyle,
   useSharedValue,
@@ -26,13 +25,6 @@ type PressableScaleProps = Omit<PressableProps, 'style'> & {
   style?: ViewStyle | ViewStyle[]
   children?: React.ReactNode
 }
-
-const AnimatedPressable = Animated.createAnimatedComponent(Pressable)
-
-// Make NativeWind map `className` -> `style` on the animated pressable so
-// layout/visual classes (flex-1, padding, bg, rounded…) land on the element
-// that also carries the scale transform.
-cssInterop(AnimatedPressable, { className: 'style' })
 
 const SPRING = { damping: 16, stiffness: 320, mass: 0.6 }
 
@@ -87,16 +79,19 @@ export function PressableScale({
     [scale, dim, opacity, onPressOut],
   )
 
+  // className on Pressable trips NativeWind css-interop → navigation context crash.
   return (
-    <AnimatedPressable
-      onPressIn={handlePressIn}
-      onPressOut={handlePressOut}
-      disabled={disabled}
-      className={className}
-      style={[animatedStyle, style]}
-      {...rest}
-    >
-      {children}
-    </AnimatedPressable>
+    <View className={className} style={style}>
+      <Animated.View style={animatedStyle}>
+        <Pressable
+          onPressIn={handlePressIn}
+          onPressOut={handlePressOut}
+          disabled={disabled}
+          {...rest}
+        >
+          {children}
+        </Pressable>
+      </Animated.View>
+    </View>
   )
 }

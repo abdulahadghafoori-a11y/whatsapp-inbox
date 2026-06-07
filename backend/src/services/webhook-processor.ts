@@ -10,6 +10,7 @@ import {
   type Contact,
   type Conversation,
 } from '../db/schema.js'
+import { config } from '../config.js'
 import { enqueueJob } from './jobs.js'
 import { routeConversation } from './router.js'
 import {
@@ -217,6 +218,8 @@ async function handleMessageEchoes(
     const contact = await upsertContact(customerWaId, waContact?.profile?.name)
     const conversation = await upsertConversation(contact.id)
 
+    const echoMedia = inboundMediaMeta(msg)
+
     const inserted = await db
       .insert(messages)
       .values({
@@ -226,6 +229,8 @@ async function handleMessageEchoes(
         type: msg.type,
         body: inboundBody(msg),
         mediaStatus: isMediaType(msg.type) ? 'pending' : null,
+        mediaMimeType: echoMedia.mediaMimeType,
+        mediaFilename: echoMedia.mediaFilename,
         metadata: { ...msg, source: 'message_echo' } as Record<string, unknown>,
         status: 'sent',
         sentAt: new Date(Number(msg.timestamp) * 1000),
@@ -291,6 +296,8 @@ async function handleMessages(app: FastifyInstance, value: WaChangeValue): Promi
       replyToMessageId = referenced?.id ?? null
     }
 
+    const mediaMeta = inboundMediaMeta(msg)
+
     // Idempotent insert: duplicate webhook deliveries hit the unique wa_message_id.
     const inserted = await db
       .insert(messages)
@@ -301,6 +308,8 @@ async function handleMessages(app: FastifyInstance, value: WaChangeValue): Promi
         type: msg.type,
         body: inboundBody(msg),
         mediaStatus: isMediaType(msg.type) ? 'pending' : null,
+        mediaMimeType: mediaMeta.mediaMimeType,
+        mediaFilename: mediaMeta.mediaFilename,
         replyToMessageId,
         metadata: msg as unknown as Record<string, unknown>,
         sentAt: new Date(Number(msg.timestamp) * 1000),
@@ -407,18 +416,32 @@ async function handleMessages(app: FastifyInstance, value: WaChangeValue): Promi
     // follow-up customer message went unanswered.
     const current = await db.query.conversations.findFirst({
       where: eq(conversations.id, conversation.id),
+      with: { contact: true },
     })
     if (current && !current.assignedTo) {
       await routeConversation(current, app.io, app.log)
-    } else if (current && current.assignedTo && current.routingLock !== 'human_only') {
+    } else if (current?.assignedTo) {
       const assignee = await db.query.teamMembers.findFirst({
         where: eq(teamMembers.id, current.assignedTo),
         columns: { role: true },
       })
-      if (assignee?.role === 'ai_agent') {
+      if (
+        config.AI_AGENT_ENABLED &&
+        assignee?.role === 'ai_agent' &&
+        current.routingLock !== 'human_only'
+      ) {
         await enqueueJob('ai_agent_reply', {
           conversationId: current.id,
           agentId: current.assignedTo,
+        })
+      } else if (assignee && assignee.role !== 'ai_agent') {
+        const contactName =
+          current.contact?.name ?? waContact?.profile?.name ?? 'Customer'
+        await enqueueJob('send_push_notification', {
+          agentId: current.assignedTo,
+          title: contactName,
+          body: getPreview(msg),
+          data: { conversationId: current.id },
         })
       }
     }
@@ -535,5 +558,22 @@ function defaultFilename(type: string): string {
       return 'document'
     default:
       return 'upload'
+  }
+}
+
+function inboundMediaMeta(msg: WaMessage): {
+  mediaMimeType: string | null
+  mediaFilename: string | null
+} {
+  if (!isMediaType(msg.type)) {
+    return { mediaMimeType: null, mediaFilename: null }
+  }
+  const media = msg[msg.type] as WaMedia | undefined
+  if (!media) {
+    return { mediaMimeType: null, mediaFilename: null }
+  }
+  return {
+    mediaMimeType: media.mime_type ?? mimeForMediaType(msg.type, media.mime_type),
+    mediaFilename: media.filename ?? defaultFilename(msg.type),
   }
 }

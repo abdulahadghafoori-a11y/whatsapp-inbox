@@ -1,13 +1,13 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { eq, ne } from 'drizzle-orm'
+import { ne } from 'drizzle-orm'
 import { db } from '../db/index.js'
 import { teamMembers } from '../db/schema.js'
 
 export async function teamRoutes(app: FastifyInstance) {
   app.addHook('preHandler', app.authenticate)
 
-  // GET /api/team  (human agents; AI agents flagged separately)
+  // GET /api/team  (human agents; used by assign sheet + admin team tab)
   app.get('/', async () => {
     const members = await db
       .select({
@@ -22,12 +22,7 @@ export async function teamRoutes(app: FastifyInstance) {
       .from(teamMembers)
       .where(ne(teamMembers.role, 'ai_agent'))
 
-    const aiAgents = await db
-      .select({ id: teamMembers.id, name: teamMembers.name })
-      .from(teamMembers)
-      .where(eq(teamMembers.role, 'ai_agent'))
-
-    return { members, aiAgents }
+    return { members, aiAgents: [] }
   })
 
   // PATCH /api/team/me  (register Expo push token / profile)

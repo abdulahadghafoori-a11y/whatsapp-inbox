@@ -5,6 +5,13 @@ import { resolveUploadUri } from '@/lib/uploadUri'
 /** Mirror backend WhatsApp caps — used for pre-upload UX only; server enforces again. */
 export const WA_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 export const WA_VIDEO_MAX_BYTES = 16 * 1024 * 1024
+/** Standard gallery send — ~480p class long edge (WhatsApp default before HD). */
+export const WA_VIDEO_STANDARD_MAX_EDGE = 848
+/** HD gallery send — up to 1080p class long edge within the 16MB cap. */
+export const WA_VIDEO_HD_MAX_EDGE = 1920
+/** @deprecated Use WA_VIDEO_HD_MAX_EDGE */
+export const WA_VIDEO_MAX_EDGE = WA_VIDEO_HD_MAX_EDGE
+export const WA_VIDEO_MAX_DURATION_MS = 16 * 60 * 1000
 export const WA_AUDIO_MAX_BYTES = 16 * 1024 * 1024
 export const WA_DOCUMENT_MAX_BYTES = 100 * 1024 * 1024
 export const WA_STICKER_MAX_BYTES = 500 * 1024
@@ -32,7 +39,7 @@ function formatMb(bytes: number): string {
 }
 
 /**
- * Fail fast on obviously oversized files (server still compresses images/video).
+ * Fail fast on obviously oversized files (images are compressed on-device before upload).
  */
 export async function assertMediaUploadable(
   uri: string,
@@ -59,7 +66,10 @@ export async function assertMediaUploadable(
   if (kind === 'document') return
 
   if (size > cap) {
-    if (kind === 'image' || kind === 'video') {
+    if (kind === 'image') {
+      return
+    }
+    if (kind === 'video') {
       return
     }
     throw new Error(

@@ -2,7 +2,7 @@ import { useSyncExternalStore } from 'react'
 import {
   ensureMediaIndexLoaded,
   getCachedMediaUriSync,
-  subscribeMediaCache,
+  subscribeMessageMediaCache,
 } from '@/lib/messageMediaCache'
 import { useEffect } from 'react'
 
@@ -21,7 +21,7 @@ export function useCachedMediaUri(messageId: string | undefined) {
   }, [])
 
   return useSyncExternalStore(
-    subscribeMediaCache,
+    (listener) => subscribeMessageMediaCache(messageId, listener),
     () => (messageId ? getCachedMediaUriSync(messageId) : null),
     () => null,
   )

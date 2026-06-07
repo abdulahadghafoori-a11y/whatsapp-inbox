@@ -1,32 +1,48 @@
 import {
+  aliasMessageToBlob,
   ensureMediaIndexLoaded,
   getCachedMediaUri,
   getCachedMediaUriSync,
+  getCachedUriForS3KeySync,
 } from '@/lib/messageMediaCache'
-import { syncMessageMedia, type SyncableMediaMessage } from '@/lib/messageMediaSync'
+import {
+  queueMessageMediaSync,
+  syncMessageMedia,
+  type SyncableMediaMessage,
+} from '@/lib/messageMediaSync'
 import { resolveUploadUri } from '@/lib/uploadUri'
 
-/** Best URI for playback: on-device file first, then in-flight local, then remote. */
+/** Best URI for playback: on-device file first, then stream URL (cache fills in background). */
 export async function resolvePlaybackUri(
   message: SyncableMediaMessage,
   remoteUrl?: string | null,
 ): Promise<string | null> {
   await ensureMediaIndexLoaded()
 
-  const cached = await getCachedMediaUri(message.id)
+  const cached = getCachedMediaUriSync(message.id)
   if (cached) return cached
+
+  if (message.mediaUrl) {
+    const shared = getCachedUriForS3KeySync(message.mediaUrl)
+    if (shared) {
+      const aliased = await aliasMessageToBlob(message.id, message.mediaUrl)
+      if (aliased) return aliased
+    }
+  }
 
   if (message.localPreviewUri) {
     const local = resolveUploadUri(message.localPreviewUri)
-    void syncMessageMedia(message)
+    queueMessageMediaSync(message)
     return local
   }
 
-  const synced = await syncMessageMedia(message)
-  if (synced) return synced
+  if (remoteUrl) {
+    queueMessageMediaSync(message)
+    return remoteUrl
+  }
 
-  if (remoteUrl) return remoteUrl
-  return null
+  const synced = await syncMessageMedia(message)
+  return synced
 }
 
 /** Fast path when the file is already on disk (no network). */

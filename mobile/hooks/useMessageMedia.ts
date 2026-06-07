@@ -1,7 +1,6 @@
-import { useEffect, useMemo } from 'react'
+import { useMemo } from 'react'
 import { useMediaUrl } from '@/hooks/useMedia'
 import { useCachedMediaUri } from '@/hooks/useCachedMediaUri'
-import { syncMessageMedia } from '@/lib/messageMediaSync'
 import { resolveUploadUri } from '@/lib/uploadUri'
 import type { Message } from '@/types'
 
@@ -49,20 +48,6 @@ export function useMessageMedia(message: MessageMediaInput) {
     () => (displayUrl && isLocalUri(displayUrl) ? displayUrl : displayUrl),
     [displayUrl],
   )
-
-  useEffect(() => {
-    if (pending) return
-    if (cachedUri) return
-    void syncMessageMedia(message)
-  }, [
-    message.id,
-    message.mediaUrl,
-    message.localPreviewUri,
-    message.mediaStatus,
-    message.type,
-    pending,
-    cachedUri,
-  ])
 
   const waitingForRemote =
     hasRemoteKey && !cachedUri && !message.localPreviewUri && remoteLoading

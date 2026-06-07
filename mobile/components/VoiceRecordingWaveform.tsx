@@ -1,17 +1,12 @@
-import { useCallback, useState } from 'react'
-import { View, StyleSheet, type LayoutChangeEvent } from 'react-native'
+import { View, StyleSheet } from 'react-native'
 import type { VoiceRecording } from '@/lib/voiceRecording'
 import { useVoiceMetering } from '@/hooks/useVoiceMetering'
 
 const BAR_WIDTH = 3
 const BAR_GAP = 2
 const MAX_HEIGHT = 26
-const MIN_BARS = 20
-
-function barsForWidth(width: number) {
-  if (width <= 0) return MIN_BARS
-  return Math.max(MIN_BARS, Math.floor((width + BAR_GAP) / (BAR_WIDTH + BAR_GAP)))
-}
+/** Fixed bar count avoids layout-driven resets that blank the waveform. */
+const BAR_COUNT = 36
 
 export function VoiceRecordingWaveform({
   recorder,
@@ -20,17 +15,10 @@ export function VoiceRecordingWaveform({
   recorder: VoiceRecording | null
   active: boolean
 }) {
-  const [barCount, setBarCount] = useState(MIN_BARS)
-  const levels = useVoiceMetering(recorder, active, barCount)
-
-  const onLayout = useCallback((e: LayoutChangeEvent) => {
-    const w = e.nativeEvent.layout.width
-    const next = barsForWidth(w)
-    setBarCount((prev) => (prev === next ? prev : next))
-  }, [])
+  const levels = useVoiceMetering(recorder, active, BAR_COUNT)
 
   return (
-    <View style={styles.wrap} onLayout={onLayout}>
+    <View style={styles.wrap}>
       <View style={styles.row}>
         {levels.map((level, i) => (
           <View key={i} style={styles.slot}>

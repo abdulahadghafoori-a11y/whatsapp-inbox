@@ -25,6 +25,12 @@ export function initNetworkListener() {
 }
 
 /** Wait briefly when reachability is unknown before treating the device as offline. */
+export async function isOnWifi(): Promise<boolean> {
+  const state = await NetInfo.fetch()
+  if (!state.isConnected) return false
+  return state.type === 'wifi' || state.type === 'ethernet'
+}
+
 export async function isOnline(graceMs = 2500): Promise<boolean> {
   const first = await NetInfo.fetch()
   if (isReachable(first.isConnected, first.isInternetReachable)) {

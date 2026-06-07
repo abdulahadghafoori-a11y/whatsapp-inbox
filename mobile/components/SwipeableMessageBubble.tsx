@@ -4,6 +4,7 @@ import Swipeable from 'react-native-gesture-handler/Swipeable'
 import { Ionicons } from '@expo/vector-icons'
 import { MessageBubble } from '@/components/MessageBubble'
 import type { MessageAnchor } from '@/components/MessageActionsOverlay'
+import { messageRenderEqual } from '@/lib/messageRenderEqual'
 import type { Message } from '@/types'
 
 const REPLY_ACTION_WIDTH = 56
@@ -12,6 +13,7 @@ const REPLY_TRIGGER = 44
 type SwipeableMessageBubbleProps = {
   message: Message
   contactName: string
+  contactAvatarUrl?: string | null
   onReply: (m: Message) => void
   onRetry?: (m: Message) => void
   onLongPress?: (m: Message, anchor: MessageAnchor) => void
@@ -23,6 +25,7 @@ type SwipeableMessageBubbleProps = {
 function SwipeableMessageBubbleBase({
   message,
   contactName,
+  contactAvatarUrl,
   onReply,
   onRetry,
   onLongPress,
@@ -101,6 +104,7 @@ function SwipeableMessageBubbleBase({
     <MessageBubble
       message={message}
       contactName={contactName}
+      contactAvatarUrl={contactAvatarUrl}
       onRetry={onRetry}
       onLongPress={onLongPress ? handleLongPress : undefined}
       onReplyQuotePress={onReplyQuotePress}
@@ -136,4 +140,14 @@ function SwipeableMessageBubbleBase({
   )
 }
 
-export const SwipeableMessageBubble = memo(SwipeableMessageBubbleBase)
+export const SwipeableMessageBubble = memo(SwipeableMessageBubbleBase, (prev, next) =>
+  prev.highlight === next.highlight &&
+  prev.contactName === next.contactName &&
+  prev.contactAvatarUrl === next.contactAvatarUrl &&
+  messageRenderEqual(prev.message, next.message) &&
+  prev.onReply === next.onReply &&
+  prev.onRetry === next.onRetry &&
+  prev.onLongPress === next.onLongPress &&
+  prev.onReplyQuotePress === next.onReplyQuotePress &&
+  prev.onSwipeOpen === next.onSwipeOpen,
+)

@@ -26,8 +26,8 @@ export function SwipeDismissContainer({
 
   const pan = Gesture.Pan()
     .enabled(enabled)
-    .activeOffsetY(24)
-    .failOffsetX([-18, 18])
+    .activeOffsetY(12)
+    .failOffsetX([-28, 28])
     .onUpdate((e) => {
       if (e.translationY > 0) {
         translateY.value = e.translationY

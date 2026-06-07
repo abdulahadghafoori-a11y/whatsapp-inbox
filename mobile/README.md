@@ -30,6 +30,33 @@ EXPO_PUBLIC_SOCKET_URL=http://<your-wifi-ipv4>:3001
 
 **EAS builds:** URLs come from `eas.json` profiles, not `.env`. Development profile still uses `localhost` — use a preview/production profile or override `env` for device testing.
 
+**Voice + video send** use native modules (`@imcooder/opuslib`, `react-native-compressor`, `react-native-video-trim`). They do **not** run in Expo Go — use a dev client or EAS build:
+
+```bash
+npx expo prebuild --clean
+npx expo run:android   # Windows/Linux
+npx expo run:ios       # macOS only
+```
+
+**Video trim on Android** uses a native clip module (`expo-video-clip`, no FFmpeg). **Compress** uses `react-native-compressor`. After adding or changing native modules, rebuild once:
+
+```bash
+npx expo run:android
+```
+
+Metro reload alone does not pick up native code.
+
+**Windows (`C:\Users\My PC\…` paths):** `npx expo run:android` from the repo often fails with NDK linker errors (`undefined symbol: __cxa_throw`, etc.) because spaces in the username break C++ builds. Use the short-path helper instead:
+
+```powershell
+cd mobile
+npm run android:local
+```
+
+That syncs to `C:\wi`, uses NDK at `C:\ndk`, and installs the dev client on USB.
+
+`@imcooder/opuslib` is an Expo module (auto-linked) — do **not** add it to `plugins` in `app.json`. Only `react-native-compressor` needs a config plugin entry there.
+
 ## Login
 
 Use a seeded account, e.g. `agent1@example.com` / `password123`.

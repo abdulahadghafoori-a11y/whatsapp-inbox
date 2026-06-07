@@ -23,9 +23,9 @@ export function ReplyQuoteBlock({
   onPress?: (messageId: string) => void
 }) {
   const outbound = isOutboundBubble ?? false
-  const barColor = outbound ? '#00A884' : '#06cf9c'
-  const nameColor = outbound ? '#00A884' : '#06cf9c'
-  const bg = outbound ? 'rgba(18,140,126,0.08)' : 'rgba(0,0,0,0.04)'
+  const barColor = outbound ? '#f06292' : '#06cf9c'
+  const nameColor = outbound ? '#f06292' : '#06cf9c'
+  const bg = outbound ? 'rgba(240,98,146,0.12)' : 'rgba(0,0,0,0.04)'
   const showThumb = replyHasMediaThumb(reply)
   const cachedUri = useCachedMediaUri(reply.id)
   const remoteKey = reply.mediaUrl && !reply.localPreviewUri && !cachedUri ? reply.mediaUrl : null
