@@ -27,4 +27,9 @@ describe('verifySignature', () => {
   it('rejects a malformed signature header', () => {
     expect(verifySignature(Buffer.from(body), 'not-a-sig')).toBe(false)
   })
+
+  it('rejects a signature with invalid hex or wrong length', () => {
+    expect(verifySignature(Buffer.from(body), 'sha256=abc')).toBe(false)
+    expect(verifySignature(Buffer.from(body), 'sha256=' + 'ff'.repeat(31))).toBe(false)
+  })
 })

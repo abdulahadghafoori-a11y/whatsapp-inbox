@@ -20,14 +20,23 @@ export function PushNotificationBridge() {
   }, [accessToken])
 
   useEffect(() => {
-    const sub = Notifications.addNotificationResponseReceivedListener((response) => {
+    if (!accessToken) return
+
+    const openConversationFromNotification = (
+      response: Notifications.NotificationResponse | null,
+    ) => {
+      if (!response) return
       const conversationId = response.notification.request.content.data?.conversationId
       if (typeof conversationId === 'string') {
         router.push(`/conversation/${conversationId}`)
       }
-    })
+    }
+
+    void Notifications.getLastNotificationResponseAsync().then(openConversationFromNotification)
+
+    const sub = Notifications.addNotificationResponseReceivedListener(openConversationFromNotification)
     return () => sub.remove()
-  }, [router])
+  }, [router, accessToken])
 
   return null
 }

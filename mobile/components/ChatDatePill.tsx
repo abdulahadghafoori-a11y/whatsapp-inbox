@@ -1,7 +1,8 @@
+import { memo } from 'react'
 import { View, Text, StyleSheet } from 'react-native'
 import { useColorScheme } from 'nativewind'
 
-export function ChatDatePill({ label }: { label: string }) {
+function ChatDatePillBase({ label }: { label: string }) {
   const { colorScheme } = useColorScheme()
   const isDark = colorScheme === 'dark'
 
@@ -13,6 +14,8 @@ export function ChatDatePill({ label }: { label: string }) {
     </View>
   )
 }
+
+export const ChatDatePill = memo(ChatDatePillBase)
 
 export function ChatStickyDateBar({ label, visible }: { label: string; visible: boolean }) {
   const { colorScheme } = useColorScheme()

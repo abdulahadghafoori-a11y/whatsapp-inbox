@@ -1,4 +1,4 @@
-import type { InfiniteData } from '@tanstack/react-query'
+import type { InfiniteData, QueryClient } from '@tanstack/react-query'
 import { mergeMessageStatus, normalizeMessageStatus } from '@/lib/messageStatus'
 import type { Message, MessageStatus, MessagesResponse } from '@/types'
 
@@ -339,6 +339,20 @@ export function mapMessagesInfinite(
       messages: pageMessages(page).map(mapFn),
     })),
   }
+}
+
+/** Migrate legacy flat `useQuery` message cache to infinite-query shape. */
+export function migrateMessagesCacheShape(
+  qc: QueryClient,
+  conversationId: string,
+): void {
+  if (!conversationId) return
+  const key = ['messages', conversationId] as const
+  const raw = qc.getQueryData(key)
+  if (!raw) return
+  const coerced = coerceMessagesInfiniteData(raw)
+  if (!coerced) qc.removeQueries({ queryKey: key })
+  else if (raw !== coerced) qc.setQueryData(key, coerced)
 }
 
 /** Coerce persisted/legacy cache shapes before socket patches. */

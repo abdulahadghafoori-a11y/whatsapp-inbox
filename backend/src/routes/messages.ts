@@ -73,6 +73,12 @@ export async function messageRoutes(app: FastifyInstance) {
       where: eq(messages.id, messageId),
     })
     if (!msg) throw errors.notFound('Message not found')
+
+    const conversation = await db.query.conversations.findFirst({
+      where: and(eq(conversations.id, msg.conversationId), isNull(conversations.deletedAt)),
+      columns: { id: true },
+    })
+    if (!conversation) throw errors.conversationNotFound()
     if (!isMediaMessageType(msg.type)) {
       throw errors.validation('Not a media message')
     }
@@ -105,7 +111,7 @@ export async function messageRoutes(app: FastifyInstance) {
       .parse(request.params)
 
     const conversation = await db.query.conversations.findFirst({
-      where: eq(conversations.id, conversationId),
+      where: and(eq(conversations.id, conversationId), isNull(conversations.deletedAt)),
     })
     if (!conversation) throw errors.conversationNotFound()
 
@@ -147,7 +153,7 @@ export async function messageRoutes(app: FastifyInstance) {
       .parse(request.params)
 
     const conversation = await db.query.conversations.findFirst({
-      where: eq(conversations.id, conversationId),
+      where: and(eq(conversations.id, conversationId), isNull(conversations.deletedAt)),
       columns: { id: true },
     })
     if (!conversation) throw errors.conversationNotFound()

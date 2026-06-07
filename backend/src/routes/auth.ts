@@ -8,6 +8,7 @@ import { refreshTokens, teamMembers, type TeamMember } from '../db/schema.js'
 import { errors } from '../utils/errors.js'
 import { BCRYPT_ROUNDS } from '../utils/bcrypt.js'
 import { LoginThrottle } from '../utils/login-throttle.js'
+import { parseRefreshToken } from '../utils/refresh-token.js'
 
 const REFRESH_TTL_DAYS = 30
 
@@ -66,28 +67,28 @@ export async function authRoutes(app: FastifyInstance) {
       },
     },
     async (request) => {
-    const { email, password } = loginSchema.parse(request.body)
-    const normalizedEmail = email.toLowerCase()
-    const throttleKey = `${request.ip}:${normalizedEmail}`
-    if (!loginThrottle.register(throttleKey)) {
-      throw errors.loginThrottled()
-    }
+      const { email, password } = loginSchema.parse(request.body)
+      const normalizedEmail = email.toLowerCase()
+      const throttleKey = `${request.ip}:${normalizedEmail}`
+      if (!loginThrottle.register(throttleKey)) {
+        throw errors.loginThrottled()
+      }
 
-    const member = await db.query.teamMembers.findFirst({
-      where: eq(teamMembers.email, normalizedEmail),
-    })
-    // ai_agent rows have no password and cannot log in. Always run a bcrypt
-    // compare (against a dummy hash for unknown users) to avoid a timing
-    // side-channel that reveals whether an email exists.
-    const passwordHash = member?.passwordHash ?? DUMMY_BCRYPT_HASH
-    const ok = await bcrypt.compare(password, passwordHash)
-    if (!member || member.role === 'ai_agent' || !member.passwordHash || !ok) {
-      throw errors.unauthorized('Invalid credentials.')
-    }
+      const member = await db.query.teamMembers.findFirst({
+        where: eq(teamMembers.email, normalizedEmail),
+      })
+      // ai_agent rows have no password and cannot log in. Always run a bcrypt
+      // compare (against a dummy hash for unknown users) to avoid a timing
+      // side-channel that reveals whether an email exists.
+      const passwordHash = member?.passwordHash ?? DUMMY_BCRYPT_HASH
+      const ok = await bcrypt.compare(password, passwordHash)
+      if (!member || member.role === 'ai_agent' || !member.passwordHash || !ok) {
+        throw errors.unauthorized('Invalid credentials.')
+      }
 
-    loginThrottle.clear(throttleKey)
-    const tokens = await issueTokens(app, member)
-    return { ...tokens, agent: publicAgent(member) }
+      loginThrottle.clear(throttleKey)
+      const tokens = await issueTokens(app, member)
+      return { ...tokens, agent: publicAgent(member) }
     },
   )
 
@@ -103,77 +104,70 @@ export async function authRoutes(app: FastifyInstance) {
       },
     },
     async (request) => {
-    const { refreshToken } = refreshSchema.parse(request.body)
-    const [id, secret] = refreshToken.split('.')
-    if (!id || !secret) throw errors.unauthorized('Malformed refresh token.')
+      const { refreshToken } = refreshSchema.parse(request.body)
+      const { id, secret } = parseRefreshToken(refreshToken)
 
-    const row = await db.query.refreshTokens.findFirst({
-      where: eq(refreshTokens.id, id),
-    })
-    if (!row) throw errors.unauthorized('Invalid refresh token.')
+      const row = await db.query.refreshTokens.findFirst({
+        where: eq(refreshTokens.id, id),
+      })
+      if (!row) throw errors.unauthorized('Invalid refresh token.')
 
-    const secretOk = await bcrypt.compare(secret, row.tokenHash)
-    if (!secretOk) throw errors.unauthorized('Invalid refresh token.')
+      const secretOk = await bcrypt.compare(secret, row.tokenHash)
+      if (!secretOk) throw errors.unauthorized('Invalid refresh token.')
 
-    // Reuse detection: a presented-but-already-revoked token => possible theft.
-    if (row.revokedAt) {
-      await db
+      // Reuse detection: a presented-but-already-revoked token => possible theft.
+      if (row.revokedAt) {
+        await db
+          .update(refreshTokens)
+          .set({ revokedAt: new Date() })
+          .where(eq(refreshTokens.teamMemberId, row.teamMemberId))
+        await db
+          .update(teamMembers)
+          .set({ tokenRevokedAt: new Date() })
+          .where(eq(teamMembers.id, row.teamMemberId))
+        throw errors.unauthorized('Refresh token reuse detected. Please log in again.')
+      }
+
+      if (row.expiresAt.getTime() < Date.now()) {
+        throw errors.unauthorized('Refresh token expired.')
+      }
+
+      const member = await db.query.teamMembers.findFirst({
+        where: eq(teamMembers.id, row.teamMemberId),
+      })
+      if (!member) throw errors.unauthorized('Account no longer exists.')
+
+      // Honor a global session revoke (admin offboarding / reuse detection) even if
+      // this particular refresh row was not individually revoked.
+      if (member.tokenRevokedAt && row.createdAt.getTime() < member.tokenRevokedAt.getTime()) {
+        throw errors.unauthorized('Session revoked. Please log in again.')
+      }
+
+      // Rotate atomically: the neon-http driver has no interactive transactions, so
+      // we revoke with `WHERE revoked_at IS NULL` and require exactly one row. Two
+      // concurrent refreshes with the same token have a single winner; the loser
+      // gets a benign error without revoking the winner's new session.
+      const claimed = await db
         .update(refreshTokens)
         .set({ revokedAt: new Date() })
-        .where(eq(refreshTokens.teamMemberId, row.teamMemberId))
-      await db
-        .update(teamMembers)
-        .set({ tokenRevokedAt: new Date() })
-        .where(eq(teamMembers.id, row.teamMemberId))
-      throw errors.unauthorized('Refresh token reuse detected. Please log in again.')
-    }
+        .where(and(eq(refreshTokens.id, row.id), isNull(refreshTokens.revokedAt)))
+        .returning({ id: refreshTokens.id })
 
-    if (row.expiresAt.getTime() < Date.now()) {
-      throw errors.unauthorized('Refresh token expired.')
-    }
+      // Lost the atomic claim race (concurrent refresh with the same token). The
+      // winner already rotated — do not treat this as theft or revoke their session.
+      if (claimed.length === 0) {
+        throw errors.unauthorized('Refresh token already used.')
+      }
 
-    const member = await db.query.teamMembers.findFirst({
-      where: eq(teamMembers.id, row.teamMemberId),
-    })
-    if (!member) throw errors.unauthorized('Account no longer exists.')
-
-    // Honor a global session revoke (admin offboarding / reuse detection) even if
-    // this particular refresh row was not individually revoked.
-    if (member.tokenRevokedAt && row.createdAt.getTime() < member.tokenRevokedAt.getTime()) {
-      throw errors.unauthorized('Session revoked. Please log in again.')
-    }
-
-    // Rotate atomically: the neon-http driver has no interactive transactions, so
-    // we revoke with `WHERE revoked_at IS NULL` and require exactly one row. Two
-    // concurrent refreshes with the same token now have a single winner; the loser
-    // matches zero rows and is treated as reuse.
-    const claimed = await db
-      .update(refreshTokens)
-      .set({ revokedAt: new Date() })
-      .where(and(eq(refreshTokens.id, row.id), isNull(refreshTokens.revokedAt)))
-      .returning({ id: refreshTokens.id })
-
-    if (claimed.length === 0) {
-      await db
-        .update(refreshTokens)
-        .set({ revokedAt: new Date() })
-        .where(eq(refreshTokens.teamMemberId, row.teamMemberId))
-      await db
-        .update(teamMembers)
-        .set({ tokenRevokedAt: new Date() })
-        .where(eq(teamMembers.id, row.teamMemberId))
-      throw errors.unauthorized('Refresh token reuse detected. Please log in again.')
-    }
-
-    return issueTokens(app, member)
+      return issueTokens(app, member)
     },
   )
 
   app.post('/logout', async (request) => {
     const parsed = refreshSchema.safeParse(request.body)
     if (parsed.success) {
-      const [id, secret] = parsed.data.refreshToken.split('.')
-      if (id && secret) {
+      try {
+        const { id, secret } = parseRefreshToken(parsed.data.refreshToken)
         // Verify the secret before revoking so a known/guessed token id can't be
         // used to terminate another agent's session.
         const row = await db.query.refreshTokens.findFirst({
@@ -185,6 +179,8 @@ export async function authRoutes(app: FastifyInstance) {
             .set({ revokedAt: new Date() })
             .where(eq(refreshTokens.id, id))
         }
+      } catch {
+        // Malformed token — still return ok (logout is best-effort).
       }
     }
     return { ok: true }
@@ -196,6 +192,10 @@ export async function authRoutes(app: FastifyInstance) {
     { preHandler: [app.authenticate, app.requireRole('admin')] },
     async (request) => {
       const body = z.object({ agentId: z.string().uuid() }).parse(request.body)
+      const target = await db.query.teamMembers.findFirst({
+        where: eq(teamMembers.id, body.agentId),
+      })
+      if (!target) throw errors.notFound('Agent not found.')
       await db
         .update(teamMembers)
         .set({ tokenRevokedAt: new Date() })

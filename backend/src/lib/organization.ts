@@ -1,4 +1,4 @@
-/** Seeded default org id — matches migration 0008_org_scaffold.sql */
+/** Default org id placeholder for future multi-tenant scaffolding. */
 export const DEFAULT_ORGANIZATION_ID = '00000000-0000-0000-0000-000000000001'
 
 export function defaultOrganizationId(): string {

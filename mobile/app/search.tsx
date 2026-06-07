@@ -18,6 +18,7 @@ import {
 } from '@/hooks/useGlobalMessageSearch'
 import { Avatar } from '@/components/Avatar'
 import { formatTime } from '@/lib/format'
+import { conversationHref } from '@/lib/scrollToChatMessage'
 
 function snippet(result: MessageSearchResult): string {
   if (result.body?.trim()) return result.body.trim()
@@ -88,7 +89,9 @@ export default function SearchScreen() {
           keyboardShouldPersistTaps="handled"
           renderItem={({ item }) => (
             <Pressable
-              onPress={() => router.push(`/conversation/${item.conversationId}`)}
+              onPress={() =>
+                router.push(conversationHref(item.conversationId, item.messageId))
+              }
               className="flex-row items-center gap-3 border-b border-neutral-100 bg-white px-4 py-3 active:bg-neutral-50 dark:border-white/5 dark:bg-wa-panelDeep dark:active:bg-wa-panel"
             >
               <Avatar name={item.contactName} fallback={item.contactWaId} size={46} />

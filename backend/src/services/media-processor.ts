@@ -6,6 +6,7 @@ import { messages } from '../db/schema.js'
 import { whatsapp } from './whatsapp.js'
 import type { S3Service } from './s3.js'
 import { contentAddressedKey } from '../utils/content-addressed-key.js'
+import { normalizeWhatsAppMime } from '../utils/mime-normalize.js'
 import { emitMediaReady } from './socket-events.js'
 
 const EXT_BY_MIME: Record<string, string> = {
@@ -42,19 +43,30 @@ export async function processDownloadMedia(
     filename: string
   },
 ): Promise<void> {
+  const existing = await db.query.messages.findFirst({
+    where: eq(messages.id, payload.messageId),
+    columns: { mediaUrl: true, mediaStatus: true },
+  })
+  if (existing?.mediaStatus === 'uploaded' && existing.mediaUrl) {
+    log.info({ messageId: payload.messageId, key: existing.mediaUrl }, 'inbound media already uploaded')
+    emitMediaReady(io, payload.conversationId, payload.messageId, existing.mediaUrl)
+    return
+  }
+
   const url = await whatsapp.getMediaUrl(log, payload.waMediaId)
   const buffer = await whatsapp.downloadMedia(log, url)
 
   const filename = deriveFilename(payload.filename, payload.mimeType, payload.messageId)
-  const key = contentAddressedKey(buffer, filename, payload.mimeType)
+  const mimeType = normalizeWhatsAppMime(payload.mimeType, filename)
+  const key = contentAddressedKey(buffer, filename, mimeType)
 
-  await s3.uploadToS3IfMissing(key, buffer, payload.mimeType)
+  await s3.uploadToS3IfMissing(key, buffer, mimeType)
 
   await db
     .update(messages)
     .set({
       mediaUrl: key,
-      mediaMimeType: payload.mimeType,
+      mediaMimeType: mimeType,
       mediaFilename: filename,
       mediaStatus: 'uploaded',
     })

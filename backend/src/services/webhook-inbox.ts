@@ -1,4 +1,4 @@
-import { and, asc, eq, isNotNull, isNull, lt } from 'drizzle-orm'
+import { and, asc, eq, isNotNull, isNull, like, lt, not, or } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { db } from '../db/index.js'
 import { webhookEvents } from '../db/schema.js'
@@ -9,6 +9,36 @@ import { captureException } from '../utils/observability.js'
 const REPLAY_INTERVAL_MS = 60_000
 /** Processed webhook_events older than this are pruned to bound table growth. */
 const RETENTION_DAYS = 14
+/** Reclaim events stuck in `processing:*` after a crash mid-handler. */
+const PROCESSING_STALE_MS = 10 * 60 * 1000
+export const WEBHOOK_PROCESSING_PREFIX = 'processing:'
+
+/**
+ * Single-winner claim so setImmediate + replay loop cannot process the same row twice.
+ * Failed rows (real error text) remain replayable; stale `processing:*` locks are reclaimed.
+ */
+export async function claimWebhookEvent(eventId: string): Promise<boolean> {
+  const staleBefore = new Date(Date.now() - PROCESSING_STALE_MS)
+  const claimed = await db
+    .update(webhookEvents)
+    .set({ error: `${WEBHOOK_PROCESSING_PREFIX}${Date.now()}` })
+    .where(
+      and(
+        eq(webhookEvents.id, eventId),
+        isNull(webhookEvents.processedAt),
+        or(
+          isNull(webhookEvents.error),
+          not(like(webhookEvents.error, `${WEBHOOK_PROCESSING_PREFIX}%`)),
+          and(
+            like(webhookEvents.error, `${WEBHOOK_PROCESSING_PREFIX}%`),
+            lt(webhookEvents.receivedAt, staleBefore),
+          ),
+        ),
+      ),
+    )
+    .returning({ id: webhookEvents.id })
+  return claimed.length > 0
+}
 
 /**
  * Was: webhook returned 200 before any DB write — a crash after ack lost events forever.
@@ -27,6 +57,11 @@ export async function processWebhookEvent(
   eventId: string,
   payload: unknown,
 ): Promise<void> {
+  if (!(await claimWebhookEvent(eventId))) {
+    app.log.debug({ eventId }, 'webhook event skipped (already processing or processed)')
+    return
+  }
+
   try {
     await processWebhookPayload(app, payload)
     await db

@@ -1,11 +1,13 @@
 import axios from 'axios'
+import { getApiErrorCode } from '@/services/api'
 import * as FileSystem from 'expo-file-system/legacy'
 import { api, ensureAccessTokenFresh } from '@/services/api'
 import { normalizeMessage } from '@/lib/normalizeMessage'
 import { normalizeUploadMime } from '@/lib/mediaMime'
 import { prepareImageForSend } from '@/lib/prepareImageSend'
 import { prepareStickerForSend } from '@/lib/prepareStickerForSend'
-import { assertMediaUploadable, prepareMediaFileForUpload } from '@/lib/prepareUpload'
+import { prepareMediaFileForUpload } from '@/lib/prepareUpload'
+import { assertMediaUploadable } from '@/lib/waMediaLimits'
 import { hashPreparedFile } from '@/lib/mediaContentHash'
 import {
   getS3KeyForContentHash,
@@ -236,7 +238,11 @@ export async function postPreparedMedia(
       },
     )
   } catch (err) {
-    if (axios.isAxiosError(err) && err.response?.status === 401) {
+    if (
+      axios.isAxiosError(err) &&
+      err.response?.status === 401 &&
+      getApiErrorCode(err) !== 'TOKEN_REVOKED'
+    ) {
       await ensureAccessTokenFresh()
       res = await api.post<{ message: Message }>(
         `/conversations/${conversationId}/messages`,

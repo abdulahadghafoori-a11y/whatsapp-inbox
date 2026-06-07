@@ -28,6 +28,7 @@ export const queryPersister = createAsyncStoragePersister({
 
 export function shouldPersistQuery(queryKey: readonly unknown[]): boolean {
   const root = queryKey[0]
+  if (root === 'messages' && queryKey.length > 2) return false
   return root === 'conversations' || root === 'messages' || root === 'conversation' || root === 'media'
 }
 

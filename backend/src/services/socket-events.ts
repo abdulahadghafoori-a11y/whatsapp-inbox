@@ -89,6 +89,5 @@ export function emitConversationAssigned(
   agentId: string,
 ): void {
   io.to(`agent:${agentId}`).emit('conversation_assigned', { conversationId })
-  io.emit('conversation_assigned', { conversationId })
   io.emit('inbox_updated', { conversationId })
 }

@@ -33,7 +33,11 @@ export async function routeConversation(
   io: SocketIOServer,
   log: FastifyBaseLogger,
 ): Promise<void> {
-  if (conversation.assignedTo) return
+  const fresh = await db.query.conversations.findFirst({
+    where: eq(conversations.id, conversation.id),
+  })
+  if (!fresh || fresh.assignedTo) return
+  conversation = fresh
 
   const aiAgent = shouldUseAI(conversation)
     ? await db.query.teamMembers.findFirst({

@@ -1,7 +1,12 @@
+import type { QueryClient } from '@tanstack/react-query'
 import { appStorage } from '@/lib/appStorage'
 import { api } from '@/services/api'
 import { queryClient } from '@/lib/queryClient'
-import { removeMessageInfinite, type MessagesInfinite } from '@/lib/messagesQueryCache'
+import {
+  removeMessageInfinite,
+  upsertMessageInfinite,
+  type MessagesInfinite,
+} from '@/lib/messagesQueryCache'
 import type { Message } from '@/types'
 
 const KEY = 'wa-inbox-outbound-queue'
@@ -27,7 +32,8 @@ function optimisticMessage(p: PendingTextSend): Message {
     mediaMimeType: null,
     mediaFilename: null,
     mediaStatus: null,
-    status: 'sent',
+    status: 'pending',
+    sendPhase: 'queued',
     errorMessage: null,
     sentAt: p.createdAt,
     createdAt: p.createdAt,
@@ -53,11 +59,11 @@ async function saveOutboundQueue(items: PendingTextSend[]) {
 }
 
 export async function enqueueTextSend(
-  input: Omit<PendingTextSend, 'id' | 'createdAt'>,
+  input: Omit<PendingTextSend, 'createdAt'> & { id?: string },
 ): Promise<Message> {
   const item: PendingTextSend = {
     ...input,
-    id: `pending-text-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+    id: input.id ?? `pending-text-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
     createdAt: new Date().toISOString(),
   }
   const queue = await loadOutboundQueue()
@@ -114,6 +120,16 @@ async function doFlushOutboundQueue(): Promise<{ sent: number; failed: number }>
 
   await saveOutboundQueue(remaining)
   return { sent, failed }
+}
+
+/** Restore queued outbound text bubbles after app restart. */
+export async function hydrateOutboundQueue(qc: QueryClient): Promise<void> {
+  const queue = await loadOutboundQueue()
+  for (const item of queue) {
+    qc.setQueryData<MessagesInfinite>(['messages', item.conversationId], (old) =>
+      upsertMessageInfinite(old, optimisticMessage(item)),
+    )
+  }
 }
 
 /** Drop all queued sends (e.g. on logout) without attempting delivery. */

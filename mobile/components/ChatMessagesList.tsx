@@ -177,4 +177,27 @@ function ChatMessagesListBase({
   )
 }
 
-export const ChatMessagesList = memo(ChatMessagesListBase)
+function chatMessagesListEqual(prev: ChatMessagesListProps, next: ChatMessagesListProps) {
+  return (
+    prev.data === next.data &&
+    prev.highlightMessageId === next.highlightMessageId &&
+    prev.contactName === next.contactName &&
+    prev.contactAvatarUrl === next.contactAvatarUrl &&
+    prev.searchOpen === next.searchOpen &&
+    prev.isFetchingOlder === next.isFetchingOlder &&
+    prev.hasOlderMessages === next.hasOlderMessages &&
+    prev.onFetchOlder === next.onFetchOlder &&
+    prev.onDismissSearch === next.onDismissSearch &&
+    prev.onStickyDateChange === next.onStickyDateChange &&
+    prev.onScrollOffset === next.onScrollOffset &&
+    prev.onReply === next.onReply &&
+    prev.onReplyQuotePress === next.onReplyQuotePress &&
+    prev.onSwipeOpen === next.onSwipeOpen &&
+    prev.onRetry === next.onRetry &&
+    prev.onLongPress === next.onLongPress &&
+    prev.listRef === next.listRef &&
+    prev.canLoadOlderRef === next.canLoadOlderRef
+  )
+}
+
+export const ChatMessagesList = memo(ChatMessagesListBase, chatMessagesListEqual)

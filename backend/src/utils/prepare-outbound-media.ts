@@ -1,5 +1,16 @@
 import type { FastifyBaseLogger } from 'fastify'
+import { analyzeAudioBuffer } from './inbound-audio-profile.js'
+import { normalizeWhatsAppMime } from './mime-normalize.js'
+import { prepareDocumentForWhatsApp } from './prepare-document.js'
+import { validateImageForWhatsApp } from './prepare-image.js'
+import { validateAudioForWhatsApp } from './validate-audio.js'
+import { validateVideoForWhatsApp } from './validate-video.js'
 import { errors } from './errors.js'
+import {
+  capForMime,
+  mediaKindFromMime,
+  type WaMediaKind,
+} from './wa-media-limits.js'
 
 function sanitizeFilename(filename: string): string {
   let name = filename
@@ -12,17 +23,6 @@ function sanitizeFilename(filename: string): string {
   const safe = base.replace(/[^\w.\- ()[\]]+/g, '_').slice(0, 200)
   return safe || `file-${Date.now()}`
 }
-import { normalizeWhatsAppMime } from './mime-normalize.js'
-import { validateAudioForWhatsApp } from './validate-audio.js'
-import { validateImageForWhatsApp } from './prepare-image.js'
-import { validateVideoForWhatsApp } from './validate-video.js'
-import { prepareDocumentForWhatsApp } from './prepare-document.js'
-import { analyzeAudioBuffer } from './inbound-audio-profile.js'
-import {
-  capForMime,
-  mediaKindFromMime,
-  type WaMediaKind,
-} from './wa-media-limits.js'
 
 export type PreparedOutboundMedia = {
   buffer: Buffer

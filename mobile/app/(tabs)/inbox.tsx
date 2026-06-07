@@ -38,6 +38,7 @@ import { registerInboxScrollToTop } from '@/lib/inboxScroll'
 import { userFacingLoadError } from '@/lib/userFacingError'
 import { SocketConnectionBanner } from '@/components/SocketConnectionBanner'
 import { hapticSelection } from '@/lib/haptics'
+import { conversationHref } from '@/lib/scrollToChatMessage'
 
 const FILTERS: { key: InboxFilter; label: string }[] = [
   { key: 'all', label: 'All' },
@@ -110,10 +111,16 @@ export default function InboxScreen() {
   const { data: messageHits, isFetching: messageSearchFetching } = useGlobalMessageSearch(search)
   const showMessageHits = search.trim().length >= 2
 
-  const conversations = useMemo(
-    () => data?.pages.flatMap((p) => p.conversations) ?? [],
-    [data],
-  )
+  const conversations = useMemo(() => {
+    const seen = new Set<string>()
+    const list: ConversationListItem[] = []
+    for (const c of data?.pages.flatMap((p) => p.conversations) ?? []) {
+      if (seen.has(c.id)) continue
+      seen.add(c.id)
+      list.push(c)
+    }
+    return list
+  }, [data])
 
   const showSkeleton = isLoading && conversations.length === 0 && !showMessageHits
 
@@ -176,22 +183,48 @@ export default function InboxScreen() {
     openSwipeRef.current = ref
   }, [])
 
-  async function onToggleRead(conversationId: string, currentlyUnread: boolean) {
-    try {
-      if (currentlyUnread) await markRead.mutateAsync(conversationId)
-      else await markUnread.mutateAsync(conversationId)
-    } catch (err) {
-      toast.show(apiErrorMessage(err), 'error')
-    }
-  }
+  const onToggleRead = useCallback(
+    async (conversationId: string, currentlyUnread: boolean) => {
+      try {
+        if (currentlyUnread) await markRead.mutateAsync(conversationId)
+        else await markUnread.mutateAsync(conversationId)
+      } catch (err) {
+        toast.show(apiErrorMessage(err), 'error')
+      }
+    },
+    [markRead, markUnread, toast],
+  )
 
-  async function onTogglePin(conversationId: string, pinned: boolean) {
-    try {
-      await pinConversation.mutateAsync({ conversationId, pinned })
-    } catch (err) {
-      toast.show(apiErrorMessage(err), 'error')
-    }
-  }
+  const onTogglePin = useCallback(
+    async (conversationId: string, pinned: boolean) => {
+      try {
+        await pinConversation.mutateAsync({ conversationId, pinned })
+      } catch (err) {
+        toast.show(apiErrorMessage(err), 'error')
+      }
+    },
+    [pinConversation, toast],
+  )
+
+  const renderConversation = useCallback(
+    ({ item }: { item: ConversationListItem }) => (
+      <View onStartShouldSetResponder={() => true}>
+        <SwipeableConversationItem
+          conversation={item}
+          onPress={(id) => {
+            openSwipeRef.current?.close()
+            dismissInboxSearch()
+            router.push(`/conversation/${id}`)
+          }}
+          onMarkRead={(id) => void onToggleRead(id, true)}
+          onMarkUnread={(id) => void onToggleRead(id, false)}
+          onTogglePin={(id, pinned) => void onTogglePin(id, pinned)}
+          onSwipeOpen={onSwipeOpen}
+        />
+      </View>
+    ),
+    [onSwipeOpen, onTogglePin, onToggleRead, router],
+  )
 
   async function loadMore() {
     if (!hasNextPage || loadingMore || endReachedBusy.current) return
@@ -225,7 +258,7 @@ export default function InboxScreen() {
             key={item.messageId}
             onPress={() => {
               dismissInboxSearch()
-              router.push(`/conversation/${item.conversationId}`)
+              router.push(conversationHref(item.conversationId, item.messageId))
             }}
             className="flex-row items-center gap-3 border-b border-neutral-50 px-4 py-3 active:bg-neutral-50 dark:border-white/5 dark:active:bg-wa-panel"
           >
@@ -334,22 +367,7 @@ export default function InboxScreen() {
               if (searchFocused) dismissInboxSearch()
             }}
             ListHeaderComponent={messageResultsHeader}
-            renderItem={({ item }: { item: ConversationListItem }) => (
-              <Pressable onPress={(e) => e.stopPropagation()}>
-                <SwipeableConversationItem
-                  conversation={item}
-                  onPress={(id) => {
-                    openSwipeRef.current?.close()
-                    dismissInboxSearch()
-                    router.push(`/conversation/${id}`)
-                  }}
-                  onMarkRead={(id) => void onToggleRead(id, true)}
-                  onMarkUnread={(id) => void onToggleRead(id, false)}
-                  onTogglePin={(id, pinned) => void onTogglePin(id, pinned)}
-                  onSwipeOpen={onSwipeOpen}
-                />
-              </Pressable>
-            )}
+            renderItem={renderConversation}
             refreshControl={
               <RefreshControl
                 refreshing={refreshing}

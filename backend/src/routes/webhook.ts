@@ -101,8 +101,8 @@ export function verifySignature(raw: Buffer, signature: string | undefined): boo
     .update(raw)
     .digest('hex')
   const provided = signature.slice('sha256='.length)
+  if (!/^[0-9a-f]+$/i.test(provided) || provided.length !== 64) return false
   const a = Buffer.from(expected, 'hex')
   const b = Buffer.from(provided, 'hex')
-  if (a.length !== b.length) return false
   return timingSafeEqual(a, b)
 }

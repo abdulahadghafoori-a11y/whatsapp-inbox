@@ -36,6 +36,14 @@ import { resolveReplyTargets } from '../utils/resolve-reply.js'
 
 const PAGE = 30
 
+async function requireConversation(id: string) {
+  const row = await db.query.conversations.findFirst({
+    where: and(eq(conversations.id, id), isNull(conversations.deletedAt)),
+  })
+  if (!row) throw errors.conversationNotFound()
+  return row
+}
+
 export async function conversationRoutes(app: FastifyInstance) {
   app.addHook('preHandler', app.authenticate)
 
@@ -135,11 +143,12 @@ export async function conversationRoutes(app: FastifyInstance) {
   // GET /api/conversations/:id
   app.get('/:id', async (request) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params)
+    await requireConversation(id)
     const row = await db.query.conversations.findFirst({
-      where: eq(conversations.id, id),
+      where: and(eq(conversations.id, id), isNull(conversations.deletedAt)),
       with: { contact: true, assignedAgent: true },
     })
-    if (!row || !row.contact) throw errors.conversationNotFound()
+    if (!row?.contact) throw errors.conversationNotFound()
     return {
       conversation: {
         ...shape(
@@ -173,10 +182,7 @@ export async function conversationRoutes(app: FastifyInstance) {
       })
       .parse(request.body)
 
-    const existing = await db.query.conversations.findFirst({
-      where: eq(conversations.id, id),
-    })
-    if (!existing) throw errors.conversationNotFound()
+    const existing = await requireConversation(id)
 
     const patch: Partial<Conversation> = {}
     if (body.status !== undefined) {
@@ -210,6 +216,14 @@ export async function conversationRoutes(app: FastifyInstance) {
     }
     if (body.assignedTo !== undefined && body.assignedTo !== existing.assignedTo) {
       if (body.assignedTo) {
+        const assignee = await db.query.teamMembers.findFirst({
+          where: eq(teamMembers.id, body.assignedTo),
+          columns: { id: true, role: true },
+        })
+        if (!assignee) throw errors.notFound('Agent not found.')
+        if (assignee.role === 'ai_agent') {
+          throw errors.validation('Cannot assign conversations to the AI agent manually.')
+        }
         await db.insert(conversationEvents).values({
           conversationId: id,
           actorId: request.agent.id,
@@ -217,12 +231,14 @@ export async function conversationRoutes(app: FastifyInstance) {
           payload: { from: existing.assignedTo, assignedTo: body.assignedTo },
         })
         emitConversationAssigned(app.io, id, body.assignedTo)
-        await enqueueJob('send_push_notification', {
-          agentId: body.assignedTo,
-          title: 'Conversation assigned to you',
-          body: existing.lastMessagePreview ?? 'New conversation',
-          data: { conversationId: id },
-        })
+        if (body.assignedTo !== request.agent.id) {
+          await enqueueJob('send_push_notification', {
+            agentId: body.assignedTo,
+            title: 'Conversation assigned to you',
+            body: existing.lastMessagePreview ?? 'New conversation',
+            data: { conversationId: id },
+          })
+        }
       } else {
         // Was: unassign (assignedTo -> null) left no audit trail.
         await db.insert(conversationEvents).values({
@@ -293,6 +309,7 @@ export async function conversationRoutes(app: FastifyInstance) {
   // GET /api/conversations/:id/tags
   app.get('/:id/tags', async (request) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params)
+    await requireConversation(id)
     const rows = await db
       .select({ id: tags.id, name: tags.name, color: tags.color })
       .from(conversationTags)
@@ -305,10 +322,7 @@ export async function conversationRoutes(app: FastifyInstance) {
   app.post('/:id/tags', async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params)
     const { tagId } = z.object({ tagId: z.string().uuid() }).parse(request.body)
-    const conversation = await db.query.conversations.findFirst({
-      where: eq(conversations.id, id),
-    })
-    if (!conversation) throw errors.conversationNotFound()
+    await requireConversation(id)
     const tag = await db.query.tags.findFirst({ where: eq(tags.id, tagId) })
     if (!tag) throw errors.notFound('Tag not found.')
     await db
@@ -324,6 +338,7 @@ export async function conversationRoutes(app: FastifyInstance) {
     const { id, tagId } = z
       .object({ id: z.string().uuid(), tagId: z.string().uuid() })
       .parse(request.params)
+    await requireConversation(id)
     await db
       .delete(conversationTags)
       .where(
@@ -336,6 +351,7 @@ export async function conversationRoutes(app: FastifyInstance) {
   // GET /api/conversations/:id/messages  (cursor pagination, oldest first)
   app.get('/:id/messages', async (request) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params)
+    await requireConversation(id)
     const q = z
       .object({
         before: z.string().uuid().optional(),
@@ -350,7 +366,11 @@ export async function conversationRoutes(app: FastifyInstance) {
         .select()
         .from(messages)
         .where(
-          and(eq(messages.conversationId, id), ilike(messages.body, `%${searchTerm}%`)),
+          and(
+            eq(messages.conversationId, id),
+            isNull(messages.deletedAt),
+            ilike(messages.body, `%${searchTerm}%`),
+          ),
         )
         .orderBy(desc(messages.sentAt))
         .limit(50)
@@ -364,12 +384,14 @@ export async function conversationRoutes(app: FastifyInstance) {
     let beforeSentAt: Date | undefined
     if (q.before) {
       const cursorMsg = await db.query.messages.findFirst({
-        where: eq(messages.id, q.before),
+        where: and(eq(messages.id, q.before), eq(messages.conversationId, id)),
+        columns: { sentAt: true },
       })
-      beforeSentAt = cursorMsg?.sentAt
+      if (!cursorMsg) throw errors.notFound('Message not found')
+      beforeSentAt = cursorMsg.sentAt
     }
 
-    const conds = [eq(messages.conversationId, id)]
+    const conds = [eq(messages.conversationId, id), isNull(messages.deletedAt)]
     if (beforeSentAt) conds.push(lt(messages.sentAt, beforeSentAt))
 
     // Fetch newest page then return oldest-first for rendering.
@@ -404,10 +426,10 @@ export async function conversationRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const { id } = z.object({ id: z.string().uuid() }).parse(request.params)
       const conversation = await db.query.conversations.findFirst({
-        where: eq(conversations.id, id),
+        where: and(eq(conversations.id, id), isNull(conversations.deletedAt)),
         with: { contact: true },
       })
-      if (!conversation || !conversation.contact) throw errors.conversationNotFound()
+      if (!conversation?.contact) throw errors.conversationNotFound()
 
       if (!resolveMessagingState(conversation).canSendSession) {
         throw errors.windowExpired()
@@ -581,7 +603,7 @@ export async function conversationRoutes(app: FastifyInstance) {
       .parse(request.params)
 
     const conversation = await db.query.conversations.findFirst({
-      where: eq(conversations.id, id),
+      where: and(eq(conversations.id, id), isNull(conversations.deletedAt)),
       with: { contact: true },
     })
     if (!conversation?.contact) throw errors.conversationNotFound()
@@ -594,8 +616,18 @@ export async function conversationRoutes(app: FastifyInstance) {
       throw errors.validation('Only failed outbound messages can be resent')
     }
 
-    if (message.type !== 'text' && !message.mediaUrl) {
-      throw errors.validation('Message media is missing')
+    const templateMeta = message.metadata as { templateName?: string } | null
+    const isTemplate = !!templateMeta?.templateName
+    if (!isTemplate && !resolveMessagingState(conversation).canSendSession) {
+      throw errors.windowExpired()
+    }
+
+    const canResend =
+      message.type === 'text' ||
+      message.type === 'location' ||
+      !!message.mediaUrl
+    if (!canResend) {
+      throw errors.validation('This message cannot be resent')
     }
 
     const voiceNote =
@@ -622,10 +654,10 @@ export async function conversationRoutes(app: FastifyInstance) {
       .parse(request.body)
 
     const conversation = await db.query.conversations.findFirst({
-      where: eq(conversations.id, id),
+      where: and(eq(conversations.id, id), isNull(conversations.deletedAt)),
       with: { contact: true },
     })
-    if (!conversation || !conversation.contact) throw errors.conversationNotFound()
+    if (!conversation?.contact) throw errors.conversationNotFound()
 
     const message = await createOutboundTemplate(app.io, {
       conversationId: id,

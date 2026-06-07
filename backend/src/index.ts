@@ -24,6 +24,7 @@ import { teamRoutes } from './routes/team.js'
 import { templateRoutes } from './routes/templates.js'
 import { tagRoutes } from './routes/tags.js'
 import { cannedResponseRoutes } from './routes/canned.js'
+import { internalRoutes } from './routes/internal.js'
 import { startJobProcessor, jobProcessorHeartbeat } from './workers/job-processor.js'
 import {
   replayUnprocessedWebhooks,
@@ -100,7 +101,8 @@ async function buildServer() {
     max: 100,
     timeWindow: '1 minute',
     allowList: (req) =>
-      req.method === 'POST' && req.url.startsWith('/api/webhook/whatsapp'),
+      req.method === 'POST' &&
+      (req.url.startsWith('/api/webhook/whatsapp') || req.url.startsWith('/internal/')),
   })
 
   await app.register(authPlugin)
@@ -116,6 +118,7 @@ async function buildServer() {
   await app.register(templateRoutes, { prefix: '/api/templates' })
   await app.register(tagRoutes, { prefix: '/api/tags' })
   await app.register(cannedResponseRoutes, { prefix: '/api/canned-responses' })
+  await app.register(internalRoutes, { prefix: '/internal' })
 
   app.get('/health', async () => {
     await db.execute(sql`SELECT 1`)

@@ -30,7 +30,7 @@ place.
 
 ```bash
 npm run db:generate   # generate SQL migration from src/db/schema.ts (already includes 0000_init)
-npm run db:migrate    # apply migrations to Neon
+npm run db:migrate    # apply migrations to Neon (includes 0008_db_indexes — run after pulling)
 npm run seed          # create 1 admin + 4 agents + 1 ai_agent
 ```
 

@@ -9,15 +9,24 @@ import { assertProductionTransportSecurity } from '@/lib/transportSecurity'
 
 assertProductionTransportSecurity()
 
-const API_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:3001'
+export const API_BASE_URL = (process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:3001').replace(
+  /\/$/,
+  '',
+)
+const API_URL = API_BASE_URL
 
 export const api: AxiosInstance = axios.create({
   baseURL: `${API_URL}/api`,
   timeout: 20000,
 })
 
-// Bare client for the refresh call (no interceptors -> no recursion).
+// Bare client for auth calls (no interceptors -> no refresh recursion).
 const bare = axios.create({ baseURL: `${API_URL}/api`, timeout: 20000 })
+
+function isAuthRoute(url: string | undefined): boolean {
+  if (!url) return false
+  return url.includes('/auth/login') || url.includes('/auth/refresh')
+}
 
 api.interceptors.request.use((cfg: InternalAxiosRequestConfig) => {
   const token = useAuthStore.getState().accessToken
@@ -29,8 +38,8 @@ api.interceptors.request.use((cfg: InternalAxiosRequestConfig) => {
   return cfg
 })
 
-// Single-flight refresh: concurrent 401s share one refresh promise.
-let refreshing: Promise<string | null> | null = null
+// Single-flight refresh: concurrent 401s share one refresh promise until it settles.
+let refreshPromise: Promise<string | null> | null = null
 
 async function refreshAccessToken(): Promise<string | null> {
   const { refreshToken } = useAuthStore.getState()
@@ -48,6 +57,15 @@ async function refreshAccessToken(): Promise<string | null> {
     await useAuthStore.getState().clear()
     return null
   }
+}
+
+export function refreshAccessTokenSingleFlight(): Promise<string | null> {
+  if (!refreshPromise) {
+    refreshPromise = refreshAccessToken().finally(() => {
+      refreshPromise = null
+    })
+  }
+  return refreshPromise
 }
 
 function jwtExpMs(token: string): number | null {
@@ -69,7 +87,7 @@ export async function ensureAccessTokenFresh(skewMs = 60_000): Promise<void> {
   if (!refreshToken) return
   const exp = accessToken ? jwtExpMs(accessToken) : null
   if (exp != null && exp > Date.now() + skewMs) return
-  await refreshAccessToken()
+  await refreshAccessTokenSingleFlight()
 }
 
 api.interceptors.response.use(
@@ -88,11 +106,9 @@ api.interceptors.response.use(
       return Promise.reject(error)
     }
 
-    if (status === 401 && original && !original._retried) {
+    if (status === 401 && original && !original._retried && !isAuthRoute(original.url)) {
       original._retried = true
-      refreshing = refreshing ?? refreshAccessToken()
-      const newToken = await refreshing
-      refreshing = null
+      const newToken = await refreshAccessTokenSingleFlight()
       // Multipart bodies are consumed on first send — caller must rebuild FormData.
       if (original.data instanceof FormData) {
         return Promise.reject(error)
@@ -106,10 +122,22 @@ api.interceptors.response.use(
   },
 )
 
+export function getApiErrorCode(err: unknown): string | undefined {
+  if (!axios.isAxiosError(err)) return undefined
+  return (err.response?.data as { code?: string } | undefined)?.code
+}
+
 export function apiErrorMessage(err: unknown): string {
   if (axios.isAxiosError(err)) {
-    const data = err.response?.data as { error?: string } | undefined
-    return data?.error ?? err.message
+    if (!err.response) {
+      return 'Network error. Check your connection and try again.'
+    }
+    const data = err.response.data as { error?: string; code?: string } | undefined
+    if (data?.error) return data.error
+    if (err.response.status === 429) {
+      return 'Too many requests. Please wait a moment and try again.'
+    }
+    return err.message
   }
   return err instanceof Error ? err.message : 'Something went wrong'
 }

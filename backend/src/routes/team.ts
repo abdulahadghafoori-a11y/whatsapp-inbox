@@ -1,8 +1,9 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { ne } from 'drizzle-orm'
+import { eq, ne } from 'drizzle-orm'
 import { db } from '../db/index.js'
 import { teamMembers } from '../db/schema.js'
+import { EXPO_PUSH_TOKEN_RE } from '../services/push-notifications.js'
 
 export async function teamRoutes(app: FastifyInstance) {
   app.addHook('preHandler', app.authenticate)
@@ -30,7 +31,9 @@ export async function teamRoutes(app: FastifyInstance) {
     const body = z
       .object({
         // Nullable so the client can clear the token when push is disabled.
-        expoPushToken: z.string().nullable().optional(),
+        expoPushToken: z
+          .union([z.string().regex(EXPO_PUSH_TOKEN_RE, 'Invalid Expo push token'), z.null()])
+          .optional(),
         avatarUrl: z.string().url().optional(),
       })
       .parse(request.body)

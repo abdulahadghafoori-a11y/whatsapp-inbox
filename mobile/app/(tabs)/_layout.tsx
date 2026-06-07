@@ -5,7 +5,6 @@ import { Ionicons } from '@expo/vector-icons'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NowPlayingBar } from '@/components/NowPlayingBar'
 import { InboxTabButton } from '@/components/InboxTabButton'
-import { inboxScrollToTop } from '@/lib/inboxScroll'
 import { getDefaultTabBarStyle } from '@/lib/navigation'
 import { hapticSelection } from '@/lib/haptics'
 import { useAuthStore } from '@/stores/authStore'
@@ -48,13 +47,6 @@ export default function TabsLayout() {
             ),
             tabBarButton: (props) => <InboxTabButton {...props} />,
           }}
-          listeners={({ navigation }) => ({
-            tabPress: () => {
-              if (navigation.isFocused()) {
-                inboxScrollToTop()
-              }
-            },
-          })}
         />
         <Tabs.Screen
           name="team"

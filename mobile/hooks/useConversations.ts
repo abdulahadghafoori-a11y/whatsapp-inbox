@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import {
   keepPreviousData,
   useInfiniteQuery,
@@ -22,6 +22,7 @@ import { messageTypeFromMime, normalizeUploadMime } from '@/lib/mediaMime'
 import {
   type MessagesInfinite,
   coerceMessagesInfiniteData,
+  migrateMessagesCacheShape,
   flattenMessagesPages,
   pageMessages,
   patchMessageFieldsInfinite,
@@ -31,7 +32,8 @@ import {
 import { playWaFeedback, playWaFeedbackAsync } from '@/lib/waFeedbackSounds'
 import { normalizeMessage, normalizeMessagesResponse } from '@/lib/normalizeMessage'
 import type { MediaQualityTier } from '@/lib/imageQualityPreference'
-import { syncMessageMedia } from '@/lib/messageMediaSync'
+import { patchInboxQueriesForMessage } from '@/lib/inboxCachePatch'
+import { queueMessageMediaSync } from '@/lib/messageMediaSync'
 import type {
   ConversationDetail,
   ConversationListItem,
@@ -122,6 +124,7 @@ export function useConversations(filter: InboxFilter, search: string) {
     queryKey: ['conversations', filter, search],
     placeholderData: keepPreviousData,
     staleTime: 60_000,
+    gcTime: 30 * 60_000,
     networkMode: 'offlineFirst',
     refetchOnMount: false,
     refetchOnReconnect: true,
@@ -185,20 +188,14 @@ function patchMessageInCacheInfinite(
 export function useMessages(conversationId: string) {
   const qc = useQueryClient()
 
-  // Migrate in-memory cache from pre-pagination useQuery shape (must run before useInfiniteQuery).
-  if (conversationId) {
-    const key = ['messages', conversationId] as const
-    const raw = qc.getQueryData(key)
-    if (raw) {
-      const coerced = coerceMessagesInfiniteData(raw)
-      if (!coerced) qc.removeQueries({ queryKey: key })
-      else if (raw !== coerced) qc.setQueryData(key, coerced)
-    }
-  }
+  useEffect(() => {
+    migrateMessagesCacheShape(qc, conversationId)
+  }, [qc, conversationId])
 
   const query = useInfiniteQuery({
     queryKey: ['messages', conversationId],
-    staleTime: 15_000,
+    staleTime: 30_000,
+    gcTime: 30 * 60_000,
     networkMode: 'offlineFirst',
     initialPageParam: null as string | null,
     enabled: !!conversationId,
@@ -267,10 +264,12 @@ export type SendLocationInput = {
 
 export function useSendText(conversationId: string) {
   const qc = useQueryClient()
+  const optimisticIdRef = useRef('')
   return useMutation({
     onMutate: async (input) => {
       const previous = qc.getQueryData<MessagesInfinite>(['messages', conversationId])
       const optimisticId = `pending-text-${Date.now()}`
+      optimisticIdRef.current = optimisticId
       const optimistic: Message = {
         id: optimisticId,
         conversationId,
@@ -293,6 +292,7 @@ export function useSendText(conversationId: string) {
       qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
         upsertMessageInfinite(old, optimistic),
       )
+      patchInboxQueriesForMessage(qc, conversationId, optimistic, { suppressUnread: true })
       return { previous, optimisticId }
     },
     onError: (_err, _input, ctx) => {
@@ -303,6 +303,7 @@ export function useSendText(conversationId: string) {
     mutationFn: async (input: SendTextInput) => {
       const queueLocal = () =>
         enqueueTextSend({
+          id: optimisticIdRef.current,
           conversationId,
           body: input.body,
           replyToMessageId: input.replyToMessageId,
@@ -331,6 +332,7 @@ export function useSendText(conversationId: string) {
       qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
         upsertMessageInfinite(old, message, { removeId: ctx?.optimisticId }),
       )
+      patchInboxQueriesForMessage(qc, conversationId, message, { suppressUnread: true })
     },
   })
 }
@@ -416,6 +418,7 @@ export function useSendLocation(conversationId: string) {
       qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
         upsertMessageInfinite(old, message, { removeId: ctx?.optimisticId }),
       )
+      patchInboxQueriesForMessage(qc, conversationId, message, { suppressUnread: true })
     },
   })
 }
@@ -651,6 +654,7 @@ export function useSendMedia(conversationId: string) {
       qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
         upsertMessageInfinite(old, optimistic),
       )
+      patchInboxQueriesForMessage(qc, conversationId, optimistic, { suppressUnread: true })
       return { previous, optimisticId, localUri: media.uri }
     },
     onError: (err, media, ctx) => {
@@ -742,17 +746,11 @@ export function useSendMedia(conversationId: string) {
         void qc.invalidateQueries({ queryKey: ['media', message.mediaUrl] })
       }
       if (message.type !== 'text' && message.type !== 'location') {
-        void syncMessageMedia(message)
+        queueMessageMediaSync(message)
       }
-      scheduleMessageSync(qc, conversationId)
+      patchInboxQueriesForMessage(qc, conversationId, message, { suppressUnread: true })
     },
   })
-}
-
-function scheduleMessageSync(qc: QueryClient, conversationId: string) {
-  setTimeout(() => {
-    void qc.invalidateQueries({ queryKey: ['messages', conversationId] })
-  }, 8000)
 }
 
 export function useResendMessage(conversationId: string) {
@@ -772,7 +770,11 @@ export function useResendMessage(conversationId: string) {
       )
       return { previous, messageId }
     },
-    onError: (_err, messageId) => {
+    onError: (_err, messageId, ctx) => {
+      if (ctx?.previous) {
+        qc.setQueryData(['messages', conversationId], ctx.previous)
+        return
+      }
       qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
         patchMessageStatusInfinite(old, messageId, 'failed'),
       )
@@ -781,7 +783,6 @@ export function useResendMessage(conversationId: string) {
       qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
         patchMessageInCacheInfinite(old, message),
       )
-      scheduleMessageSync(qc, conversationId)
     },
   })
 }
@@ -798,9 +799,14 @@ export function useSendTemplate(conversationId: string) {
         `/conversations/${conversationId}/messages/template`,
         input,
       )
-      return res.data.message
+      return normalizeMessage(res.data.message as Message & Record<string, unknown>)
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['messages', conversationId] }),
+    onSuccess: (message) => {
+      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
+        upsertMessageInfinite(old, message),
+      )
+      patchInboxQueriesForMessage(qc, conversationId, message, { suppressUnread: true })
+    },
   })
 }
 

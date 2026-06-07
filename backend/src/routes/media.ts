@@ -1,10 +1,13 @@
 import type { FastifyInstance } from 'fastify'
-import { and, eq } from 'drizzle-orm'
+import { and, eq, isNull } from 'drizzle-orm'
 import { z } from 'zod'
 import { db } from '../db/index.js'
-import { messages } from '../db/schema.js'
+import { conversations, messages } from '../db/schema.js'
 import { config } from '../config.js'
 import { errors } from '../utils/errors.js'
+
+/** Presigned GET TTL returned to clients (keep mobile cache refresh inside this window). */
+export const MEDIA_PRESIGN_EXPIRES_SEC = 3600
 
 /** Public CDN base only — never append S3 presigned query params (incompatible with most CDNs). */
 function presignedWithOptionalCdn(presigned: string, key: string): string {
@@ -25,12 +28,21 @@ export async function mediaRoutes(app: FastifyInstance) {
 
     const q = z.object({ messageId: z.string().uuid() }).parse(request.query)
 
-    const row = await db.query.messages.findFirst({
-      where: and(eq(messages.id, q.messageId), eq(messages.mediaUrl, key)),
-    })
-    if (!row) throw errors.forbidden('Media not found for this message.')
+    const row = await db
+      .select({ id: messages.id })
+      .from(messages)
+      .innerJoin(conversations, eq(messages.conversationId, conversations.id))
+      .where(
+        and(
+          eq(messages.id, q.messageId),
+          eq(messages.mediaUrl, key),
+          isNull(conversations.deletedAt),
+        ),
+      )
+      .limit(1)
+    if (row.length === 0) throw errors.forbidden('Media not found for this message.')
 
-    const expiresIn = 3600
+    const expiresIn = MEDIA_PRESIGN_EXPIRES_SEC
     const presigned = await app.s3.getPresignedUrl(key, expiresIn)
     const url = presignedWithOptionalCdn(presigned, key)
     return { url, expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString() }

@@ -52,9 +52,12 @@ export class ObjectStorageService {
       )
       return true
     } catch (err) {
-      const name = (err as { name?: string })?.name
-      if (name === 'NotFound' || name === 'NoSuchKey') return false
-      return false
+      const meta = err as { name?: string; $metadata?: { httpStatusCode?: number } }
+      const status = meta.$metadata?.httpStatusCode
+      if (meta.name === 'NotFound' || meta.name === 'NoSuchKey' || status === 404) {
+        return false
+      }
+      throw err
     }
   }
 

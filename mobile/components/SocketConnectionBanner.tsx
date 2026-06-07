@@ -1,16 +1,16 @@
 import { useEffect, useState } from 'react'
 import { Text, View } from 'react-native'
-import { getSocket } from '@/lib/socket'
+import { connectSocket } from '@/lib/socket'
 import { useAuthStore } from '@/stores/authStore'
 
 /** Was: no UI when socket disconnected — agents see reconnect state. */
 export function SocketConnectionBanner() {
   const accessToken = useAuthStore((s) => s.accessToken)
-  const [connected, setConnected] = useState(true)
+  const [connected, setConnected] = useState(false)
 
   useEffect(() => {
     if (!accessToken) return
-    const socket = getSocket()
+    const socket = connectSocket()
     const sync = () => setConnected(socket.connected)
     sync()
     socket.on('connect', sync)

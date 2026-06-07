@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
-import { getSocket } from '@/lib/socket'
+import { connectSocket } from '@/lib/socket'
 import { useAuthStore } from '@/stores/authStore'
 
 /** Emit typing_start/stop while the agent composes a reply. */
 export function useTypingEmitter(conversationId: string, draft: string) {
   useEffect(() => {
     if (!conversationId) return
-    const socket = getSocket()
+    const socket = connectSocket()
+    if (!socket.connected) return
     const text = draft.trim()
     if (!text) {
       socket.emit('typing_stop', conversationId)
@@ -27,7 +28,7 @@ export function useTypingIndicator(conversationId: string) {
 
   useEffect(() => {
     if (!conversationId) return
-    const socket = getSocket()
+    const socket = connectSocket()
     const onTyping = (payload: {
       conversationId: string
       agentId: string

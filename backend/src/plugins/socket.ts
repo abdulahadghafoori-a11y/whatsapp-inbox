@@ -1,8 +1,9 @@
 import fp from 'fastify-plugin'
 import { Server as SocketIOServer } from 'socket.io'
-import { eq } from 'drizzle-orm'
+import { and, eq, isNull } from 'drizzle-orm'
 import { db } from '../db/index.js'
 import { conversations, teamMembers } from '../db/schema.js'
+import { AppError } from '../utils/errors.js'
 import { assertNotRevoked, type AccessTokenPayload } from '../utils/jwt.js'
 import { corsOrigins } from '../config.js'
 
@@ -28,13 +29,21 @@ export const socketPlugin = fp(async (app) => {
       socket.data.agentId = payload.sub
       socket.data.role = payload.role
       next()
-    } catch {
+    } catch (err) {
+      if (err instanceof AppError && err.code === 'TOKEN_REVOKED') {
+        return next(new Error('TOKEN_REVOKED'))
+      }
       next(new Error('Unauthorized'))
     }
   })
 
   io.on('connection', async (socket) => {
     const agentId = socket.data.agentId as string
+    const member = await db.query.teamMembers.findFirst({
+      where: eq(teamMembers.id, agentId),
+      columns: { name: true },
+    })
+    socket.data.agentName = member?.name ?? 'Agent'
     socket.join(`agent:${agentId}`)
 
     await markPresence(agentId, true)
@@ -49,7 +58,7 @@ export const socketPlugin = fp(async (app) => {
         )
       if (!uuid) return
       const row = await db.query.conversations.findFirst({
-        where: eq(conversations.id, conversationId),
+        where: and(eq(conversations.id, conversationId), isNull(conversations.deletedAt)),
         columns: { id: true },
       })
       if (!row) return
@@ -62,26 +71,23 @@ export const socketPlugin = fp(async (app) => {
       }
     })
 
-    const emitTyping = async (conversationId: string, typing: boolean) => {
+    const emitTyping = (conversationId: string, typing: boolean) => {
       if (typeof conversationId !== 'string') return
-      const member = await db.query.teamMembers.findFirst({
-        where: eq(teamMembers.id, agentId),
-        columns: { name: true },
-      })
+      if (!socket.rooms.has(`conversation:${conversationId}`)) return
       socket.to(`conversation:${conversationId}`).emit('typing_indicator', {
         conversationId,
         agentId,
-        agentName: member?.name ?? 'Agent',
+        agentName: (socket.data.agentName as string) ?? 'Agent',
         typing,
       })
     }
 
     socket.on('typing_start', (conversationId: string) => {
-      void emitTyping(conversationId, true)
+      emitTyping(conversationId, true)
     })
 
     socket.on('typing_stop', (conversationId: string) => {
-      void emitTyping(conversationId, false)
+      emitTyping(conversationId, false)
     })
 
     // Optional heartbeat to refine presence (see plan: optional for v1).

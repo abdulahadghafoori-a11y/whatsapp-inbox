@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, type ComponentProps } from 'react'
 import { View, Text, Pressable } from 'react-native'
 import { Ionicons } from '@expo/vector-icons'
 import { formatTime } from '@/lib/format'
@@ -113,4 +113,16 @@ function ConversationItemBase({
   )
 }
 
-export const ConversationItem = memo(ConversationItemBase)
+function conversationItemEqual(
+  prev: ComponentProps<typeof ConversationItemBase>,
+  next: ComponentProps<typeof ConversationItemBase>,
+) {
+  return (
+    prev.conversation === next.conversation &&
+    prev.selected === next.selected &&
+    prev.onPress === next.onPress &&
+    prev.onLongPress === next.onLongPress
+  )
+}
+
+export const ConversationItem = memo(ConversationItemBase, conversationItemEqual)

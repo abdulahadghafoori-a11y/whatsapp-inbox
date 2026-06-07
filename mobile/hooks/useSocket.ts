@@ -6,6 +6,7 @@ import {
   patchConversationUnreadCount,
 } from '@/hooks/useConversations'
 import { normalizeConversation } from '@/lib/conversation'
+import { patchInboxForNewMessage } from '@/lib/inboxCachePatch'
 import { normalizeMessage } from '@/lib/normalizeMessage'
 import {
   type MessagesInfinite,
@@ -17,7 +18,7 @@ import {
   patchMessagesStatusInfinite,
   upsertMessageInfinite,
 } from '@/lib/messagesQueryCache'
-import { syncMessageMedia } from '@/lib/messageMediaSync'
+import { queueMessageMediaSync } from '@/lib/messageMediaSync'
 import { normalizeMessageStatus } from '@/lib/messageStatus'
 import {
   getActiveConversationId,
@@ -46,12 +47,6 @@ type MessageStatusPayload = {
   errorMessage?: string | null
 }
 
-function messagePreview(message: Message): string {
-  if (message.type === 'text') return (message.body ?? '').slice(0, 120)
-  return `[${message.type}]`
-}
-
-
 type MessagingPatch = Partial<
   Pick<
     ConversationListItem,
@@ -66,43 +61,6 @@ type MessagingPatch = Partial<
     | 'needsTemplateForReply'
   >
 >
-
-function patchInboxForNewMessage(
-  old: InfiniteData<ConversationsResponse> | undefined,
-  conversationId: string,
-  message: Message,
-  messaging?: MessagingPatch,
-  suppressUnread = false,
-): InfiniteData<ConversationsResponse> | undefined {
-  if (!old) return old
-
-  let updated: ConversationListItem | undefined
-  const pages = old.pages.map((page, pageIndex) => {
-    const rest = page.conversations.filter((c) => {
-      if (c.id !== conversationId) return true
-      const bumpUnread = message.direction === 'inbound' && !suppressUnread
-      updated = normalizeConversation({
-        ...c,
-        lastMessageAt: message.sentAt,
-        lastMessagePreview: messagePreview(message),
-        lastMessageId: message.id,
-        lastMessageDirection: message.direction,
-        lastMessageStatus: message.status,
-        lastMessageType: message.type,
-        unreadCount: bumpUnread ? c.unreadCount + 1 : c.unreadCount,
-        ...(messaging ?? {}),
-      })
-      return false
-    })
-    if (!updated) return page
-    if (pageIndex === 0) {
-      return { ...page, conversations: [updated, ...rest] }
-    }
-    return { ...page, conversations: rest }
-  })
-
-  return updated ? { ...old, pages } : old
-}
 
 /**
  * App-level socket lifecycle + cache wiring.
@@ -152,9 +110,15 @@ export function useSocketSync() {
       )
 
       const hasMessaging =
-        messaging.fepExpiresAt != null ||
         messaging.windowExpiresAt != null ||
-        messaging.isFepOpen === true
+        messaging.fepExpiresAt != null ||
+        messaging.ctwaStartedAt != null ||
+        messaging.isWindowOpen != null ||
+        messaging.isFepOpen != null ||
+        messaging.isCtwaLead != null ||
+        messaging.canSendSession != null ||
+        messaging.canSendTemplate != null ||
+        messaging.needsTemplateForReply != null
 
       if (hasMessaging) {
         queryClient.setQueryData<ConversationDetail>(
@@ -165,13 +129,24 @@ export function useSocketSync() {
 
       // Don't bump the unread badge for a chat the agent is currently viewing.
       const suppressUnread = getActiveConversationId() === conversationId
+      let inboxFound = false
       queryClient.setQueriesData<InfiniteData<ConversationsResponse>>(
         { queryKey: ['conversations'] },
-        (old) => patchInboxForNewMessage(old, conversationId, message, messaging, suppressUnread),
+        (old) => {
+          const result = patchInboxForNewMessage(old, conversationId, normalized, {
+            messaging,
+            suppressUnread,
+          })
+          inboxFound = inboxFound || result.found
+          return result.data
+        },
       )
+      if (!inboxFound) {
+        void queryClient.invalidateQueries({ queryKey: ['conversations'] })
+      }
 
       if (normalized.mediaUrl || normalized.localPreviewUri) {
-        void syncMessageMedia(normalized)
+        queueMessageMediaSync(normalized)
       }
     }
 
@@ -236,7 +211,9 @@ export function useSocketSync() {
       if (conversationId) {
         const data = queryClient.getQueryData<MessagesInfinite>(['messages', conversationId])
         const msg = flattenMessagesPages(data).find((m) => m.id === messageId)
-        if (msg) void syncMessageMedia({ ...msg, mediaUrl, mediaStatus: 'uploaded' })
+        if (msg) {
+          queueMessageMediaSync({ ...msg, mediaUrl, mediaStatus: 'uploaded' })
+        }
       }
     }
 
@@ -247,14 +224,16 @@ export function useSocketSync() {
       conversationId?: string
       messageId: string
     }) => {
-      const patch = (old: MessagesInfinite | undefined) =>
-        patchMessageMediaInfinite(old, messageId, { mediaUrl: null, mediaStatus: 'failed' })
+      const patch = (old: unknown) =>
+        coerceAndPatchMessagesInfinite(old, (data) =>
+          patchMessageMediaInfinite(data, messageId, {
+            mediaUrl: null,
+            mediaStatus: 'failed',
+          }),
+        )
 
       if (conversationId) {
-        queryClient.setQueryData<MessagesInfinite>(
-          ['messages', conversationId],
-          patch,
-        )
+        queryClient.setQueryData(['messages', conversationId], patch)
       } else {
         queryClient.setQueriesData<MessagesInfinite>({ queryKey: ['messages'] }, patch)
       }
@@ -376,11 +355,17 @@ export function useSocketSync() {
 export function useConversationRoom(conversationId: string | undefined) {
   useEffect(() => {
     if (!conversationId) return
-    const socket = getSocket()
-    socket.emit('join_conversation', conversationId)
+    const socket = connectSocket()
+    const join = () => socket.emit('join_conversation', conversationId)
+    const leave = () => socket.emit('leave_conversation', conversationId)
+
     setActiveConversationId(conversationId)
+    if (socket.connected) join()
+    else socket.on('connect', join)
+
     return () => {
-      socket.emit('leave_conversation', conversationId)
+      socket.off('connect', join)
+      leave()
       setActiveConversationId(null)
     }
   }, [conversationId])

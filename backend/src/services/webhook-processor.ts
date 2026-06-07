@@ -327,7 +327,8 @@ async function handleMessages(app: FastifyInstance, value: WaChangeValue): Promi
         .update(conversations)
         .set({
           windowExpiresAt,
-          lastMessageAt: new Date(),
+          // Use the message timestamp — Meta retries must not bump the chat with wall-clock now().
+          lastMessageAt: inboundAt,
           ...(isCtwaInbound && !conversation.ctwaStartedAt
             ? { ctwaStartedAt: inboundAt }
             : {}),
@@ -364,7 +365,7 @@ async function handleMessages(app: FastifyInstance, value: WaChangeValue): Promi
       .set({
         windowExpiresAt,
         status: wasResolved ? 'open' : conversation.status,
-        lastMessageAt: new Date(),
+        lastMessageAt: inboundAt,
         lastMessagePreview: getPreview(msg),
         ...conversationPreviewFromMessage(message),
         unreadCount: sql`${conversations.unreadCount} + 1`,

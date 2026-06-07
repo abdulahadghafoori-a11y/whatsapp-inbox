@@ -20,6 +20,24 @@ const client = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY })
 
 const DEFAULT_MODEL = 'claude-haiku-4-5-20251001'
 
+/** Returns the escalation reason when the model emitted ESCALATE:, otherwise null. */
+export function parseEscalationSignal(replyText: string): string | null {
+  const trimmed = replyText.trim()
+  const match = /^ESCALATE:\s*(.*)$/is.exec(trimmed)
+  if (!match) return null
+  const reason = match[1]?.trim()
+  return reason || 'Escalation requested'
+}
+
+async function inboundAwaitingReply(conversationId: string): Promise<boolean> {
+  const latest = await db.query.messages.findFirst({
+    where: eq(messages.conversationId, conversationId),
+    orderBy: desc(messages.sentAt),
+    columns: { direction: true },
+  })
+  return !!latest && latest.direction === 'inbound'
+}
+
 /**
  * Hands an AI-owned conversation back to a human: clears assignment, locks out
  * further AI routing, records an audit event, and re-routes to a human agent.
@@ -101,9 +119,8 @@ export async function processAIAgentReply(
     limit: 15,
   })
 
-  // Coalesce duplicate jobs: if the latest message is already an AI/outbound
-  // reply, the pending inbound has been answered — nothing to do.
-  if (recent.length > 0 && recent[0].direction === 'outbound') {
+  // Coalesce duplicate jobs: if the latest message is already outbound, nothing to do.
+  if (!(await inboundAwaitingReply(job.conversationId))) {
     log.debug({ conversationId: job.conversationId }, 'ai reply skipped; already answered')
     return
   }
@@ -162,9 +179,9 @@ respond with exactly: ESCALATE:<reason>`
     return
   }
 
-  if (replyText.startsWith('ESCALATE:')) {
-    const reason = replyText.replace('ESCALATE:', '').trim()
-    await escalateToHuman(io, log, job.conversationId, job.agentId, reason)
+  const escalationReason = parseEscalationSignal(replyText)
+  if (escalationReason) {
+    await escalateToHuman(io, log, job.conversationId, job.agentId, escalationReason)
     return
   }
 
@@ -175,10 +192,26 @@ respond with exactly: ESCALATE:<reason>`
     return
   }
 
+  // Re-check after the LLM round-trip — concurrent jobs may have already replied.
+  const fresh = await db.query.conversations.findFirst({
+    where: eq(conversations.id, job.conversationId),
+    with: { contact: true },
+  })
+  if (
+    !fresh?.contact ||
+    fresh.assignedTo !== job.agentId ||
+    fresh.routingLock === 'human_only' ||
+    !isCustomerServiceWindowOpen(fresh.windowExpiresAt) ||
+    !(await inboundAwaitingReply(job.conversationId))
+  ) {
+    log.info({ conversationId: job.conversationId }, 'ai reply skipped; state changed during generation')
+    return
+  }
+
   await createOutboundText(io, {
     conversationId: job.conversationId,
-    to: conversation.contact.waId,
-    body: replyText,
+    to: fresh.contact.waId,
+    body: replyText.trim(),
     sentBy: job.agentId,
   })
 }

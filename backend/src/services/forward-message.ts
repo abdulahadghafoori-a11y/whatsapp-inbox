@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify'
-import { eq } from 'drizzle-orm'
+import { and, eq, isNull } from 'drizzle-orm'
 import { db } from '../db/index.js'
 import { conversations, messages } from '../db/schema.js'
 import { errors } from '../utils/errors.js'
@@ -25,7 +25,10 @@ export async function forwardMessageToConversation(
   }
 
   const target = await db.query.conversations.findFirst({
-    where: eq(conversations.id, opts.targetConversationId),
+    where: and(
+      eq(conversations.id, opts.targetConversationId),
+      isNull(conversations.deletedAt),
+    ),
     with: { contact: true },
   })
   if (!target?.contact) throw errors.conversationNotFound()

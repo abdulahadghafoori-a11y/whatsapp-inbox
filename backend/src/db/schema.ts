@@ -1,4 +1,4 @@
-import { relations } from 'drizzle-orm'
+import { relations, sql } from 'drizzle-orm'
 import {
   pgTable,
   uuid,
@@ -11,21 +11,29 @@ import {
   uniqueIndex,
 } from 'drizzle-orm/pg-core'
 
-export const teamMembers = pgTable('team_members', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  name: text('name').notNull(),
-  email: text('email').unique().notNull(),
-  // Nullable: ai_agent rows do not log in.
-  passwordHash: text('password_hash'),
-  avatarUrl: text('avatar_url'),
-  role: text('role').notNull().default('agent'), // admin | agent | ai_agent
-  agentConfig: jsonb('agent_config'), // ai_agent: { model, systemPrompt, temperature }
-  isOnline: boolean('is_online').notNull().default(false),
-  lastSeenAt: timestamp('last_seen_at', { withTimezone: true }),
-  expoPushToken: text('expo_push_token'),
-  tokenRevokedAt: timestamp('token_revoked_at', { withTimezone: true }),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-})
+export const teamMembers = pgTable(
+  'team_members',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    name: text('name').notNull(),
+    email: text('email').unique().notNull(),
+    // Nullable: ai_agent rows do not log in.
+    passwordHash: text('password_hash'),
+    avatarUrl: text('avatar_url'),
+    role: text('role').notNull().default('agent'), // admin | agent | ai_agent
+    agentConfig: jsonb('agent_config'), // ai_agent: { model, systemPrompt, temperature }
+    isOnline: boolean('is_online').notNull().default(false),
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }),
+    expoPushToken: text('expo_push_token'),
+    tokenRevokedAt: timestamp('token_revoked_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    agentOnlineIdx: index('idx_team_members_agent_online')
+      .on(t.isOnline)
+      .where(sql`${t.role} = 'agent'`),
+  }),
+)
 
 export const refreshTokens = pgTable(
   'refresh_tokens',
@@ -150,7 +158,14 @@ export const messages = pgTable(
   (t) => ({
     conversationIdx: index('idx_messages_conversation_id').on(t.conversationId),
     sentAtIdx: index('idx_messages_sent_at').on(t.sentAt),
+    conversationSentAtIdx: index('idx_messages_conversation_sent_at').on(
+      t.conversationId,
+      t.sentAt,
+    ),
     waMessageIdIdx: index('idx_messages_wa_message_id').on(t.waMessageId),
+    mediaUrlIdx: index('idx_messages_media_url')
+      .on(t.mediaUrl)
+      .where(sql`${t.mediaUrl} is not null`),
   }),
 )
 
@@ -190,6 +205,9 @@ export const webhookEvents = pgTable(
   },
   (t) => ({
     receivedAtIdx: index('idx_webhook_events_received_at').on(t.receivedAt),
+    unprocessedIdx: index('idx_webhook_events_unprocessed')
+      .on(t.processedAt)
+      .where(sql`${t.processedAt} is null`),
   }),
 )
 

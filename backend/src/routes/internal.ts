@@ -10,10 +10,20 @@ import {
   emitMessageStatus,
   emitMessageUpdated,
   emitNewMessage,
+  type MessageStatusSocketPayload,
 } from '../services/socket-events.js'
 import type { Message } from '../db/schema.js'
 import type { ShapedMessage } from '../utils/message-shape.js'
 import { secureCompareStrings } from '../utils/secure-compare.js'
+
+const messageStatusPayloadSchema = z.object({
+  conversationId: z.string().uuid(),
+  messageId: z.string().uuid().optional(),
+  waMessageId: z.string().optional(),
+  status: z.string(),
+  scope: z.enum(['inbound', 'outbound']).optional(),
+  errorMessage: z.string().nullish(),
+})
 
 const emitBody = z.discriminatedUnion('type', [
   z.object({
@@ -35,7 +45,7 @@ const emitBody = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('message_status'),
-    payload: z.record(z.unknown()),
+    payload: messageStatusPayloadSchema,
   }),
   z.object({
     type: z.literal('message_updated'),
@@ -86,7 +96,7 @@ export async function internalRoutes(app: FastifyInstance) {
         emitMediaFailed(app.io, body.conversationId, body.messageId)
         break
       case 'message_status':
-        emitMessageStatus(app.io, body.payload as Parameters<typeof emitMessageStatus>[1])
+        emitMessageStatus(app.io, body.payload as MessageStatusSocketPayload)
         break
       case 'message_updated':
         emitMessageUpdated(

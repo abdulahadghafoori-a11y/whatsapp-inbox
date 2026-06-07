@@ -13,7 +13,8 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { StatusBar } from 'expo-status-bar'
 import { useColorScheme } from 'nativewind'
 import { Ionicons } from '@expo/vector-icons'
-import { api, apiErrorMessage } from '@/services/api'
+import axios from 'axios'
+import { API_BASE_URL, apiErrorMessage } from '@/services/api'
 import { useAuthStore } from '@/stores/authStore'
 import { registerForPushNotifications } from '@/lib/push'
 import { useToast } from '@/components/Toast'
@@ -53,13 +54,19 @@ export default function LoginScreen() {
     if (!canSubmit) return
     setLoading(true)
     try {
-      const res = await api.post<AuthResponse>('/auth/login', {
-        email: email.trim().toLowerCase(),
-        password,
-      })
+      // Bare client — must not run the 401 refresh interceptor (stale refresh
+      // tokens in storage could restore the old session on a failed login).
+      const res = await axios.post<AuthResponse>(
+        `${API_BASE_URL}/api/auth/login`,
+        { email: email.trim().toLowerCase(), password },
+        { timeout: 20_000 },
+      )
       hapticSuccess()
       await setSession(res.data.accessToken, res.data.refreshToken, res.data.agent)
-      void registerForPushNotifications()
+      const { getNotificationsEnabled } = await import('@/lib/notificationPrefs')
+      if (await getNotificationsEnabled()) {
+        void registerForPushNotifications()
+      }
     } catch (err) {
       hapticError()
       toast.show(apiErrorMessage(err), 'error')

@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify'
 import { config } from '../config.js'
 import { db } from '../db/index.js'
 import { jobs, messages, type Job } from '../db/schema.js'
+import { metadataWithoutSendInFlight } from '../services/outbound.js'
 import { whatsapp } from '../services/whatsapp.js'
 import { processDownloadMedia } from '../services/media-processor.js'
 import { processAIAgentReply } from '../services/ai-agent.js'
@@ -15,7 +16,8 @@ import { captureException } from '../utils/observability.js'
 const POLL_INTERVAL_MS = 5000
 const BATCH_SIZE = 10
 const DOWNLOAD_MEDIA_CONCURRENCY = 5
-const STALE_PROCESSING_MIN = 2
+/** Long enough for deferred WA media upload + large inbound downloads. */
+const STALE_PROCESSING_MIN = 15
 const WORKER_ID = randomUUID()
 
 let lastPollAt = 0
@@ -23,7 +25,7 @@ let lastPollAt = 0
 export const jobProcessorHeartbeat = () => lastPollAt
 
 /** Backoff per attempt number (after increment): 1m, 5m, 30m. */
-function backoffMinutes(attempts: number): number {
+export function jobBackoffMinutes(attempts: number): number {
   if (attempts <= 1) return 1
   if (attempts === 2) return 5
   return 30
@@ -43,13 +45,22 @@ export function startJobProcessor(app: FastifyInstance): () => void {
   }, POLL_INTERVAL_MS)
 
   app.log.info({ workerId: WORKER_ID }, 'job processor started')
+  void processNextBatch(app)
+    .catch((err) => app.log.error({ err }, 'initial job batch failed'))
+    .finally(() => {
+      lastPollAt = Date.now()
+    })
   return () => clearInterval(timer)
 }
 
 async function processNextBatch(app: FastifyInstance): Promise<void> {
   // Recover jobs orphaned by a crashed worker.
   await db.execute(sql`
-    UPDATE jobs SET status = 'pending', updated_at = NOW()
+    UPDATE jobs
+    SET status = 'pending',
+        locked_at = NULL,
+        locked_by = NULL,
+        updated_at = NOW()
     WHERE status = 'processing'
       AND locked_at < NOW() - (${STALE_PROCESSING_MIN} * INTERVAL '1 minute')
   `)
@@ -64,7 +75,7 @@ async function processNextBatch(app: FastifyInstance): Promise<void> {
         updated_at = NOW()
     WHERE id IN (
       SELECT id FROM jobs
-      WHERE status IN ('pending', 'failed')
+      WHERE status = 'pending'
         AND next_retry_at <= NOW()
         AND attempts < max_attempts
       ORDER BY next_retry_at ASC
@@ -94,7 +105,14 @@ async function runJob(app: FastifyInstance, job: Job): Promise<void> {
     await dispatch(app, job)
     await db
       .update(jobs)
-      .set({ status: 'done', completedAt: new Date(), updatedAt: new Date(), lastError: null })
+      .set({
+        status: 'done',
+        completedAt: new Date(),
+        updatedAt: new Date(),
+        lastError: null,
+        lockedAt: null,
+        lockedBy: null,
+      })
       .where(eq(jobs.id, job.id))
     log.debug('job done')
   } catch (err) {
@@ -104,9 +122,11 @@ async function runJob(app: FastifyInstance, job: Job): Promise<void> {
       .update(jobs)
       .set({
         status: exhausted ? 'failed' : 'pending',
-        nextRetryAt: new Date(Date.now() + backoffMinutes(job.attempts) * 60_000),
+        nextRetryAt: new Date(Date.now() + jobBackoffMinutes(job.attempts) * 60_000),
         lastError: message,
         updatedAt: new Date(),
+        lockedAt: null,
+        lockedBy: null,
       })
       .where(eq(jobs.id, job.id))
 
@@ -213,11 +233,18 @@ async function handleSendMessage(
       result = await whatsapp.sendTextMessage(app.log, p.to, p.body ?? '', {
         replyToWaMessageId: p.replyToWaMessageId,
       })
-    } else if (p.type === 'location' && p.location) {
+    } else if (p.type === 'location') {
+      if (!p.location) throw new Error('Location payload required for location send')
       result = await whatsapp.sendLocationMessage(app.log, p.to, p.location, {
         replyToWaMessageId: p.replyToWaMessageId,
       })
-    } else {
+    } else if (
+      p.type === 'image' ||
+      p.type === 'video' ||
+      p.type === 'audio' ||
+      p.type === 'document' ||
+      p.type === 'sticker'
+    ) {
       let mediaId = p.mediaId
       if (!mediaId) {
         const s3Key = p.s3Key
@@ -257,6 +284,8 @@ async function handleSendMessage(
         p.caption,
         mediaOpts,
       )
+    } else {
+      throw new Error(`Unsupported send job message type: ${p.type}`)
     }
 
     if (!result.message_id?.trim()) {
@@ -296,9 +325,17 @@ async function onPermanentFailure(app: FastifyInstance, job: Job): Promise<void>
   }
   if (job.type === 'send_whatsapp_message') {
     const p = job.payload as JobPayloads['send_whatsapp_message']
+    const row = await db.query.messages.findFirst({
+      where: eq(messages.id, p.messageId),
+      columns: { metadata: true },
+    })
     await db
       .update(messages)
-      .set({ status: 'failed', errorMessage: job.lastError })
+      .set({
+        status: 'failed',
+        errorMessage: job.lastError,
+        metadata: metadataWithoutSendInFlight(row?.metadata ?? null),
+      })
       .where(eq(messages.id, p.messageId))
     emitMessageStatus(app.io, {
       conversationId: p.conversationId,

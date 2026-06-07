@@ -166,7 +166,6 @@ async function doFlushMediaQueue(): Promise<{ sent: number; failed: number }> {
 
   await saveMediaQueue(remaining)
   if (sent > 0) {
-    await queryClient.invalidateQueries({ queryKey: ['messages'] })
     await queryClient.invalidateQueries({ queryKey: ['conversations'] })
   }
   return { sent, failed }

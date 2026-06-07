@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import {
   View,
   Text,
@@ -17,6 +17,7 @@ import Animated, {
 } from 'react-native-reanimated'
 import { useColorScheme } from 'nativewind'
 import { useGlobalAudioStore } from '@/stores/globalAudioStore'
+import { useAudioPlayerState } from '@/hooks/useAudioPlayerState'
 import { useAudioDuration } from '@/hooks/useAudioDuration'
 import { getAudioDuration } from '@/lib/audioDurationCache'
 import { resolveUploadUri } from '@/lib/uploadUri'
@@ -115,7 +116,7 @@ function AvatarSpeedSlot({
   )
 }
 
-export function AudioPlayer({
+function AudioPlayerBase({
   uri,
   messageId,
   conversationId,
@@ -136,18 +137,21 @@ export function AudioPlayer({
   avatarName?: string
   avatarUrl?: string | null
 }) {
-  const track = useGlobalAudioStore((s) => s.track)
-  const engagedSession = useGlobalAudioStore((s) => s.engagedSession)
-  const wantPlaying = useGlobalAudioStore((s) => s.wantPlaying)
-  const playback = useGlobalAudioStore((s) => s.playback)
+  const {
+    isActive,
+    isPlaying,
+    showSpeedSlot,
+    loading: storeLoading,
+    positionMs: storePositionMs,
+    durationMs: storeDurationMs,
+    session,
+  } = useAudioPlayerState(messageId)
   const toggle = useGlobalAudioStore((s) => s.toggle)
   const pause = useGlobalAudioStore((s) => s.pause)
   const seekRatio = useGlobalAudioStore((s) => s.seekRatio)
   const registerTrackResolver = useGlobalAudioStore((s) => s.registerTrackResolver)
   const unregisterTrackResolver = useGlobalAudioStore((s) => s.unregisterTrackResolver)
 
-  const session = engagedSession?.messageId === messageId ? engagedSession : null
-  const isActive = track?.messageId === messageId
   const probedDurationMs = useAudioDuration(uri, messageId, !isActive)
 
   const trackRef = useRef<View>(null)
@@ -168,29 +172,16 @@ export function AudioPlayer({
   const micBorderColor = outbound ? '#005c4b' : isDark ? '#202c33' : '#ffffff'
 
   const durationMs =
-    session?.durationMs ||
-    (isActive ? playback.durationMs : 0) ||
-    probedDurationMs ||
-    getAudioDuration(messageId)
+    storeDurationMs || probedDurationMs || getAudioDuration(messageId)
 
-  const positionMs = scrubbing
-    ? scrubRatio * durationMs
-    : session
-      ? isActive
-        ? playback.positionMs
-        : session.positionMs
-      : isActive
-        ? playback.positionMs
-        : 0
+  const positionMs = scrubbing ? scrubRatio * durationMs : storePositionMs
 
-  const isPlaying = isActive && (wantPlaying || playback.isPlaying)
-  const showSpeedSlot = isActive && (wantPlaying || playback.isPlaying || playback.isLoaded)
-  const loading = resolving || (isActive && wantPlaying && !playback.isLoaded)
+  const loading = resolving || storeLoading
 
   durationMsRef.current = durationMs
 
   useEffect(() => {
-    if (!isActive || !wantPlaying || playback.isLoaded) return
+    if (!storeLoading) return
     const timer = setTimeout(() => {
       const state = useGlobalAudioStore.getState()
       if (state.track?.messageId !== messageId) return
@@ -198,7 +189,7 @@ export function AudioPlayer({
       state.pause()
     }, 12_000)
     return () => clearTimeout(timer)
-  }, [isActive, wantPlaying, playback.isLoaded, messageId])
+  }, [storeLoading, messageId])
 
   const playbackProgress = durationMs > 0 ? positionMs / durationMs : 0
   const displayProgress = scrubbing ? scrubRatio : playbackProgress
@@ -464,3 +455,5 @@ const styles = StyleSheet.create({
     fontVariant: ['tabular-nums'],
   },
 })
+
+export const AudioPlayer = memo(AudioPlayerBase)

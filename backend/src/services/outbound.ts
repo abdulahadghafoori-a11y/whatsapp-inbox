@@ -196,6 +196,11 @@ export async function createOutboundTemplate(
       type: 'text',
       body: `[template: ${args.templateName}]`,
       status: 'pending',
+      metadata: {
+        templateName: args.templateName,
+        languageCode: args.languageCode,
+        ...(args.components ? { components: args.components } : {}),
+      },
     })
     .returning()
 
@@ -213,6 +218,23 @@ export async function createOutboundTemplate(
   return message
 }
 
+/** Strip the send-job in-flight marker so a failed message can be retried. */
+export function metadataWithoutSendInFlight(metadata: unknown): Record<string, unknown> | null {
+  if (!metadata || typeof metadata !== 'object') return null
+  const { sendInFlightAt: _ignored, ...rest } = metadata as Record<string, unknown>
+  return Object.keys(rest).length > 0 ? rest : null
+}
+
+async function replyWaIdForMessage(message: Message): Promise<string | undefined> {
+  if (!message.replyToMessageId) return undefined
+  const parent = await db.query.messages.findFirst({
+    where: eq(messages.id, message.replyToMessageId),
+    columns: { waMessageId: true, conversationId: true },
+  })
+  if (!parent || parent.conversationId !== message.conversationId) return undefined
+  return parent.waMessageId ?? undefined
+}
+
 /** Re-queue a failed outbound message for WhatsApp delivery. */
 export async function resendOutboundMessage(
   io: SocketIOServer,
@@ -220,19 +242,67 @@ export async function resendOutboundMessage(
   to: string,
   opts: { mediaId?: string; s3Key?: string; voiceNote?: boolean },
 ): Promise<Message> {
+  const cleanedMetadata = metadataWithoutSendInFlight(message.metadata)
+  const replyToWaMessageId = await replyWaIdForMessage(message)
+
   const [updated] = await db
     .update(messages)
-    .set({ status: 'pending', errorMessage: null })
+    .set({
+      status: 'pending',
+      errorMessage: null,
+      metadata: cleanedMetadata,
+    })
     .where(eq(messages.id, message.id))
     .returning()
 
   if (message.type === 'text') {
+    const templateMeta = cleanedMetadata as {
+      templateName?: string
+      languageCode?: string
+      components?: unknown[]
+    } | null
+    if (templateMeta?.templateName && templateMeta?.languageCode) {
+      await enqueueJob('send_whatsapp_message', {
+        to,
+        type: 'template',
+        conversationId: message.conversationId,
+        messageId: message.id,
+        templateName: templateMeta.templateName,
+        languageCode: templateMeta.languageCode,
+        components: templateMeta.components,
+      })
+    } else {
+      await enqueueJob('send_whatsapp_message', {
+        to,
+        type: 'text',
+        conversationId: message.conversationId,
+        messageId: message.id,
+        body: message.body ?? '',
+        replyToWaMessageId,
+      })
+    }
+  } else if (message.type === 'location') {
+    const loc = cleanedMetadata as {
+      latitude?: number
+      longitude?: number
+      name?: string
+      address?: string
+    } | null
+    if (typeof loc?.latitude !== 'number' || typeof loc?.longitude !== 'number') {
+      throw new Error('Location metadata missing for resend')
+    }
     await enqueueJob('send_whatsapp_message', {
       to,
-      type: 'text',
+      type: 'location',
       conversationId: message.conversationId,
       messageId: message.id,
-      body: message.body ?? '',
+      location: {
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+        name: loc.name,
+        address: loc.address,
+      },
+      replyToWaMessageId,
     })
   } else {
     if (!opts.mediaId && !opts.s3Key) throw new Error('mediaId or s3Key required to resend')
@@ -245,6 +315,7 @@ export async function resendOutboundMessage(
       ...(opts.mediaId ? { mediaId: opts.mediaId } : { s3Key: opts.s3Key! }),
       caption: message.body ?? undefined,
       voiceNote: opts.voiceNote,
+      replyToWaMessageId,
     })
   }
 

@@ -3,6 +3,7 @@ import Constants from 'expo-constants'
 import * as Notifications from 'expo-notifications'
 import * as Device from 'expo-device'
 import { api } from '@/services/api'
+import { getActiveConversationId } from '@/lib/activeConversation'
 
 /** All-zeros UUID is the repo placeholder — treat as "not configured". */
 const PLACEHOLDER_PROJECT_ID = '00000000-0000-0000-0000-000000000000'
@@ -17,13 +18,18 @@ function resolveExpoProjectId(): string | undefined {
 }
 
 Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: true,
-    shouldSetBadge: true,
-    shouldShowBanner: true,
-    shouldShowList: true,
-  }),
+  handleNotification: async (notification) => {
+    const conversationId = notification.request.content.data?.conversationId
+    const suppress =
+      typeof conversationId === 'string' && getActiveConversationId() === conversationId
+    return {
+      shouldShowAlert: !suppress,
+      shouldPlaySound: !suppress,
+      shouldSetBadge: !suppress,
+      shouldShowBanner: !suppress,
+      shouldShowList: !suppress,
+    }
+  },
 })
 
 /**

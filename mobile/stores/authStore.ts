@@ -23,18 +23,20 @@ export const useAuthStore = create<AuthState>((set) => ({
   async hydrate() {
     try {
       const { accessToken, refreshToken } = await tokenStorage.get()
-      if (!accessToken) {
-        set({ accessToken: null, refreshToken, agent: null, hydrated: true })
+      if (!accessToken && !refreshToken) {
+        set({ accessToken: null, refreshToken: null, agent: null, hydrated: true })
         return
       }
       set({ accessToken, refreshToken, hydrated: true })
-      // Was: agent null after cold start — fetch profile when tokens exist.
       try {
-        const { api } = await import('@/services/api')
+        const { api, ensureAccessTokenFresh } = await import('@/services/api')
+        if (!accessToken && refreshToken) {
+          await ensureAccessTokenFresh(0)
+        }
         const res = await api.get<{ agent: Agent }>('/auth/me')
         set({ agent: res.data.agent })
       } catch {
-        /* tokens may be expired; interceptor handles refresh/logout */
+        /* interceptor may refresh or clear the session */
       }
     } catch {
       set({ hydrated: true })
@@ -52,6 +54,12 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   async clear() {
+    try {
+      const { clearPushRegistration } = await import('@/lib/push')
+      await clearPushRegistration()
+    } catch {
+      /* best-effort; token may already be invalid */
+    }
     await tokenStorage.clear()
     set({ accessToken: null, refreshToken: null, agent: null })
     // Wipe all on-device data so the next agent on this device can't see the
