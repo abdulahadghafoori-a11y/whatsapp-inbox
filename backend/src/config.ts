@@ -54,8 +54,11 @@ const envSchema = z.object({
   SENTRY_DSN: z.string().optional(),
 
   // Dev only: accept POST /api/webhook/whatsapp without x-hub-signature-256 (e.g. Chakra relay).
-  // Must stay false in production — Meta always sends the signature header.
+  // Must stay false in production — use CHAKRA_WEBHOOK_HMAC_SECRET for Chakra instead.
   WEBHOOK_SKIP_SIGNATURE: booleanish,
+
+  /** HMAC secret from Chakra Admin → Team → Secrets (X-Chakra-Signature-256). */
+  CHAKRA_WEBHOOK_HMAC_SECRET: z.string().min(8).optional(),
 
   // Allow skipping external integration validation during local typecheck/tests.
   SKIP_ENV_VALIDATION: booleanish,
@@ -113,6 +116,7 @@ function loadConfig(): AppConfig {
       AI_ROUTING_FRACTION: Number(process.env.AI_ROUTING_FRACTION ?? 0.1),
       SENTRY_DSN: process.env.SENTRY_DSN,
       WEBHOOK_SKIP_SIGNATURE: process.env.WEBHOOK_SKIP_SIGNATURE === 'true',
+      CHAKRA_WEBHOOK_HMAC_SECRET: process.env.CHAKRA_WEBHOOK_HMAC_SECRET,
       SKIP_ENV_VALIDATION: true,
       WHATSAPP_MEDIA_DNS_SERVERS: ['8.8.8.8', '1.1.1.1'],
     }

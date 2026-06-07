@@ -93,15 +93,27 @@ cd infra\cloudflared
 
 DNS for `inbox.afghanonline.store` is routed via `cloudflared tunnel route dns chakra-dev inbox.afghanonline.store`.
 
-### Chakra Chat (testing relay)
+### Chakra Chat (relay)
 
-Chakra does **not** send Meta’s `x-hub-signature-256` header. For local testing set in `backend/.env`:
+Chakra does **not** send Meta’s `x-hub-signature-256` header. It signs with
+`X-Chakra-Signature-256` (HMAC-SHA256 of the raw body, hex digest **without**
+`sha256=` prefix) using a team secret from Chakra Admin → Team → Secrets.
+
+**Production / stable tunnel:** set in `backend/.env` (and Render env):
+
+```env
+WEBHOOK_SKIP_SIGNATURE=false
+CHAKRA_WEBHOOK_HMAC_SECRET=<your-chakra-team-hmac-secret>
+```
+
+**Local dev only** (unsigned pass-through):
 
 ```env
 WEBHOOK_SKIP_SIGNATURE=true
 ```
 
-Restart the API. **Turn this off** (`false`) when you switch to Meta Cloud API webhooks directly.
+Restart the API after changing env. Use Meta’s direct webhook + `WHATSAPP_APP_SECRET`
+when you no longer relay through Chakra.
 
 The inbox still expects the **Meta webhook JSON shape** (`entry[].changes[].value.messages`). If Chakra sends a different format, you’ll get `200` but no new conversations until the payload matches or an adapter is added.
 

@@ -52,9 +52,11 @@ Server listens on `PORT` (default 3001).
 ## Webhook
 
 - `GET  /api/webhook/whatsapp` — Meta verification handshake (`hub.challenge`).
-- `POST /api/webhook/whatsapp` — verifies `x-hub-signature-256` over the **raw**
-  body, acks `200` immediately, then processes asynchronously. Inbound messages
-  are deduplicated on `wa_message_id` (idempotent under Meta retries).
+- `POST /api/webhook/whatsapp` — verifies signature over the **raw** body
+  (`x-hub-signature-256` from Meta, or `X-Chakra-Signature-256` when
+  `CHAKRA_WEBHOOK_HMAC_SECRET` is set), acks `200` immediately, then processes
+  asynchronously. Inbound messages are deduplicated on `wa_message_id`
+  (idempotent under Meta retries).
 
 Configure your webhook URL in Meta as `https://<domain>/api/webhook/whatsapp`
 with verify token = `WHATSAPP_WEBHOOK_VERIFY_TOKEN`.

@@ -8,8 +8,8 @@ import { secureCompareStrings } from '../utils/secure-compare.js'
  * WhatsApp webhook.
  *
  * GET  -> verification handshake (hub.challenge)
- * POST -> verify x-hub-signature-256 over the RAW body, ack 200 immediately,
- *         then process asynchronously so Meta never sees processing latency.
+ * POST -> verify signature over the RAW body (Meta x-hub-signature-256 or Chakra
+ *         X-Chakra-Signature-256), ack 200 immediately, then process async.
  */
 export async function webhookRoutes(app: FastifyInstance) {
   // Meta signs the exact raw POST bytes. Fastify's default JSON parser must be
@@ -50,16 +50,19 @@ export async function webhookRoutes(app: FastifyInstance) {
   })
 
   app.post('/whatsapp', async (request, reply) => {
-    const signature = request.headers['x-hub-signature-256'] as string | undefined
+    const metaSignature = request.headers['x-hub-signature-256'] as string | undefined
+    const chakraSignature = request.headers['x-chakra-signature-256'] as string | undefined
     const raw = request.rawBody
 
-    const signatureOk = isWebhookSignatureValid(raw, signature)
+    const signatureOk = isWebhookSignatureValid(raw, metaSignature, chakraSignature)
     if (!signatureOk) {
       app.log.warn(
         {
           hasRawBody: !!raw,
           rawBodyBytes: raw?.length ?? 0,
-          hasSignatureHeader: !!signature,
+          hasMetaSignatureHeader: !!metaSignature,
+          hasChakraSignatureHeader: !!chakraSignature,
+          hasChakraSecret: !!config.CHAKRA_WEBHOOK_HMAC_SECRET,
           skipSignature: config.WEBHOOK_SKIP_SIGNATURE,
         },
         'webhook signature verification failed',
@@ -69,8 +72,8 @@ export async function webhookRoutes(app: FastifyInstance) {
         .send({ error: 'Invalid signature', code: 'INVALID_SIGNATURE', statusCode: 403 })
     }
 
-    if (!signature && config.WEBHOOK_SKIP_SIGNATURE) {
-      app.log.warn('webhook accepted without x-hub-signature-256 (WEBHOOK_SKIP_SIGNATURE)')
+    if (!metaSignature && !chakraSignature && config.WEBHOOK_SKIP_SIGNATURE) {
+      app.log.warn('webhook accepted without signature headers (WEBHOOK_SKIP_SIGNATURE)')
     }
 
     // Was: 200 before DB — events lost on crash. Now persist first, then ack, then process.
@@ -85,24 +88,45 @@ export async function webhookRoutes(app: FastifyInstance) {
   })
 }
 
-/** Meta Cloud API sends x-hub-signature-256; relays (e.g. Chakra) often do not. */
+/** Meta x-hub-signature-256, or Chakra X-Chakra-Signature-256 when configured. */
 export function isWebhookSignatureValid(
   raw: Buffer | undefined,
-  signature: string | undefined,
+  metaSignature: string | undefined,
+  chakraSignature?: string | undefined,
 ): boolean {
   if (!raw) return false
-  if (signature) return verifySignature(raw, signature)
+  if (metaSignature) return verifyMetaSignature(raw, metaSignature)
+  if (chakraSignature && config.CHAKRA_WEBHOOK_HMAC_SECRET) {
+    return verifyChakraSignature(raw, chakraSignature, config.CHAKRA_WEBHOOK_HMAC_SECRET)
+  }
   return !!config.WEBHOOK_SKIP_SIGNATURE && !isProd
 }
 
-export function verifySignature(raw: Buffer, signature: string | undefined): boolean {
+export function verifyMetaSignature(raw: Buffer, signature: string | undefined): boolean {
   if (!signature || !signature.startsWith('sha256=')) return false
   const expected = createHmac('sha256', config.WHATSAPP_APP_SECRET)
     .update(raw)
     .digest('hex')
-  const provided = signature.slice('sha256='.length)
-  if (!/^[0-9a-f]+$/i.test(provided) || provided.length !== 64) return false
-  const a = Buffer.from(expected, 'hex')
-  const b = Buffer.from(provided, 'hex')
+  return timingSafeEqualHex(expected, signature.slice('sha256='.length))
+}
+
+/** Chakra sends raw hex (no sha256= prefix) in X-Chakra-Signature-256. */
+export function verifyChakraSignature(
+  raw: Buffer,
+  signature: string | undefined,
+  secret: string,
+): boolean {
+  if (!signature) return false
+  const expected = createHmac('sha256', secret).update(raw).digest('hex')
+  return timingSafeEqualHex(expected, signature)
+}
+
+/** @deprecated Use verifyMetaSignature */
+export const verifySignature = verifyMetaSignature
+
+function timingSafeEqualHex(expectedHex: string, providedHex: string): boolean {
+  if (!/^[0-9a-f]+$/i.test(providedHex) || providedHex.length !== 64) return false
+  const a = Buffer.from(expectedHex, 'hex')
+  const b = Buffer.from(providedHex, 'hex')
   return timingSafeEqual(a, b)
 }
