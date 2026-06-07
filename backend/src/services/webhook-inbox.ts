@@ -135,7 +135,9 @@ export function startWebhookReplayLoop(app: FastifyInstance): () => void {
       running = false
     }
   }
-  const interval = setInterval(() => void tick(), REPLAY_INTERVAL_MS)
+  const interval = setInterval(() => {
+    void tick().catch((err) => app.log.error({ err }, 'webhook replay loop tick failed'))
+  }, REPLAY_INTERVAL_MS)
   if (typeof interval.unref === 'function') interval.unref()
   return () => clearInterval(interval)
 }

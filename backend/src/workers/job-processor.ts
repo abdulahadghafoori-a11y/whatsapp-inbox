@@ -54,6 +54,15 @@ export function startJobProcessor(app: FastifyInstance): () => void {
 }
 
 async function processNextBatch(app: FastifyInstance): Promise<void> {
+  try {
+    await processNextBatchInner(app)
+  } catch (err) {
+    app.log.error({ err }, 'job batch failed')
+    captureException(err)
+  }
+}
+
+async function processNextBatchInner(app: FastifyInstance): Promise<void> {
   // Recover jobs orphaned by a crashed worker.
   await db.execute(sql`
     UPDATE jobs
@@ -118,17 +127,22 @@ async function runJob(app: FastifyInstance, job: Job): Promise<void> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     const exhausted = job.attempts >= job.maxAttempts
-    await db
-      .update(jobs)
-      .set({
-        status: exhausted ? 'failed' : 'pending',
-        nextRetryAt: new Date(Date.now() + jobBackoffMinutes(job.attempts) * 60_000),
-        lastError: message,
-        updatedAt: new Date(),
-        lockedAt: null,
-        lockedBy: null,
-      })
-      .where(eq(jobs.id, job.id))
+    try {
+      await db
+        .update(jobs)
+        .set({
+          status: exhausted ? 'failed' : 'pending',
+          nextRetryAt: new Date(Date.now() + jobBackoffMinutes(job.attempts) * 60_000),
+          lastError: message,
+          updatedAt: new Date(),
+          lockedAt: null,
+          lockedBy: null,
+        })
+        .where(eq(jobs.id, job.id))
+    } catch (updateErr) {
+      log.error({ err: updateErr, jobId: job.id }, 'failed to persist job failure state')
+      throw updateErr
+    }
 
     if (exhausted) {
       log.error({ err: message, attempts: job.attempts }, 'job failed permanently')

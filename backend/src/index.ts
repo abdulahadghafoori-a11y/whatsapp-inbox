@@ -178,35 +178,46 @@ async function buildServer() {
 async function main() {
   initObservability()
   const app = await buildServer()
-  const stopProcessor = startJobProcessor(app)
 
-  const replayed = await replayUnprocessedWebhooks(app)
-  if (replayed > 0) {
-    app.log.info({ replayed }, 'replayed unprocessed webhook events')
-  }
-  const stopReplayLoop = startWebhookReplayLoop(app)
+  let stopProcessor = () => {}
+  let stopReplayLoop = () => {}
 
   const shutdown = async (signal: string) => {
-    app.log.info({ signal }, 'shutting down')
-    stopReplayLoop()
-    stopProcessor()
-    await app.close()
-    process.exit(0)
+    try {
+      app.log.info({ signal }, 'shutting down')
+      stopReplayLoop()
+      stopProcessor()
+      await app.close()
+      process.exit(0)
+    } catch (err) {
+      console.error('shutdown failed:', err)
+      process.exit(1)
+    }
   }
   process.on('SIGINT', () => void shutdown('SIGINT'))
   process.on('SIGTERM', () => void shutdown('SIGTERM'))
 
   // Was: unhandled rejections could crash silently in production.
   process.on('unhandledRejection', (reason) => {
+    console.error('unhandledRejection:', reason)
     app.log.error({ err: reason }, 'unhandledRejection')
     captureException(reason)
     if (isProd) process.exit(1)
   })
   process.on('uncaughtException', (err) => {
+    console.error('uncaughtException:', err)
     app.log.error({ err }, 'uncaughtException')
     captureException(err)
     process.exit(1)
   })
+
+  stopProcessor = startJobProcessor(app)
+
+  const replayed = await replayUnprocessedWebhooks(app)
+  if (replayed > 0) {
+    app.log.info({ replayed }, 'replayed unprocessed webhook events')
+  }
+  stopReplayLoop = startWebhookReplayLoop(app)
 
   await app.listen({ port: config.PORT, host: '0.0.0.0' })
 }
