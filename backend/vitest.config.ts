@@ -6,6 +6,7 @@ export default defineConfig({
     env: {
       SKIP_ENV_VALIDATION: 'true',
       WHATSAPP_APP_SECRET: 'test_app_secret',
+      DATABASE_URL: 'postgresql://ci:ci@localhost:5432/test',
     },
     include: ['src/**/*.test.ts'],
   },

@@ -90,7 +90,9 @@ function loadConfig(): AppConfig {
       WHATSAPP_WEBHOOK_VERIFY_TOKEN: process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN ?? 'test',
       WHATSAPP_BUSINESS_ACCOUNT_ID: process.env.WHATSAPP_BUSINESS_ACCOUNT_ID ?? 'test',
       WHATSAPP_APP_SECRET: process.env.WHATSAPP_APP_SECRET ?? 'test',
-      DATABASE_URL: process.env.DATABASE_URL ?? 'postgres://localhost:5432/test',
+      // neon() requires user:pass@host/dbname (see @neondatabase/serverless).
+      DATABASE_URL:
+        process.env.DATABASE_URL ?? 'postgresql://ci:ci@localhost:5432/test',
       DATABASE_URL_UNPOOLED: process.env.DATABASE_URL_UNPOOLED,
       STORAGE_ENDPOINT: process.env.STORAGE_ENDPOINT,
       STORAGE_ACCESS_KEY_ID: process.env.STORAGE_ACCESS_KEY_ID,
