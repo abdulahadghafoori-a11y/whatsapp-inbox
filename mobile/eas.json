@@ -22,7 +22,11 @@
     },
     "production": {
       "autoIncrement": true,
+      "android": {
+        "image": "latest"
+      },
       "env": {
+        "APP_VARIANT": "production",
         "EXPO_PUBLIC_API_URL": "https://whatsapp-inbox-4wqd.onrender.com",
         "EXPO_PUBLIC_SOCKET_URL": "https://whatsapp-inbox-4wqd.onrender.com"
       }
