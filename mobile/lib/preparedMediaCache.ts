@@ -7,6 +7,8 @@ export type PreparedCachePayload = {
   fileUri: string
   fileName: string
   mimeType: string
+  /** SHA-256 of the prepared bytes, computed once at cache time and reused. */
+  contentHash?: string | null
 }
 
 const INDEX_KEY = 'wa-prepared-media-cache-v1'
@@ -116,6 +118,7 @@ export async function getPreparedFromCache(
     fileUri: entry.fileUri,
     fileName: entry.fileName,
     mimeType: entry.mimeType,
+    contentHash: entry.contentHash,
   }
 }
 

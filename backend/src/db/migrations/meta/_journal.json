@@ -64,6 +64,41 @@
       "when": 1781283300000,
       "tag": "0008_db_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1781383300000,
+      "tag": "0009_wa_media_local_features",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1781483300000,
+      "tag": "0010_media_blobs",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1781583300000,
+      "tag": "0011_change_log",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1781683300000,
+      "tag": "0012_fix_change_log_trigger",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1781783300000,
+      "tag": "0013_login_attempts",
+      "breakpoints": true
     }
   ]
 }

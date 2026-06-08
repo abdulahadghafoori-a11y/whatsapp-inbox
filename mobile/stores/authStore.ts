@@ -14,6 +14,12 @@ interface AuthState {
   clear: () => Promise<void>
 }
 
+/** True while `clear()` is in progress — stops refresh/logout recursion. */
+let sessionClearing = false
+export function isSessionClearing(): boolean {
+  return sessionClearing
+}
+
 export const useAuthStore = create<AuthState>((set) => ({
   accessToken: null,
   refreshToken: null,
@@ -54,39 +60,52 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   async clear() {
-    try {
-      const { clearPushRegistration } = await import('@/lib/push')
-      await clearPushRegistration()
-    } catch {
-      /* best-effort; token may already be invalid */
-    }
+    if (sessionClearing) return
+    sessionClearing = true
+
+    // Drop the session first so AuthGate can redirect and interceptors stop
+    // retrying. Was: clearPushRegistration() ran first → PATCH /team/me 401 →
+    // refresh failed → recursive clear() → logout hung forever.
     await tokenStorage.clear()
     set({ accessToken: null, refreshToken: null, agent: null })
-    // Wipe all on-device data so the next agent on this device can't see the
-    // previous session's conversations, messages, media, or queued sends.
     try {
-      const [
-        { queryClient, queryPersister },
-        { clearOutboundQueue },
-        { clearMediaQueue },
-        { clearMediaCache, cleanupUploadTempFiles },
-        { disconnectSocket },
-      ] = await Promise.all([
-        import('@/lib/queryClient'),
-        import('@/lib/offlineQueue'),
-        import('@/lib/offlineMediaQueue'),
-        import('@/lib/messageMediaCache'),
-        import('@/lib/socket'),
-      ])
+      const { disconnectSocket } = await import('@/lib/socket')
       disconnectSocket()
-      queryClient.clear()
-      await queryPersister.removeClient()
-      await clearOutboundQueue()
-      await clearMediaQueue()
-      await clearMediaCache()
-      await cleanupUploadTempFiles()
     } catch {
-      /* best-effort cleanup */
+      /* best-effort */
     }
+
+    // Wipe local data in the background — must not block the login redirect.
+    void (async () => {
+      try {
+        const [
+          { queryClient, queryPersister },
+          { clearOutboundQueue },
+          { clearMediaQueue },
+          { clearMediaCache, cleanupUploadTempFiles },
+          { clearAllLocalData },
+          { clearConversationModuleCaches },
+        ] = await Promise.all([
+          import('@/lib/queryClient'),
+          import('@/lib/offlineQueue'),
+          import('@/lib/offlineMediaQueue'),
+          import('@/lib/messageMediaCache'),
+          import('@/lib/db/repo'),
+          import('@/hooks/useConversations'),
+        ])
+        queryClient.clear()
+        await queryPersister.removeClient()
+        await clearOutboundQueue()
+        await clearMediaQueue()
+        await clearMediaCache()
+        await clearAllLocalData()
+        clearConversationModuleCaches()
+        await cleanupUploadTempFiles()
+      } catch {
+        /* best-effort cleanup */
+      } finally {
+        sessionClearing = false
+      }
+    })()
   },
 }))

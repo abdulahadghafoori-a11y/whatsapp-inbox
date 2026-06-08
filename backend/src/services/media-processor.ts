@@ -5,9 +5,11 @@ import { db } from '../db/index.js'
 import { messages } from '../db/schema.js'
 import { whatsapp } from './whatsapp.js'
 import type { S3Service } from './s3.js'
-import { contentAddressedKey } from '../utils/content-addressed-key.js'
+import { contentAddressedKeyParts } from '../utils/content-addressed-key.js'
 import { normalizeWhatsAppMime } from '../utils/mime-normalize.js'
+import { registerBlob } from './media-blobs.js'
 import { emitMediaReady } from './socket-events.js'
+import { enrichImageMediaMeta } from '../utils/image-thumb.js'
 
 const EXT_BY_MIME: Record<string, string> = {
   'image/jpeg': 'jpg',
@@ -58,14 +60,18 @@ export async function processDownloadMedia(
 
   const filename = deriveFilename(payload.filename, payload.mimeType, payload.messageId)
   const mimeType = normalizeWhatsAppMime(payload.mimeType, filename)
-  const key = contentAddressedKey(buffer, filename, mimeType)
+  const { sha256, key } = contentAddressedKeyParts(buffer, filename, mimeType)
 
   await s3.uploadToS3IfMissing(key, buffer, mimeType)
+  await registerBlob({ sha256, storageKey: key, mimeType, sizeBytes: buffer.length })
+  const meta = await enrichImageMediaMeta(s3, buffer, mimeType, filename)
 
   await db
     .update(messages)
     .set({
       mediaUrl: key,
+      mediaThumbUrl: meta.mediaThumbUrl,
+      mediaFileSize: meta.mediaFileSize,
       mediaMimeType: mimeType,
       mediaFilename: filename,
       mediaStatus: 'uploaded',

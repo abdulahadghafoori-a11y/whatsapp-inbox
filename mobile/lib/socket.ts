@@ -15,7 +15,8 @@ let connectErrorRecovering = false
 
 async function onConnectError(err: Error) {
   if (err.message === 'TOKEN_REVOKED') {
-    await useAuthStore.getState().clear()
+    const { isSessionClearing } = await import('@/stores/authStore')
+    if (!isSessionClearing()) await useAuthStore.getState().clear()
     disconnectSocket()
     return
   }
@@ -27,6 +28,10 @@ async function onConnectError(err: Error) {
     if (token && socket) {
       socket.auth = { token }
       socket.connect()
+    } else {
+      // Refresh failed (session cleared) — stop the infinite reconnect loop with a
+      // dead JWT, otherwise the banner stays on "Reconnecting…" forever.
+      disconnectSocket()
     }
   } finally {
     connectErrorRecovering = false

@@ -8,22 +8,34 @@ import {
   StyleSheet,
 } from 'react-native'
 import { Ionicons } from '@expo/vector-icons'
+import { useQueryClient } from '@tanstack/react-query'
 import { api } from '@/services/api'
 import { useAuthStore } from '@/stores/authStore'
 import { openDocumentFromUrl } from '@/lib/openDocument'
 import { BUBBLE_MEDIA_MAX_WIDTH } from '@/lib/chatMediaLayout'
 import { useMessageMedia } from '@/hooks/useMessageMedia'
+import { useMessageMediaActive } from '@/hooks/useMessageMediaActive'
+import { useCachedMediaUri } from '@/hooks/useCachedMediaUri'
+import { useMediaAutoDownload } from '@/hooks/useMediaAutoDownload'
+import { useMediaDownloadState } from '@/hooks/useMediaDownloadState'
+import { MediaShellPlaceholder } from '@/components/MediaShellPlaceholder'
+import { MediaManualDownloadCard } from '@/components/MediaManualDownloadCard'
 import { syncMessageMedia } from '@/lib/messageMediaSync'
+import { queueMediaPresign } from '@/lib/mediaPresignBatch'
 import { resolvePlaybackUri } from '@/lib/mediaPlayback'
+import { MEDIA_LABEL } from '@/lib/mediaAutoDownload'
+import { formatMediaSize } from '@/lib/formatMediaSize'
+import { messageFileSizeBytes } from '@/lib/messageFileSize'
 import { AudioPlayer } from './AudioPlayer'
 import { ChatVideoMedia } from './ChatVideoMedia'
 import { ChatImageMedia } from './ChatImageMedia'
 import { MediaFullscreenViewer } from './MediaFullscreenViewer'
 import { VideoFullscreenViewer } from './VideoFullscreenViewer'
 import { mediaSendOverlayLabel } from '@/lib/mediaSendPhase'
-import { messageTypeToDownloadKind, getMediaDownloadPrefs } from '@/lib/mediaDownloadPrefs'
-import { isOnWifi } from '@/lib/network'
+import { isStickerType } from '@/lib/messageMediaKind'
 import { messageRenderEqual } from '@/lib/messageRenderEqual'
+import { computeThumbhashFromUri } from '@/lib/thumbhashGen'
+import { sha256FromStorageKey, uploadThumbhash } from '@/lib/thumbhashUpload'
 import type { Message } from '@/types'
 
 const FALLBACK_MEDIA_HEIGHT = Math.round(BUBBLE_MEDIA_MAX_WIDTH * 0.75)
@@ -62,22 +74,21 @@ function DocumentBubble({
   openingDoc,
   onOpen,
   outbound,
+  sizeBytes,
 }: {
   message: Message
   openingDoc: boolean
   onOpen: () => void
   outbound: boolean
+  sizeBytes?: number | null
 }) {
   const ext = fileExtension(message.mediaFilename, message.mediaMimeType)
   const isPdf = ext === 'pdf'
   const iconColor = isPdf ? '#e53935' : '#00A884'
+  const sizeLabel = formatMediaSize(sizeBytes ?? null)
 
   return (
-    <Pressable
-      onPress={onOpen}
-      disabled={openingDoc}
-      style={styles.docRow}
-    >
+    <Pressable onPress={onOpen} disabled={openingDoc} style={styles.docRow}>
       <View style={[styles.docIconWrap, { backgroundColor: `${iconColor}18` }]}>
         {openingDoc ? (
           <ActivityIndicator color={iconColor} size="small" />
@@ -94,7 +105,9 @@ function DocumentBubble({
         >
           {message.mediaFilename ?? 'Document'}
         </Text>
-        <Text style={styles.docMeta}>{ext}</Text>
+        <Text style={styles.docMeta}>
+          {sizeLabel ? `${ext} · ${sizeLabel}` : ext}
+        </Text>
       </View>
       <View style={styles.docDownload}>
         <Ionicons name="arrow-down-circle" size={28} color="#8696a0" />
@@ -116,38 +129,59 @@ function MediaMessageBase({
   contactAvatarUrl?: string | null
   onReplyQuotePress?: (messageId: string) => void
 }) {
+  const queryClient = useQueryClient()
   const agent = useAuthStore((s) => s.agent)
+  const outbound = variant === 'outbound'
   const localPreview = message.localPreviewUri
   const pending = message.mediaStatus === 'pending'
   const mediaDownloadFailed = message.mediaStatus === 'failed' && !message.mediaUrl
-  const sendOverlay = variant === 'outbound' ? mediaSendOverlayLabel(message) : null
+  const sendOverlay = outbound ? mediaSendOverlayLabel(message) : null
   const uploading = !!sendOverlay
+  const isSticker = isStickerType(message.type)
+  const fileSize = messageFileSizeBytes(message)
+  const mediaLabel = MEDIA_LABEL[message.type] ?? 'Media'
 
-  const { displayUrl, playbackUrl, remoteUrl, isLoading, isError } = useMessageMedia(message)
-  const [downloadBlocked, setDownloadBlocked] = useState(false)
+  const mediaActive = useMessageMediaActive(message.id)
+  const cachedUri = useCachedMediaUri(message.id)
+  const hasLocalSource = !!(cachedUri || message.localPreviewUri)
   const [manualDownload, setManualDownload] = useState(false)
+  const { allowed: autoAllowed, blockReason } = useMediaAutoDownload({
+    type: message.type,
+    direction: message.direction,
+  })
+  const isDownloading = useMediaDownloadState(message.id)
 
+  // Once a local image file exists and no ThumbHash is registered yet, generate
+  // it off the render path and publish it so every device gets instant placeholders.
+  const thumbhashSource =
+    message.type === 'image' ? (cachedUri ?? message.localPreviewUri ?? null) : null
   useEffect(() => {
-    if (variant === 'outbound' || pending || displayUrl) {
-      setDownloadBlocked(false)
-      return
-    }
+    if (message.type !== 'image' || message.thumbhash || !thumbhashSource) return
+    if (!sha256FromStorageKey(message.mediaUrl)) return
+    let cancelled = false
     void (async () => {
-      const kind = messageTypeToDownloadKind(message.type)
-      if (!kind) return
-      const prefs = await getMediaDownloadPrefs()
-      const policy = prefs[kind]
-      if (policy === 'never') {
-        setDownloadBlocked(true)
-        return
-      }
-      if (policy === 'wifi' && !(await isOnWifi())) {
-        setDownloadBlocked(true)
-        return
-      }
-      setDownloadBlocked(false)
+      const gen = await computeThumbhashFromUri(thumbhashSource)
+      if (cancelled || !gen) return
+      await uploadThumbhash({
+        storageKey: message.mediaUrl,
+        messageId: message.id,
+        thumbhash: gen.thumbhash,
+        width: gen.width,
+        height: gen.height,
+      })
     })()
-  }, [variant, pending, displayUrl, message.type])
+    return () => {
+      cancelled = true
+    }
+  }, [message.type, message.thumbhash, message.mediaUrl, message.id, thumbhashSource])
+
+  const shouldLoadRemote =
+    mediaActive &&
+    (hasLocalSource || outbound || manualDownload || autoAllowed === true || isSticker)
+
+  const { displayUrl, playbackUrl, remoteUrl, isLoading, isError } = useMessageMedia(message, {
+    loadRemote: shouldLoadRemote,
+  })
 
   const resolveUri = useCallback(
     () => resolvePlaybackUri(message, remoteUrl),
@@ -160,6 +194,13 @@ function MediaMessageBase({
   const [retrying, setRetrying] = useState(false)
   const [openingDoc, setOpeningDoc] = useState(false)
 
+  const startManualDownload = useCallback(() => {
+    if (!message.mediaUrl) return
+    setManualDownload(true)
+    queueMediaPresign(queryClient, message.mediaUrl, message.id, { force: true })
+    void syncMessageMedia(message, { force: true })
+  }, [message, queryClient])
+
   async function retryDownload() {
     if (retrying) return
     setRetrying(true)
@@ -167,7 +208,7 @@ function MediaMessageBase({
       if (mediaDownloadFailed || message.mediaStatus === 'failed') {
         await api.post(`/messages/media/${message.id}/retry`)
       } else {
-        await syncMessageMedia(message, { force: true })
+        startManualDownload()
       }
     } catch {
       /* parent refetch / socket will update when job completes */
@@ -176,36 +217,52 @@ function MediaMessageBase({
     }
   }
 
-  const pendingLabel =
-    message.type === 'image' || message.type === 'sticker'
-      ? 'Photo'
-      : message.type === 'video'
-        ? 'Video'
-        : message.type === 'audio'
-          ? 'Voice message'
-          : message.type === 'document'
-            ? message.mediaFilename ?? 'Document'
-            : 'Media'
+  if (
+    !mediaActive &&
+    !displayUrl &&
+    !localPreview &&
+    message.mediaUrl &&
+    message.mediaStatus !== 'pending' &&
+    message.type !== 'text' &&
+    message.type !== 'location'
+  ) {
+    return <MediaShellPlaceholder type={message.type} sticker={message.type === 'sticker'} />
+  }
 
-  if (downloadBlocked && !displayUrl && !localPreview && !manualDownload && message.mediaUrl) {
+  if (
+    mediaActive &&
+    autoAllowed === null &&
+    !displayUrl &&
+    !localPreview &&
+    !outbound &&
+    message.mediaUrl
+  ) {
     return (
-      <MediaPlaceholder minHeight={message.type === 'audio' ? 40 : 140}>
-        <Text className="text-sm font-medium text-neutral-600 dark:text-neutral-300">
-          {pendingLabel}
-        </Text>
-        <Text className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
-          Tap to download
-        </Text>
-        <Pressable
-          onPress={() => {
-            setManualDownload(true)
-            void syncMessageMedia(message, { force: true })
-          }}
-          className="mt-3 rounded-full bg-wa-teal px-4 py-2"
-        >
-          <Text className="text-xs font-semibold text-white">Download</Text>
-        </Pressable>
+      <MediaPlaceholder minHeight={message.type === 'audio' ? 48 : 100}>
+        <ActivityIndicator color="#00A884" size="small" />
       </MediaPlaceholder>
+    )
+  }
+
+  if (
+    !isSticker &&
+    !outbound &&
+    autoAllowed === false &&
+    !manualDownload &&
+    !displayUrl &&
+    !localPreview &&
+    message.mediaUrl
+  ) {
+    return (
+      <MediaManualDownloadCard
+        type={message.type}
+        label={mediaLabel}
+        sizeBytes={fileSize}
+        hint={blockReason}
+        sticker={message.type === 'sticker'}
+        downloading={isDownloading}
+        onDownload={startManualDownload}
+      />
     )
   }
 
@@ -214,7 +271,7 @@ function MediaMessageBase({
       <MediaPlaceholder minHeight={message.type === 'audio' ? 40 : 140}>
         <ActivityIndicator color="#00A884" />
         <Text className="mt-2 text-sm font-medium text-neutral-600 dark:text-neutral-300">
-          {pendingLabel}
+          {mediaLabel}
         </Text>
         <Text className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
           Downloading…
@@ -242,10 +299,11 @@ function MediaMessageBase({
     )
   }
 
-  if (!displayUrl && isLoading) {
+  if (!displayUrl && (isLoading || isDownloading)) {
     return (
       <MediaPlaceholder minHeight={message.type === 'audio' ? 40 : FALLBACK_MEDIA_HEIGHT}>
         <ActivityIndicator color="#00A884" />
+        <Text className="mt-2 text-xs text-neutral-500 dark:text-neutral-400">Downloading…</Text>
       </MediaPlaceholder>
     )
   }
@@ -283,6 +341,9 @@ function MediaMessageBase({
         <ChatImageMedia
           uri={displayUrl}
           sticker={sticker}
+          thumbhash={message.thumbhash}
+          intrinsicWidth={message.mediaWidth}
+          intrinsicHeight={message.mediaHeight}
           uploading={uploading}
           uploadLabel={sendOverlay ?? undefined}
           onPress={() => setImageFullScreen(true)}
@@ -318,6 +379,8 @@ function MediaMessageBase({
         <ChatVideoMedia
           uri={displayUrl}
           messageId={message.id}
+          active={mediaActive}
+          sizeBytes={fileSize}
           uploading={uploading}
           uploadLabel={sendOverlay ?? undefined}
           onPress={() => void openVideo()}
@@ -340,10 +403,26 @@ function MediaMessageBase({
   if (message.type === 'audio') {
     const audioUri = playbackUrl ?? displayUrl
     if (!audioUri) {
-      if (isLoading) {
+      const sending =
+        outbound &&
+        (message.status === 'pending' ||
+          message.id.startsWith('pending-media-') ||
+          !!message.sendPhase)
+      if (sending) {
         return (
           <MediaPlaceholder minHeight={48}>
-            <ActivityIndicator color="#00A884" size="small" />
+            <View className="flex-row items-center gap-3 px-1">
+              <ActivityIndicator color="#00A884" size="small" />
+              <View className="h-6 flex-1 flex-row items-end gap-0.5">
+                {Array.from({ length: 24 }, (_, i) => (
+                  <View
+                    key={i}
+                    className="w-[3px] rounded-sm bg-neutral-400/70 dark:bg-neutral-500/70"
+                    style={{ height: 4 + (i % 5) * 3 }}
+                  />
+                ))}
+              </View>
+            </View>
           </MediaPlaceholder>
         )
       }
@@ -353,7 +432,6 @@ function MediaMessageBase({
         </MediaPlaceholder>
       )
     }
-    const outbound = variant === 'outbound'
     return (
       <AudioPlayer
         uri={audioUri}
@@ -371,6 +449,10 @@ function MediaMessageBase({
 
   async function openDocument() {
     if (openingDoc) return
+    if (!displayUrl && !remoteUrl && message.mediaUrl) {
+      startManualDownload()
+      return
+    }
     setOpeningDoc(true)
     try {
       if (displayUrl && (displayUrl.startsWith('file://') || displayUrl.startsWith('/'))) {
@@ -394,11 +476,32 @@ function MediaMessageBase({
     }
   }
 
+  if (
+    message.type === 'document' &&
+    !displayUrl &&
+    !localPreview &&
+    message.mediaUrl &&
+    !manualDownload &&
+    autoAllowed === false
+  ) {
+    return (
+      <MediaManualDownloadCard
+        type="document"
+        label={message.mediaFilename ?? 'Document'}
+        sizeBytes={fileSize}
+        hint={blockReason}
+        downloading={isDownloading}
+        onDownload={startManualDownload}
+      />
+    )
+  }
+
   return (
     <DocumentBubble
       message={message}
       openingDoc={openingDoc}
-      outbound={variant === 'outbound'}
+      outbound={outbound}
+      sizeBytes={fileSize}
       onOpen={() => void openDocument()}
     />
   )

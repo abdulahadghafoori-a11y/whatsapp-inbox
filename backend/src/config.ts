@@ -145,6 +145,18 @@ function loadConfig(): AppConfig {
     console.error('\nJWT_SECRET must be at least 64 characters in production.\n')
     process.exit(1)
   }
+  if (data.NODE_ENV === 'production') {
+    if (
+      !data.WORKER_INTERNAL_SECRET ||
+      data.WORKER_INTERNAL_SECRET === 'dev-worker-internal-secret' ||
+      data.WORKER_INTERNAL_SECRET.length < 32
+    ) {
+      console.error(
+        '\nWORKER_INTERNAL_SECRET must be set to a unique value of at least 32 characters in production.\n',
+      )
+      process.exit(1)
+    }
+  }
   requireStorageFields(data)
   return data
 }

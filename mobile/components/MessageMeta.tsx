@@ -1,4 +1,5 @@
 import { View, Text, StyleSheet } from 'react-native'
+import { Ionicons } from '@expo/vector-icons'
 import { StatusTicks } from '@/components/StatusTicks'
 import { formatMessageTime } from '@/lib/format'
 import type { Message } from '@/types'
@@ -10,6 +11,7 @@ type MessageMetaProps = {
   messageType?: Message['type']
   /** White text on dark gradient (image/video without caption). */
   overlay?: boolean
+  starred?: boolean
 }
 
 export function MessageMeta({
@@ -18,12 +20,14 @@ export function MessageMeta({
   status,
   messageType,
   overlay = false,
+  starred = false,
 }: MessageMetaProps) {
   const time = formatMessageTime(sentAt)
   const textStyle = overlay ? styles.timeOverlay : styles.timeInline
 
   return (
     <View style={[styles.row, overlay && styles.rowOverlay]}>
+      {starred ? <Ionicons name="star" size={11} color="#f5c542" /> : null}
       <Text style={textStyle}>{time}</Text>
       {outbound && status ? (
         <StatusTicks status={status} messageType={messageType} />

@@ -1,29 +1,29 @@
 import { useEffect } from 'react'
 import { AppState } from 'react-native'
 import NetInfo from '@react-native-community/netinfo'
-import { useQueryClient } from '@tanstack/react-query'
 import { flushOutboundQueue, hydrateOutboundQueue } from '@/lib/offlineQueue'
 import { flushMediaQueue, hydrateOfflineMediaQueue } from '@/lib/offlineMediaQueue'
 import { initNetworkListener } from '@/lib/network'
+import { captureError } from '@/lib/errorReporting'
+import { ensureDbReady } from '@/lib/db/client'
+import { scheduleSync } from '@/lib/sync/syncEngine'
 
-/** Flushes queued sends when the device is back online. */
+/** Restores + flushes queued sends (into the device DB) when back online. */
 export function OfflineSyncBridge() {
-  const qc = useQueryClient()
-
   useEffect(() => {
     initNetworkListener()
 
     async function sync() {
       try {
-        await hydrateOfflineMediaQueue(qc)
-        await hydrateOutboundQueue(qc)
+        await ensureDbReady()
+        await hydrateOfflineMediaQueue()
+        await hydrateOutboundQueue()
         const text = await flushOutboundQueue()
         const media = await flushMediaQueue()
-        if (text.sent > 0 || media.sent > 0) {
-          await qc.invalidateQueries({ queryKey: ['conversations'] })
-        }
-      } catch {
-        // storage unavailable
+        if (text.sent > 0 || media.sent > 0) scheduleSync()
+      } catch (err) {
+        // storage unavailable / flush race — surface so silent send loss is visible.
+        captureError(err, { scope: 'OfflineSyncBridge.sync' })
       }
     }
 
@@ -41,7 +41,7 @@ export function OfflineSyncBridge() {
       unsubNet()
       unsubApp.remove()
     }
-  }, [qc])
+  }, [])
 
   return null
 }

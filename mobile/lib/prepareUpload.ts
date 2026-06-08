@@ -92,24 +92,3 @@ export async function prepareMediaFileForUpload(
 
   return { uri: dest, name: sanitizeUploadFilename(name), mimeType }
 }
-
-/** Read OGG Opus voice note as base64 for JSON upload. */
-export async function readPreparedAudioBase64(
-  uri: string,
-  name: string,
-  mimeType: string,
-): Promise<{ name: string; mimeType: string; data: string }> {
-  const { prepareVoiceForSend } = await import('@/lib/prepareVoiceForSend')
-  const prepared = await prepareVoiceForSend(uri, name, mimeType)
-  const data = await FileSystem.readAsStringAsync(prepared.uri, {
-    encoding: FileSystem.EncodingType.Base64,
-  })
-  if (!data || data.length < 280) {
-    throw new Error('Recording could not be read. Please try again.')
-  }
-  return {
-    name: prepared.name,
-    mimeType: prepared.mimeType,
-    data,
-  }
-}

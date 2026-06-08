@@ -30,6 +30,8 @@ interface OutboundMediaArgs {
   voiceNote?: boolean
   replyToMessageId?: string
   replyToWaMessageId?: string
+  mediaThumbUrl?: string | null
+  mediaFileSize?: number | null
 }
 
 function preview(type: string, body?: string | null): string {
@@ -73,26 +75,35 @@ export async function createOutboundText(
   io: SocketIOServer,
   args: OutboundTextArgs,
 ): Promise<Message> {
-  const [message] = await db
-    .insert(messages)
-    .values({
-      conversationId: args.conversationId,
-      sentBy: args.sentBy,
-      direction: 'outbound',
-      type: 'text',
-      body: args.body,
-      status: 'pending',
-      replyToMessageId: args.replyToMessageId ?? null,
-    })
-    .returning()
+  // Atomic: a message must never exist without its delivery job (and vice versa),
+  // otherwise it gets stuck 'pending' forever with no worker to pick it up.
+  const message = await db.transaction(async (tx) => {
+    const [m] = await tx
+      .insert(messages)
+      .values({
+        conversationId: args.conversationId,
+        sentBy: args.sentBy,
+        direction: 'outbound',
+        type: 'text',
+        body: args.body,
+        status: 'pending',
+        replyToMessageId: args.replyToMessageId ?? null,
+      })
+      .returning()
 
-  await enqueueJob('send_whatsapp_message', {
-    to: args.to,
-    type: 'text',
-    conversationId: args.conversationId,
-    messageId: message.id,
-    body: args.body,
-    replyToWaMessageId: args.replyToWaMessageId,
+    await enqueueJob(
+      'send_whatsapp_message',
+      {
+        to: args.to,
+        type: 'text',
+        conversationId: args.conversationId,
+        messageId: m.id,
+        body: args.body,
+        replyToWaMessageId: args.replyToWaMessageId,
+      },
+      { executor: tx },
+    )
+    return m
   })
 
   await finalize(io, args.conversationId, message)
@@ -109,27 +120,34 @@ export async function createOutboundLocation(
     ...(args.name ? { name: args.name } : {}),
     ...(args.address ? { address: args.address } : {}),
   }
-  const [message] = await db
-    .insert(messages)
-    .values({
-      conversationId: args.conversationId,
-      sentBy: args.sentBy,
-      direction: 'outbound',
-      type: 'location',
-      body: null,
-      status: 'pending',
-      metadata,
-      replyToMessageId: args.replyToMessageId ?? null,
-    })
-    .returning()
+  const message = await db.transaction(async (tx) => {
+    const [m] = await tx
+      .insert(messages)
+      .values({
+        conversationId: args.conversationId,
+        sentBy: args.sentBy,
+        direction: 'outbound',
+        type: 'location',
+        body: null,
+        status: 'pending',
+        metadata,
+        replyToMessageId: args.replyToMessageId ?? null,
+      })
+      .returning()
 
-  await enqueueJob('send_whatsapp_message', {
-    to: args.to,
-    type: 'location',
-    conversationId: args.conversationId,
-    messageId: message.id,
-    location: metadata,
-    replyToWaMessageId: args.replyToWaMessageId,
+    await enqueueJob(
+      'send_whatsapp_message',
+      {
+        to: args.to,
+        type: 'location',
+        conversationId: args.conversationId,
+        messageId: m.id,
+        location: metadata,
+        replyToWaMessageId: args.replyToWaMessageId,
+      },
+      { executor: tx },
+    )
+    return m
   })
 
   await finalize(io, args.conversationId, message)
@@ -141,32 +159,41 @@ export async function createOutboundMedia(
   io: SocketIOServer,
   args: OutboundMediaArgs,
 ): Promise<Message> {
-  const [message] = await db
-    .insert(messages)
-    .values({
-      conversationId: args.conversationId,
-      sentBy: args.sentBy,
-      direction: 'outbound',
-      type: args.type,
-      body: args.caption ?? null,
-      mediaUrl: args.s3Key,
-      mediaMimeType: args.mimeType,
-      mediaFilename: args.filename,
-      mediaStatus: 'uploaded',
-      status: 'pending',
-      replyToMessageId: args.replyToMessageId ?? null,
-    })
-    .returning()
+  const message = await db.transaction(async (tx) => {
+    const [m] = await tx
+      .insert(messages)
+      .values({
+        conversationId: args.conversationId,
+        sentBy: args.sentBy,
+        direction: 'outbound',
+        type: args.type,
+        body: args.caption ?? null,
+        mediaUrl: args.s3Key,
+        mediaThumbUrl: args.mediaThumbUrl ?? null,
+        mediaFileSize: args.mediaFileSize ?? null,
+        mediaMimeType: args.mimeType,
+        mediaFilename: args.filename,
+        mediaStatus: 'uploaded',
+        status: 'pending',
+        replyToMessageId: args.replyToMessageId ?? null,
+      })
+      .returning()
 
-  await enqueueJob('send_whatsapp_message', {
-    to: args.to,
-    type: args.type,
-    conversationId: args.conversationId,
-    messageId: message.id,
-    ...(args.mediaId ? { mediaId: args.mediaId } : { s3Key: args.s3Key }),
-    caption: args.caption,
-    voiceNote: args.voiceNote,
-    replyToWaMessageId: args.replyToWaMessageId,
+    await enqueueJob(
+      'send_whatsapp_message',
+      {
+        to: args.to,
+        type: args.type,
+        conversationId: args.conversationId,
+        messageId: m.id,
+        ...(args.mediaId ? { mediaId: args.mediaId } : { s3Key: args.s3Key }),
+        caption: args.caption,
+        voiceNote: args.voiceNote,
+        replyToWaMessageId: args.replyToWaMessageId,
+      },
+      { executor: tx },
+    )
+    return m
   })
 
   await finalize(io, args.conversationId, message)
@@ -187,31 +214,38 @@ export async function createOutboundTemplate(
   io: SocketIOServer,
   args: OutboundTemplateArgs,
 ): Promise<Message> {
-  const [message] = await db
-    .insert(messages)
-    .values({
-      conversationId: args.conversationId,
-      sentBy: args.sentBy,
-      direction: 'outbound',
-      type: 'text',
-      body: `[template: ${args.templateName}]`,
-      status: 'pending',
-      metadata: {
+  const message = await db.transaction(async (tx) => {
+    const [m] = await tx
+      .insert(messages)
+      .values({
+        conversationId: args.conversationId,
+        sentBy: args.sentBy,
+        direction: 'outbound',
+        type: 'text',
+        body: `[template: ${args.templateName}]`,
+        status: 'pending',
+        metadata: {
+          templateName: args.templateName,
+          languageCode: args.languageCode,
+          ...(args.components ? { components: args.components } : {}),
+        },
+      })
+      .returning()
+
+    await enqueueJob(
+      'send_whatsapp_message',
+      {
+        to: args.to,
+        type: 'template',
+        conversationId: args.conversationId,
+        messageId: m.id,
         templateName: args.templateName,
         languageCode: args.languageCode,
-        ...(args.components ? { components: args.components } : {}),
+        components: args.components,
       },
-    })
-    .returning()
-
-  await enqueueJob('send_whatsapp_message', {
-    to: args.to,
-    type: 'template',
-    conversationId: args.conversationId,
-    messageId: message.id,
-    templateName: args.templateName,
-    languageCode: args.languageCode,
-    components: args.components,
+      { executor: tx },
+    )
+    return m
   })
 
   await finalize(io, args.conversationId, message)
@@ -245,79 +279,98 @@ export async function resendOutboundMessage(
   const cleanedMetadata = metadataWithoutSendInFlight(message.metadata)
   const replyToWaMessageId = await replyWaIdForMessage(message)
 
-  const [updated] = await db
-    .update(messages)
-    .set({
-      status: 'pending',
-      errorMessage: null,
-      metadata: cleanedMetadata,
-    })
-    .where(eq(messages.id, message.id))
-    .returning()
+  const updated = await db.transaction(async (tx) => {
+    const [u] = await tx
+      .update(messages)
+      .set({
+        status: 'pending',
+        errorMessage: null,
+        metadata: cleanedMetadata,
+      })
+      .where(eq(messages.id, message.id))
+      .returning()
 
-  if (message.type === 'text') {
-    const templateMeta = cleanedMetadata as {
-      templateName?: string
-      languageCode?: string
-      components?: unknown[]
-    } | null
-    if (templateMeta?.templateName && templateMeta?.languageCode) {
-      await enqueueJob('send_whatsapp_message', {
-        to,
-        type: 'template',
-        conversationId: message.conversationId,
-        messageId: message.id,
-        templateName: templateMeta.templateName,
-        languageCode: templateMeta.languageCode,
-        components: templateMeta.components,
-      })
+    if (message.type === 'text') {
+      const templateMeta = cleanedMetadata as {
+        templateName?: string
+        languageCode?: string
+        components?: unknown[]
+      } | null
+      if (templateMeta?.templateName && templateMeta?.languageCode) {
+        await enqueueJob(
+          'send_whatsapp_message',
+          {
+            to,
+            type: 'template',
+            conversationId: message.conversationId,
+            messageId: message.id,
+            templateName: templateMeta.templateName,
+            languageCode: templateMeta.languageCode,
+            components: templateMeta.components,
+          },
+          { executor: tx },
+        )
+      } else {
+        await enqueueJob(
+          'send_whatsapp_message',
+          {
+            to,
+            type: 'text',
+            conversationId: message.conversationId,
+            messageId: message.id,
+            body: message.body ?? '',
+            replyToWaMessageId,
+          },
+          { executor: tx },
+        )
+      }
+    } else if (message.type === 'location') {
+      const loc = cleanedMetadata as {
+        latitude?: number
+        longitude?: number
+        name?: string
+        address?: string
+      } | null
+      if (typeof loc?.latitude !== 'number' || typeof loc?.longitude !== 'number') {
+        throw new Error('Location metadata missing for resend')
+      }
+      await enqueueJob(
+        'send_whatsapp_message',
+        {
+          to,
+          type: 'location',
+          conversationId: message.conversationId,
+          messageId: message.id,
+          location: {
+            latitude: loc.latitude,
+            longitude: loc.longitude,
+            name: loc.name,
+            address: loc.address,
+          },
+          replyToWaMessageId,
+        },
+        { executor: tx },
+      )
     } else {
-      await enqueueJob('send_whatsapp_message', {
-        to,
-        type: 'text',
-        conversationId: message.conversationId,
-        messageId: message.id,
-        body: message.body ?? '',
-        replyToWaMessageId,
-      })
+      if (!opts.mediaId && !opts.s3Key) throw new Error('mediaId or s3Key required to resend')
+      const mediaType = message.type as JobPayloads['send_whatsapp_message']['type']
+      await enqueueJob(
+        'send_whatsapp_message',
+        {
+          to,
+          type: mediaType,
+          conversationId: message.conversationId,
+          messageId: message.id,
+          ...(opts.mediaId ? { mediaId: opts.mediaId } : { s3Key: opts.s3Key! }),
+          caption: message.body ?? undefined,
+          voiceNote: opts.voiceNote,
+          replyToWaMessageId,
+        },
+        { executor: tx },
+      )
     }
-  } else if (message.type === 'location') {
-    const loc = cleanedMetadata as {
-      latitude?: number
-      longitude?: number
-      name?: string
-      address?: string
-    } | null
-    if (typeof loc?.latitude !== 'number' || typeof loc?.longitude !== 'number') {
-      throw new Error('Location metadata missing for resend')
-    }
-    await enqueueJob('send_whatsapp_message', {
-      to,
-      type: 'location',
-      conversationId: message.conversationId,
-      messageId: message.id,
-      location: {
-        latitude: loc.latitude,
-        longitude: loc.longitude,
-        name: loc.name,
-        address: loc.address,
-      },
-      replyToWaMessageId,
-    })
-  } else {
-    if (!opts.mediaId && !opts.s3Key) throw new Error('mediaId or s3Key required to resend')
-    const mediaType = message.type as JobPayloads['send_whatsapp_message']['type']
-    await enqueueJob('send_whatsapp_message', {
-      to,
-      type: mediaType,
-      conversationId: message.conversationId,
-      messageId: message.id,
-      ...(opts.mediaId ? { mediaId: opts.mediaId } : { s3Key: opts.s3Key! }),
-      caption: message.body ?? undefined,
-      voiceNote: opts.voiceNote,
-      replyToWaMessageId,
-    })
-  }
+    return u
+  })
 
   emitMessageStatus(io, {
     conversationId: message.conversationId,

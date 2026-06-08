@@ -88,6 +88,12 @@ export interface MessageReplyPreview {
   localPreviewUri?: string | null
 }
 
+export interface MessageReaction {
+  emoji: string
+  agentId: string
+  agentName?: string | null
+}
+
 export interface Message {
   id: string
   conversationId: string
@@ -97,6 +103,13 @@ export interface Message {
   type: MessageType
   body: string | null
   mediaUrl: string | null
+  mediaThumbUrl?: string | null
+  mediaFileSize?: number | null
+  /** ThumbHash (base64) of the media blob — paints an instant placeholder. */
+  thumbhash?: string | null
+  /** Intrinsic media dimensions, used to reserve aspect ratio before decode. */
+  mediaWidth?: number | null
+  mediaHeight?: number | null
   mediaMimeType: string | null
   mediaFilename: string | null
   mediaStatus: MediaStatus
@@ -105,6 +118,8 @@ export interface Message {
   replyToMessageId?: string | null
   deletedAt?: string | null
   editedAt?: string | null
+  starredAt?: string | null
+  reactions?: MessageReaction[]
   replyTo?: MessageReplyPreview | null
   sentAt: string
   createdAt: string

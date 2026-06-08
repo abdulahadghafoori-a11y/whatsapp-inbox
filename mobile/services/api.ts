@@ -3,7 +3,7 @@ import axios, {
   type AxiosInstance,
   type InternalAxiosRequestConfig,
 } from 'axios'
-import { useAuthStore } from '@/stores/authStore'
+import { isSessionClearing, useAuthStore } from '@/stores/authStore'
 import { reauthSocket } from '@/lib/socket'
 import { assertProductionTransportSecurity } from '@/lib/transportSecurity'
 
@@ -54,7 +54,7 @@ async function refreshAccessToken(): Promise<string | null> {
     reauthSocket()
     return accessToken
   } catch {
-    await useAuthStore.getState().clear()
+    if (!isSessionClearing()) await useAuthStore.getState().clear()
     return null
   }
 }
@@ -102,7 +102,7 @@ api.interceptors.response.use(
 
     // TOKEN_REVOKED can never be fixed by refresh -> log out immediately.
     if (status === 401 && code === 'TOKEN_REVOKED') {
-      await useAuthStore.getState().clear()
+      if (!isSessionClearing()) await useAuthStore.getState().clear()
       return Promise.reject(error)
     }
 

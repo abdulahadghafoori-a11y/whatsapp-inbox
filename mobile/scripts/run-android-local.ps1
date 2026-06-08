@@ -42,7 +42,9 @@ $sdkProp = ($env:ANDROID_HOME -replace '\\', '/').Replace(':', '\:')
 ) | Set-Content "$buildRoot\android\local.properties"
 
 Set-Location $buildRoot
-if (-not (Test-Path node_modules)) { npm ci }
+# Always install after mirror — C:\wi node_modules can be stale when package.json gains native modules (e.g. expo-sqlite).
+Write-Host "Installing dependencies in $buildRoot..."
+npm ci
 node scripts/patch-opuslib-ndk.js 2>$null
 
 adb reverse tcp:8081 tcp:8081

@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
-import { View, Text, ActivityIndicator, StyleSheet } from 'react-native'
+import { View, Text, ActivityIndicator, StyleSheet, InteractionManager } from 'react-native'
 import { Image } from 'expo-image'
-import * as VideoThumbnails from 'expo-video-thumbnails'
 import { MessageSendingOverlay } from '@/components/MessageSendingOverlay'
-import { resolveUploadUri } from '@/lib/uploadUri'
+import { formatMediaSize } from '@/lib/formatMediaSize'
+import { getVideoThumbnail, getVideoThumbnailSync } from '@/lib/videoThumbnailCache'
 
 type VideoBubblePreviewProps = {
   uri: string
@@ -11,8 +11,19 @@ type VideoBubblePreviewProps = {
   height: number
   uploading?: boolean
   uploadLabel?: string
+  sizeBytes?: number | null
   /** When set, skips regenerating a thumbnail (from useVideoDimensions). */
   thumbUri?: string
+  /** Off-screen rows skip remote video decode entirely. */
+  active?: boolean
+}
+
+function isLocalUri(uri: string) {
+  return (
+    uri.startsWith('file://') ||
+    uri.startsWith('content://') ||
+    (uri.startsWith('/') && !uri.startsWith('//'))
+  )
 }
 
 /** Static thumbnail + play overlay for chat bubbles (fullscreen uses InteractiveVideoPlayer). */
@@ -23,9 +34,17 @@ export function VideoBubblePreview({
   uploading = false,
   uploadLabel,
   thumbUri: thumbUriProp,
+  sizeBytes,
+  active = true,
 }: VideoBubblePreviewProps) {
-  const [thumbUri, setThumbUri] = useState<string | null>(thumbUriProp ?? null)
-  const [loading, setLoading] = useState(!thumbUriProp)
+  const sizeLabel = formatMediaSize(sizeBytes ?? null)
+  // Seed from the prop or the shared cache so re-entering the viewport never
+  // re-decodes a thumbnail we already generated this session.
+  const initialThumb = thumbUriProp ?? (isLocalUri(uri) ? getVideoThumbnailSync(uri) : null)
+  const [thumbUri, setThumbUri] = useState<string | null>(initialThumb)
+  const [loading, setLoading] = useState(
+    active && !initialThumb && isLocalUri(uri),
+  )
 
   useEffect(() => {
     if (thumbUriProp) {
@@ -34,34 +53,43 @@ export function VideoBubblePreview({
       return
     }
 
-    let cancelled = false
-    const source = resolveUploadUri(uri)
+    if (!isLocalUri(uri)) {
+      setThumbUri(null)
+      setLoading(false)
+      return
+    }
 
+    const cached = getVideoThumbnailSync(uri)
+    if (cached) {
+      setThumbUri(cached)
+      setLoading(false)
+      return
+    }
+
+    if (!active) {
+      setThumbUri(null)
+      setLoading(false)
+      return
+    }
+
+    let cancelled = false
     setThumbUri(null)
     setLoading(true)
 
-    void (async () => {
-      try {
-        const thumbTask = VideoThumbnails.getThumbnailAsync(source, {
-          time: 500,
-          quality: 0.65,
-        })
-        const timeout = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error('thumbnail_timeout')), 12_000)
-        })
-        const { uri: generated } = await Promise.race([thumbTask, timeout])
-        if (!cancelled) setThumbUri(generated)
-      } catch {
-        if (!cancelled) setThumbUri(null)
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    })()
+    const task = InteractionManager.runAfterInteractions(() => {
+      void (async () => {
+        const generated = await getVideoThumbnail(uri)
+        if (cancelled) return
+        setThumbUri(generated)
+        setLoading(false)
+      })()
+    })
 
     return () => {
       cancelled = true
+      task.cancel()
     }
-  }, [uri, thumbUriProp])
+  }, [uri, thumbUriProp, active])
 
   return (
     <View style={[styles.wrap, { width, height }, uploading && styles.uploading]}>
@@ -71,6 +99,7 @@ export function VideoBubblePreview({
           style={{ width, height }}
           contentFit="cover"
           transition={120}
+          recyclingKey={thumbUri}
         />
       ) : loading ? (
         <View style={styles.center}>
@@ -79,13 +108,14 @@ export function VideoBubblePreview({
       ) : (
         <View style={styles.fallback} />
       )}
-
-      <View pointerEvents="none" style={styles.playLayer}>
-        <View style={styles.playBtn}>
-          <Text style={styles.playIcon}>▶</Text>
-        </View>
+      <View style={styles.playBadge}>
+        <Text style={styles.playIcon}>▶</Text>
       </View>
-
+      {sizeLabel ? (
+        <View style={styles.sizeBadge}>
+          <Text style={styles.sizeText}>{sizeLabel}</Text>
+        </View>
+      ) : null}
       {uploading ? <MessageSendingOverlay label={uploadLabel ?? 'Uploading…'} /> : null}
     </View>
   )
@@ -93,10 +123,11 @@ export function VideoBubblePreview({
 
 const styles = StyleSheet.create({
   wrap: {
+    backgroundColor: '#0b141a',
     borderRadius: 12,
     overflow: 'hidden',
-    backgroundColor: '#1a1a1a',
-    position: 'relative',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   uploading: {
     opacity: 0.72,
@@ -108,26 +139,34 @@ const styles = StyleSheet.create({
   },
   fallback: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: '#2a2a2a',
+    backgroundColor: '#1f2c34',
   },
-  playLayer: {
-    ...StyleSheet.absoluteFillObject,
+  playBadge: {
+    position: 'absolute',
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(0,0,0,0.45)',
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  playBtn: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: 'rgba(255,255,255,0.85)',
   },
   playIcon: {
     color: '#fff',
-    fontSize: 22,
-    marginLeft: 4,
+    fontSize: 18,
+    marginLeft: 3,
+  },
+  sizeBadge: {
+    position: 'absolute',
+    left: 8,
+    bottom: 8,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  sizeText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '600',
   },
 })

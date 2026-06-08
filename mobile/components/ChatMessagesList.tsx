@@ -1,5 +1,6 @@
-import { memo, useCallback, useRef, type MutableRefObject, type RefObject } from 'react'
-import { View, ActivityIndicator } from 'react-native'
+import { memo, useCallback, useEffect, useRef, type MutableRefObject, type RefObject } from 'react'
+import { View, ActivityIndicator, InteractionManager, Platform } from 'react-native'
+import { useQueryClient } from '@tanstack/react-query'
 import { FlatList } from 'react-native-gesture-handler'
 import type Swipeable from 'react-native-gesture-handler/Swipeable'
 import type { ViewToken } from 'react-native'
@@ -9,7 +10,13 @@ import type { ChatListItem } from '@/lib/chatListItems'
 import { formatDateLabel } from '@/lib/format'
 import { messageRenderEqual } from '@/lib/messageRenderEqual'
 import type { MessageAnchor } from '@/components/MessageActionsOverlay'
+import { buildChatMediaViewport } from '@/lib/chatMediaViewport'
 import { syncVisibleMessageMedia } from '@/lib/messageMediaSync'
+import { queueMediaPresignForMessages } from '@/lib/mediaPresignBatch'
+import {
+  clearVisibleMessageMedia,
+  setVisibleMessageIds,
+} from '@/lib/visibleMessageMedia'
 import type { Message } from '@/types'
 
 type ChatListRowProps = {
@@ -136,30 +143,40 @@ function ChatMessagesListBase({
   onLongPress,
 }: ChatMessagesListProps) {
   const stickyDateRef = useRef('')
+  const queryClient = useQueryClient()
+
+  useEffect(() => () => clearVisibleMessageMedia(), [])
+
+  const dataRef = useRef(data)
+  dataRef.current = data
 
   const onViewableItemsChanged = useCallback(
     ({ viewableItems }: { viewableItems: ViewToken[] }) => {
       let topIndex = -1
       let topDate: string | null = null
-      const visibleMedia: Message[] = []
+
+      // Defer media bookkeeping (presign batching, download sync) off the scroll
+      // frame so fast flings stay at 60fps; the sticky-date update stays sync.
+      InteractionManager.runAfterInteractions(() => {
+        const viewport = buildChatMediaViewport(dataRef.current, viewableItems)
+        setVisibleMessageIds(viewport.loadMessageIds)
+        if (viewport.presignCandidates.length) {
+          void queueMediaPresignForMessages(queryClient, viewport.presignCandidates)
+        }
+        if (viewport.orderedMedia.length) syncVisibleMessageMedia(viewport.orderedMedia)
+      })
 
       for (const token of viewableItems) {
-        if (token.index == null || token.index <= topIndex) continue
         const row = token.item as ChatListItem
+        if (token.index == null || token.index <= topIndex) continue
         if (row.kind === 'date') {
           topIndex = token.index
           topDate = row.dateIso
         } else if (row.kind === 'message') {
           topIndex = token.index
           topDate = row.message.sentAt
-          const msg = row.message
-          if (msg.type !== 'text' && msg.type !== 'location') {
-            visibleMedia.push(msg)
-          }
         }
       }
-
-      if (visibleMedia.length) syncVisibleMessageMedia(visibleMedia)
 
       if (!topDate) return
       const label = formatDateLabel(topDate)
@@ -167,7 +184,7 @@ function ChatMessagesListBase({
       stickyDateRef.current = label
       onStickyDateChange(label)
     },
-    [onStickyDateChange],
+    [onStickyDateChange, queryClient],
   )
 
   const onViewableItemsChangedRef = useRef(onViewableItemsChanged)
@@ -218,11 +235,13 @@ function ChatMessagesListBase({
       data={data}
       extraData={highlightMessageId}
       inverted
-      initialNumToRender={10}
-      maxToRenderPerBatch={6}
+      initialNumToRender={8}
+      maxToRenderPerBatch={4}
       updateCellsBatchingPeriod={50}
       windowSize={7}
-      removeClippedSubviews={false}
+      // Android inverted lists with media bubbles blank out / flicker with this
+      // enabled (known RN issue); keep the memory win only on iOS.
+      removeClippedSubviews={Platform.OS === 'ios'}
       keyExtractor={(row) => row.id}
       viewabilityConfigCallbackPairs={viewabilityPairs}
       maintainVisibleContentPosition={{
@@ -254,7 +273,7 @@ function ChatMessagesListBase({
       keyboardShouldPersistTaps="handled"
       onScroll={(e) => onScrollOffset(e.nativeEvent.contentOffset.y)}
       scrollEventThrottle={16}
-      onScrollToIndexFailed={({ index }) => {
+      onScrollToIndexFailed={({ index }: { index: number }) => {
         listRef.current?.scrollToOffset({
           offset: Math.max(0, index * 72),
           animated: true,

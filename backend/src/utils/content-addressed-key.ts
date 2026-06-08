@@ -20,8 +20,26 @@ export function extFromFilename(filename: string, mime: string): string {
   return '.bin'
 }
 
+export interface ContentAddressedParts {
+  /** SHA-256 hex digest of the bytes — the blob's stable identity. */
+  sha256: string
+  /** Object storage key: media/blobs/<sha256>.<ext>. */
+  key: string
+  ext: string
+}
+
+/** SHA-256 content-addressed key + hash — identical bytes share one object. */
+export function contentAddressedKeyParts(
+  buffer: Buffer,
+  filename: string,
+  mime: string,
+): ContentAddressedParts {
+  const sha256 = createHash('sha256').update(buffer).digest('hex')
+  const ext = extFromFilename(filename, mime)
+  return { sha256, key: `media/blobs/${sha256}${ext}`, ext }
+}
+
 /** SHA-256 content-addressed S3 key — identical bytes share one object. */
 export function contentAddressedKey(buffer: Buffer, filename: string, mime: string): string {
-  const hash = createHash('sha256').update(buffer).digest('hex')
-  return `media/blobs/${hash}${extFromFilename(filename, mime)}`
+  return contentAddressedKeyParts(buffer, filename, mime).key
 }

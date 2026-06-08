@@ -1,13 +1,6 @@
-import { useEffect, useMemo, useRef } from 'react'
-import {
-  keepPreviousData,
-  useInfiniteQuery,
-  useMutation,
-  useQuery,
-  useQueryClient,
-  type InfiniteData,
-  type QueryClient,
-} from '@tanstack/react-query'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useMutation, useQuery } from '@tanstack/react-query'
+import axios from 'axios'
 import { api } from '@/services/api'
 import { isOnline } from '@/lib/network'
 import { enqueueTextSend } from '@/lib/offlineQueue'
@@ -16,247 +9,244 @@ import { postMediaMessage } from '@/lib/postMediaMessage'
 import type { MediaSendPhase } from '@/lib/mediaSendPhase'
 import { clientSendMetadata, readClientSendMeta } from '@/lib/mediaSendMeta'
 import { mediaSendErrorMessage } from '@/lib/mediaSendErrors'
-import axios from 'axios'
 import { normalizeConversation } from '@/lib/conversation'
 import { messageTypeFromMime, normalizeUploadMime } from '@/lib/mediaMime'
-import {
-  type MessagesInfinite,
-  coerceMessagesInfiniteData,
-  migrateMessagesCacheShape,
-  flattenMessagesPages,
-  stabilizeMessageList,
-  pageMessages,
-  patchMessageFieldsInfinite,
-  patchMessageStatusInfinite,
-  upsertMessageInfinite,
-} from '@/lib/messagesQueryCache'
 import { playWaFeedback, playWaFeedbackAsync } from '@/lib/waFeedbackSounds'
 import { normalizeMessage, normalizeMessagesResponse } from '@/lib/normalizeMessage'
 import type { MediaQualityTier } from '@/lib/imageQualityPreference'
-import { patchInboxQueriesForMessage } from '@/lib/inboxCachePatch'
 import { queueMessageMediaSync } from '@/lib/messageMediaSync'
+import { newPendingId } from '@/lib/clientId'
+import { ensureDbReady } from '@/lib/db/client'
+import {
+  applyMessageToConversation,
+  deleteMessages,
+  getConversationById,
+  getMessageById,
+  patchLocalConversation,
+  patchLocalMessage,
+  putLocalMessage,
+  replaceLocalMessage,
+  THREAD_PAGE_SIZE,
+  upsertConversations,
+  useInboxConversations,
+  useThreadMessages,
+} from '@/lib/db/repo'
+import { loadInboxPage, loadThreadPage } from '@/lib/sync/seedCoordinator'
+import { scheduleSync } from '@/lib/sync/syncEngine'
+import type { InboxFilter } from '@/lib/inboxFilters'
+import { useAuthStore } from '@/stores/authStore'
 import type {
   ConversationDetail,
   ConversationListItem,
-  ConversationsResponse,
   Message,
   MessagesResponse,
 } from '@/types'
 
-export function patchConversationUnreadCount(
-  data: InfiniteData<ConversationsResponse> | undefined,
-  conversationId: string,
-  unreadCount: number,
-): InfiniteData<ConversationsResponse> | undefined {
-  if (!data) return data
-  return {
-    ...data,
-    pages: data.pages.map((page) => ({
-      ...page,
-      conversations: page.conversations.map((c) =>
-        c.id === conversationId ? { ...c, unreadCount } : c,
-      ),
-    })),
-  }
-}
+export type { InboxFilter } from '@/lib/inboxFilters'
 
-function sortInboxConversations(list: ConversationListItem[]) {
-  return [...list].sort((a, b) => {
-    const pinA = a.pinnedAt ? 1 : 0
-    const pinB = b.pinnedAt ? 1 : 0
-    if (pinA !== pinB) return pinB - pinA
-    const tA = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0
-    const tB = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0
-    return tB - tA
-  })
-}
+const isPendingId = (id: string) => id.startsWith('pending-')
 
-export function patchConversationPin(
-  data: InfiniteData<ConversationsResponse> | undefined,
-  conversation: ConversationListItem,
-): InfiniteData<ConversationsResponse> | undefined {
-  if (!data) return data
-  let found = false
-  const pages = data.pages.map((page) => {
-    const conversations = page.conversations.map((c) => {
-      if (c.id !== conversation.id) return c
-      found = true
-      return normalizeConversation({ ...c, ...conversation })
-    })
-    return { ...page, conversations: sortInboxConversations(conversations) }
-  })
-  if (!found && pages[0]) {
-    pages[0] = {
-      ...pages[0],
-      conversations: sortInboxConversations([
-        normalizeConversation(conversation),
-        ...pages[0].conversations,
-      ]),
-    }
-  }
-  return { ...data, pages }
-}
+/* -------------------------------------------------------------------------- */
+/*  Inbox (live query over device SQLite, REST-seeded + change-feed synced)   */
+/* -------------------------------------------------------------------------- */
 
-export function patchConversationLastMessageStatus(
-  data: InfiniteData<ConversationsResponse> | undefined,
-  conversationId: string,
-  messageId: string,
-  status: Message['status'],
-): InfiniteData<ConversationsResponse> | undefined {
-  if (!data) return data
-  return {
-    ...data,
-    pages: data.pages.map((page) => ({
-      ...page,
-      conversations: page.conversations.map((c) => {
-        if (c.id !== conversationId) return c
-        if (c.lastMessageId && c.lastMessageId !== messageId) return c
-        if (c.lastMessageDirection !== 'outbound') return c
-        return { ...c, lastMessageStatus: status }
-      }),
-    })),
-  }
-}
+export function useInbox(filter: InboxFilter, search: string) {
+  const agentId = useAuthStore((s) => s.agent?.id ?? null)
+  const live = useInboxConversations(filter, search, agentId)
+  const [nextCursor, setNextCursor] = useState<string | null>(null)
+  const [error, setError] = useState<unknown>(null)
 
-export type InboxFilter = 'all' | 'open' | 'resolved' | 'mine'
-
-export function useConversations(filter: InboxFilter, search: string) {
-  return useInfiniteQuery({
-    queryKey: ['conversations', filter, search],
-    placeholderData: keepPreviousData,
-    staleTime: 60_000,
-    gcTime: 30 * 60_000,
-    networkMode: 'offlineFirst',
-    refetchOnMount: false,
-    refetchOnReconnect: true,
-    initialPageParam: null as string | null,
-    queryFn: async ({ pageParam }) => {
-      const params: Record<string, string> = {}
-      if (filter === 'mine') params.assignedTo = 'me'
-      else if (filter !== 'all') params.status = filter
-      if (search) params.search = search
-      if (pageParam) params.cursor = pageParam
-      const res = await api.get<ConversationsResponse>('/conversations', { params })
-      return {
-        ...res.data,
-        conversations: res.data.conversations.map((c) => normalizeConversation(c)),
+  // Background refresh: never gates the UI. Cached rows render immediately from
+  // the live store; the network pull just reconciles + sets the paging cursor.
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        await ensureDbReady()
+        const cursor = await loadInboxPage(filter, search, null)
+        if (cancelled) return
+        setNextCursor(cursor)
+        setError(null)
+      } catch (e) {
+        if (!cancelled) setError(e)
       }
-    },
-    getNextPageParam: (last) => last.nextCursor,
-  })
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [filter, search])
+
+  const refetch = useCallback(async () => {
+    const cursor = await loadInboxPage(filter, search, null)
+    setNextCursor(cursor)
+  }, [filter, search])
+
+  const fetchNextPage = useCallback(async () => {
+    if (!nextCursor) return
+    const cursor = await loadInboxPage(filter, search, nextCursor)
+    setNextCursor(cursor)
+  }, [filter, search, nextCursor])
+
+  const hasData = live.conversations.length > 0
+  return {
+    conversations: live.conversations,
+    // Loader only when we truly have nothing cached yet for this filter/search.
+    isLoading: live.status === 'loading' && !hasData,
+    isError: !!error && !hasData,
+    error,
+    refetch,
+    fetchNextPage,
+    hasNextPage: !!nextCursor,
+  }
+}
+
+/** Synchronous cache of the last-seen detail per conversation for instant reopen. */
+const conversationDetailCache = new Map<string, ConversationDetail>()
+
+/** Clear module-level caches on logout so the next agent can't see stale data. */
+export function clearConversationModuleCaches(): void {
+  conversationDetailCache.clear()
+  progressThrottle.clear()
 }
 
 export function useConversation(id: string) {
-  return useQuery({
+  const [fallback, setFallback] = useState<ConversationDetail | null>(
+    () => conversationDetailCache.get(id) ?? null,
+  )
+
+  // Seed the header from the device DB row on first-ever open (covers the case
+  // where the detail cache is cold but the conversation is already synced).
+  useEffect(() => {
+    let cancelled = false
+    const cached = conversationDetailCache.get(id)
+    if (cached) {
+      setFallback(cached)
+      return
+    }
+    setFallback(null)
+    void (async () => {
+      const row = await getConversationById(id)
+      if (!cancelled && row) setFallback(row as unknown as ConversationDetail)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [id])
+
+  const query = useQuery({
     queryKey: ['conversation', id],
     queryFn: async () => {
       const res = await api.get<{ conversation: ConversationDetail }>(
         `/conversations/${id}`,
       )
-      return normalizeConversation(res.data.conversation)
+      const conversation = normalizeConversation(res.data.conversation)
+      await upsertConversations([conversation])
+      conversationDetailCache.set(id, conversation)
+      return conversation
     },
     enabled: !!id,
+    // Render instantly from the in-memory detail cache, then refetch in background.
+    initialData: () => conversationDetailCache.get(id),
+    initialDataUpdatedAt: 0,
   })
-}
-
-function patchMessageInCacheInfinite(
-  old: MessagesInfinite | undefined,
-  message: Message,
-): MessagesInfinite | undefined {
-  if (!old) return old
-  return {
-    ...old,
-    pages: old.pages.map((page) => {
-      const list = pageMessages(page)
-      const exists = list.some((m) => m.id === message.id)
-      if (!exists) return page
-      return {
-        ...page,
-        messages: list.map((m) =>
-          m.id === message.id
-            ? {
-                ...m,
-                ...message,
-                localPreviewUri: message.localPreviewUri ?? m.localPreviewUri,
-              }
-            : m,
-        ),
-      }
-    }),
-  }
-}
-
-export function useMessages(conversationId: string) {
-  const qc = useQueryClient()
-
-  useEffect(() => {
-    migrateMessagesCacheShape(qc, conversationId)
-  }, [qc, conversationId])
-
-  const query = useInfiniteQuery({
-    queryKey: ['messages', conversationId],
-    staleTime: 30_000,
-    gcTime: 30 * 60_000,
-    networkMode: 'offlineFirst',
-    initialPageParam: null as string | null,
-    enabled: !!conversationId,
-    queryFn: async ({ pageParam }) => {
-      const res = await api.get<MessagesResponse>(
-        `/conversations/${conversationId}/messages`,
-        { params: pageParam ? { before: pageParam } : {} },
-      )
-      const incoming = normalizeMessagesResponse(
-        res.data as { messages: (Message & Record<string, unknown>)[]; nextCursor: string | null },
-      )
-      const previous = coerceMessagesInfiniteData(
-        qc.getQueryData(['messages', conversationId]),
-      )
-      const flatPrev = previous?.pages.flatMap((p) => p.messages) ?? []
-      if (!flatPrev.length) return incoming
-
-      const localById = new Map(
-        flatPrev.filter((m) => m.localPreviewUri).map((m) => [m.id, m.localPreviewUri!]),
-      )
-      if (localById.size === 0) return incoming
-
-      return {
-        ...incoming,
-        messages: incoming.messages.map((m) => ({
-          ...m,
-          localPreviewUri: m.localPreviewUri ?? localById.get(m.id),
-        })),
-      }
-    },
-    getNextPageParam: (lastPage) => lastPage?.nextCursor ?? undefined,
-  })
-
-  const infinite = coerceMessagesInfiniteData(query.data) ?? query.data
-  const messagesRef = useRef<Message[]>([])
-  const messages = useMemo(() => {
-    const built = flattenMessagesPages(infinite)
-    const stabilized = stabilizeMessageList(messagesRef.current, built)
-    messagesRef.current = stabilized
-    return stabilized
-  }, [infinite])
-  const nextCursor = infinite?.pages.at(-1)?.nextCursor ?? null
-  const data = useMemo(
-    () => (infinite ? { messages, nextCursor } : undefined),
-    [infinite, messages, nextCursor],
-  )
 
   return {
     ...query,
-    data,
-    fetchOlderMessages: query.fetchNextPage,
-    hasOlderMessages: query.hasNextPage,
-    isFetchingOlder: query.isFetchingNextPage,
+    data: (query.data ?? fallback ?? undefined) as ConversationDetail | undefined,
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/*  Thread messages (live query, oldest→newest, REST-seeded + paged)         */
+/* -------------------------------------------------------------------------- */
+
+export function useMessages(conversationId: string) {
+  const [limit, setLimit] = useState(THREAD_PAGE_SIZE)
+  const live = useThreadMessages(conversationId, limit)
+  const [olderCursor, setOlderCursor] = useState<string | null>(null)
+  const [seeded, setSeeded] = useState(false)
+  const [isFetchingOlder, setIsFetchingOlder] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+
+  // Reset the window when switching conversations.
+  useEffect(() => {
+    setLimit(THREAD_PAGE_SIZE)
+    setOlderCursor(null)
+    setSeeded(false)
+  }, [conversationId])
+
+  // Background seed of the latest page — never gates the UI; the cached SQLite
+  // snapshot renders instantly via the live store.
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        await ensureDbReady()
+        const { nextCursor } = await loadThreadPage(conversationId)
+        if (cancelled) return
+        setOlderCursor(nextCursor)
+        setError(null)
+      } catch (e) {
+        if (!cancelled) setError(e)
+      } finally {
+        if (!cancelled) setSeeded(true)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [conversationId])
+
+  const messages = live.messages
+
+  const fetchOlderMessages = useCallback(async () => {
+    if (isFetchingOlder) return
+    // Grow the local window first so already-synced older rows appear instantly.
+    if (messages.length >= limit) setLimit((n) => n + THREAD_PAGE_SIZE)
+    if (!olderCursor) return
+    setIsFetchingOlder(true)
+    try {
+      const { nextCursor } = await loadThreadPage(conversationId, olderCursor)
+      setOlderCursor(nextCursor)
+    } catch {
+      /* keep cursor; user can retry by scrolling */
+    } finally {
+      setIsFetchingOlder(false)
+    }
+  }, [conversationId, olderCursor, isFetchingOlder, messages.length, limit])
+
+  const refetch = useCallback(async () => {
+    const { nextCursor } = await loadThreadPage(conversationId)
+    setOlderCursor(nextCursor)
+  }, [conversationId])
+
+  const data = useMemo(
+    () =>
+      messages.length || live.status === 'ready' || seeded
+        ? { messages, nextCursor: olderCursor }
+        : undefined,
+    [messages, olderCursor, live.status, seeded],
+  )
+
+  return {
+    data,
+    isPending: live.status === 'loading' && messages.length === 0,
+    isError: !!error && messages.length === 0,
+    error,
+    refetch,
+    fetchOlderMessages,
+    hasOlderMessages: !!olderCursor || messages.length >= limit,
+    isFetchingOlder,
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Sends — optimistic writes land in SQLite; the live query renders them.    */
+/* -------------------------------------------------------------------------- */
 
 export type SendTextInput = {
   body: string
   replyToMessageId?: string
-  /** Optimistic reply quote in the thread. */
   replyToPreview?: Message['replyTo']
 }
 
@@ -270,12 +260,10 @@ export type SendLocationInput = {
 }
 
 export function useSendText(conversationId: string) {
-  const qc = useQueryClient()
   const optimisticIdRef = useRef('')
   return useMutation({
-    onMutate: async (input) => {
-      const previous = qc.getQueryData<MessagesInfinite>(['messages', conversationId])
-      const optimisticId = `pending-text-${Date.now()}`
+    onMutate: async (input: SendTextInput) => {
+      const optimisticId = newPendingId('text')
       optimisticIdRef.current = optimisticId
       const optimistic: Message = {
         id: optimisticId,
@@ -296,18 +284,11 @@ export function useSendText(conversationId: string) {
         sentAt: new Date().toISOString(),
         createdAt: new Date().toISOString(),
       }
-      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
-        upsertMessageInfinite(old, optimistic),
-      )
-      patchInboxQueriesForMessage(qc, conversationId, optimistic, { suppressUnread: true })
-      return { previous, optimisticId }
+      await putLocalMessage(optimistic)
+      await applyMessageToConversation(optimistic)
+      return { optimisticId }
     },
-    onError: (_err, _input, ctx) => {
-      if (ctx?.previous) {
-        qc.setQueryData(['messages', conversationId], ctx.previous)
-      }
-    },
-    mutationFn: async (input: SendTextInput) => {
+    mutationFn: async (input: SendTextInput): Promise<Message> => {
       const queueLocal = () =>
         enqueueTextSend({
           id: optimisticIdRef.current,
@@ -335,41 +316,28 @@ export function useSendText(conversationId: string) {
         throw err
       }
     },
-    onSuccess: (message, _input, ctx) => {
-      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
-        upsertMessageInfinite(old, message, { removeId: ctx?.optimisticId }),
-      )
-      patchInboxQueriesForMessage(qc, conversationId, message, { suppressUnread: true })
+    onSuccess: async (message, _input, ctx) => {
+      if (isPendingId(message.id)) {
+        // Queued offline — keep the optimistic row; flush reconciles later.
+        await putLocalMessage(message)
+        return
+      }
+      await replaceLocalMessage(ctx?.optimisticId ?? '', message)
+      await applyMessageToConversation(message)
+      scheduleSync()
     },
-  })
-}
-
-export function useForwardMessage() {
-  return useMutation({
-    mutationFn: async ({
-      messageId,
-      targetConversationIds,
-    }: {
-      messageId: string
-      targetConversationIds: string[]
-    }) => {
-      const res = await api.post<{
-        okCount: number
-        results: Array<{ conversationId: string; ok: boolean; error?: string }>
-      }>('/conversations/forward-batch', { messageId, targetConversationIds }, {
-        timeout: 180_000,
-      })
-      return res.data
+    onError: async (_err, _input, ctx) => {
+      if (ctx?.optimisticId) {
+        await patchLocalMessage(ctx.optimisticId, { status: 'failed' })
+      }
     },
   })
 }
 
 export function useSendLocation(conversationId: string) {
-  const qc = useQueryClient()
   return useMutation({
-    onMutate: async (input) => {
-      const previous = qc.getQueryData<MessagesInfinite>(['messages', conversationId])
-      const optimisticId = `pending-location-${Date.now()}`
+    onMutate: async (input: SendLocationInput) => {
+      const optimisticId = newPendingId('location')
       const metadata = {
         latitude: input.latitude,
         longitude: input.longitude,
@@ -396,15 +364,9 @@ export function useSendLocation(conversationId: string) {
         sentAt: new Date().toISOString(),
         createdAt: new Date().toISOString(),
       }
-      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
-        upsertMessageInfinite(old, optimistic),
-      )
-      return { previous, optimisticId }
-    },
-    onError: (_err, _input, ctx) => {
-      if (ctx?.previous) {
-        qc.setQueryData(['messages', conversationId], ctx.previous)
-      }
+      await putLocalMessage(optimistic)
+      await applyMessageToConversation(optimistic)
+      return { optimisticId }
     },
     mutationFn: async (input: SendLocationInput) => {
       const res = await api.post<{ message: Message }>(
@@ -421,11 +383,36 @@ export function useSendLocation(conversationId: string) {
       )
       return normalizeMessage(res.data.message as Message & Record<string, unknown>)
     },
-    onSuccess: (message, _input, ctx) => {
-      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
-        upsertMessageInfinite(old, message, { removeId: ctx?.optimisticId }),
-      )
-      patchInboxQueriesForMessage(qc, conversationId, message, { suppressUnread: true })
+    onSuccess: async (message, _input, ctx) => {
+      await replaceLocalMessage(ctx?.optimisticId ?? '', message)
+      await applyMessageToConversation(message)
+      scheduleSync()
+    },
+    onError: async (_err, _input, ctx) => {
+      if (ctx?.optimisticId) {
+        await patchLocalMessage(ctx.optimisticId, { status: 'failed' })
+      }
+    },
+  })
+}
+
+export function useForwardMessage() {
+  return useMutation({
+    mutationFn: async ({
+      messageId,
+      targetConversationIds,
+    }: {
+      messageId: string
+      targetConversationIds: string[]
+    }) => {
+      const res = await api.post<{
+        okCount: number
+        results: Array<{ conversationId: string; ok: boolean; error?: string }>
+      }>('/conversations/forward-batch', { messageId, targetConversationIds }, {
+        timeout: 180_000,
+      })
+      scheduleSync()
+      return res.data
     },
   })
 }
@@ -436,23 +423,19 @@ export function isNetworkError(err: unknown): boolean {
 }
 
 export function useMarkRead() {
-  const qc = useQueryClient()
   return useMutation({
     mutationFn: async (conversationId: string) => {
       await api.post(`/messages/${conversationId}/read`)
       return conversationId
     },
-    onSuccess: (conversationId) => {
-      qc.setQueriesData<InfiniteData<ConversationsResponse>>(
-        { queryKey: ['conversations'] },
-        (old) => patchConversationUnreadCount(old, conversationId, 0),
-      )
+    onMutate: async (conversationId) => {
+      await patchLocalConversation(conversationId, { unreadCount: 0 })
     },
+    onSuccess: () => scheduleSync(),
   })
 }
 
 export function useMarkUnread() {
-  const qc = useQueryClient()
   return useMutation({
     mutationFn: async (conversationId: string) => {
       const res = await api.post<{ unreadCount: number }>(
@@ -460,17 +443,13 @@ export function useMarkUnread() {
       )
       return { conversationId, unreadCount: res.data.unreadCount }
     },
-    onSuccess: ({ conversationId, unreadCount }) => {
-      qc.setQueriesData<InfiniteData<ConversationsResponse>>(
-        { queryKey: ['conversations'] },
-        (old) => patchConversationUnreadCount(old, conversationId, unreadCount),
-      )
+    onSuccess: async ({ conversationId, unreadCount }) => {
+      await patchLocalConversation(conversationId, { unreadCount })
     },
   })
 }
 
 export function usePinConversation() {
-  const qc = useQueryClient()
   return useMutation({
     mutationFn: async ({
       conversationId,
@@ -485,12 +464,13 @@ export function usePinConversation() {
       )
       return normalizeConversation(res.data.conversation)
     },
-    onSuccess: (conversation) => {
-      qc.setQueryData(['conversation', conversation.id], conversation)
-      qc.setQueriesData<InfiniteData<ConversationsResponse>>(
-        { queryKey: ['conversations'] },
-        (old) => patchConversationPin(old, conversation),
-      )
+    onMutate: async ({ conversationId, pinned }) => {
+      await patchLocalConversation(conversationId, {
+        pinnedAt: pinned ? new Date().toISOString() : null,
+      })
+    },
+    onSuccess: async (conversation) => {
+      await upsertConversations([conversation])
     },
   })
 }
@@ -506,18 +486,14 @@ export interface MediaUpload {
   replyToPreview?: Message['replyTo']
   /** Retry in place: update this message to pending instead of adding a new bubble. */
   replaceMessageId?: string
-  /** Set when video was trimmed before upload. */
   videoTrim?: { startMs: number; endMs: number }
-  /** Skip video transcode; send as document (up to 100MB). */
   sendAsDocument?: boolean
-  /** Skip trim/compress — preparedUri is ready to upload. */
   skipPrepare?: boolean
   preparedUri?: string
-  /** Stable id for optimistic bubble + phase updates. */
   clientMessageId?: string
 }
 
-function buildOptimisticMediaMessage(
+export function buildOptimisticMediaMessage(
   conversationId: string,
   optimisticId: string,
   media: MediaUpload,
@@ -547,31 +523,54 @@ function buildOptimisticMediaMessage(
   }
 }
 
-export function useSendMedia(conversationId: string) {
-  const qc = useQueryClient()
+/** Per-message progress throttle state (coalesces compress/upload DB writes). */
+const progressThrottle = new Map<string, { pct: number; at: number }>()
 
-  function patchPhase(messageId: string | undefined, phase: MediaSendPhase) {
+export function useSendMedia(conversationId: string) {
+  async function patchPhase(messageId: string | undefined, phase: MediaSendPhase) {
     if (!messageId) return
-    qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
-      patchMessageFieldsInfinite(old, messageId, { sendPhase: phase }),
-    )
+    await patchLocalMessage(messageId, { sendPhase: phase })
   }
 
-  function patchPreparedUri(messageId: string | undefined, preparedUri: string, media: MediaUpload) {
+  // Compress/upload progress fires dozens of times per second. Coalesce DB
+  // writes (≥5% advance or ≥300ms apart, plus the final 100%) so we don't thrash
+  // SQLite + the change feed and trigger a re-render storm mid-send.
+  async function patchProgress(
+    messageId: string | undefined,
+    phase: MediaSendPhase,
+    key: 'compressProgress' | 'uploadProgress',
+    progress: number,
+  ) {
     if (!messageId) return
-    qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
-      patchMessageFieldsInfinite(old, messageId, {
-        localPreviewUri: preparedUri,
-        metadata: clientSendMetadata({
-          uri: media.uri,
-          videoTrim: media.videoTrim,
-          sendAsDocument: media.sendAsDocument,
-          imageQuality: media.imageQuality,
-          videoQuality: media.videoQuality,
-          preparedUri,
-        }),
+    const now = Date.now()
+    const last = progressThrottle.get(messageId)
+    const isFinal = progress >= 1
+    if (last && !isFinal && progress - last.pct < 0.05 && now - last.at < 300) return
+    progressThrottle.set(messageId, { pct: progress, at: now })
+    const existing = await getMessageById(messageId)
+    await patchLocalMessage(messageId, {
+      sendPhase: phase,
+      metadata: { ...(existing?.metadata ?? {}), [key]: progress },
+    })
+  }
+
+  async function patchPreparedUri(
+    messageId: string | undefined,
+    preparedUri: string,
+    media: MediaUpload,
+  ) {
+    if (!messageId) return
+    await patchLocalMessage(messageId, {
+      localPreviewUri: preparedUri,
+      metadata: clientSendMetadata({
+        uri: media.uri,
+        videoTrim: media.videoTrim,
+        sendAsDocument: media.sendAsDocument,
+        imageQuality: media.imageQuality,
+        videoQuality: media.videoQuality,
+        preparedUri,
       }),
-    )
+    })
   }
 
   return useMutation({
@@ -607,29 +606,13 @@ export function useSendMedia(conversationId: string) {
         videoTrim: media.skipPrepare ? undefined : media.videoTrim,
         sendAsDocument: media.sendAsDocument,
         skipPrepare: media.skipPrepare,
-        onPhase: (phase) => patchPhase(trackingId, phase),
-        onCompressProgress: (progress) => {
-          qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) => {
-            const existing = flattenMessagesPages(old).find((m) => m.id === trackingId)
-            return patchMessageFieldsInfinite(old, trackingId!, {
-              sendPhase: 'preparing',
-              metadata: { ...(existing?.metadata ?? {}), compressProgress: progress },
-            })
-          })
-        },
-        onUploadProgress: (progress) => {
-          qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) => {
-            const existing = flattenMessagesPages(old).find((m) => m.id === trackingId)
-            return patchMessageFieldsInfinite(old, trackingId!, {
-              sendPhase: 'uploading',
-              metadata: { ...(existing?.metadata ?? {}), uploadProgress: progress },
-            })
-          })
-        },
+        onPhase: (phase) => void patchPhase(trackingId, phase),
+        onCompressProgress: (progress) =>
+          void patchProgress(trackingId, 'preparing', 'compressProgress', progress),
+        onUploadProgress: (progress) =>
+          void patchProgress(trackingId, 'uploading', 'uploadProgress', progress),
         onPrepared: (prepared) => {
-          if (!media.skipPrepare) {
-            patchPreparedUri(trackingId, prepared.fileUri, media)
-          }
+          if (!media.skipPrepare) void patchPreparedUri(trackingId, prepared.fileUri, media)
         },
       })
     },
@@ -638,130 +621,104 @@ export function useSendMedia(conversationId: string) {
       if (!mime.startsWith('audio/')) {
         void playWaFeedback('send')
       }
-      const previous = qc.getQueryData<MessagesInfinite>(['messages', conversationId])
       if (media.replaceMessageId) {
-        qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
-          patchMessageStatusInfinite(old, media.replaceMessageId!, 'pending', {
+        await patchLocalMessage(media.replaceMessageId, {
+          status: 'pending',
+          sendPhase: 'preparing',
+          errorMessage: null,
+          sentAt: new Date().toISOString(),
+        })
+        return { replaceMessageId: media.replaceMessageId, localUri: media.uri }
+      }
+      const optimisticId = media.clientMessageId ?? newPendingId('media')
+      if (media.clientMessageId) {
+        const existing = await getMessageById(media.clientMessageId)
+        if (existing) {
+          await patchLocalMessage(media.clientMessageId, {
+            status: 'pending',
             sendPhase: 'preparing',
             errorMessage: null,
+            localPreviewUri: media.uri,
             sentAt: new Date().toISOString(),
-          }),
-        )
-        return {
-          previous,
-          replaceMessageId: media.replaceMessageId,
-          localUri: media.uri,
+          })
+          return { optimisticId: media.clientMessageId, localUri: media.uri }
         }
       }
-      const optimisticId = media.clientMessageId ?? `pending-media-${Date.now()}`
-      const optimistic = {
+      const optimistic: Message = {
         ...buildOptimisticMediaMessage(conversationId, optimisticId, media),
-        sendPhase: 'preparing' as const,
+        sendPhase: 'preparing',
       }
-      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
-        upsertMessageInfinite(old, optimistic),
-      )
-      patchInboxQueriesForMessage(qc, conversationId, optimistic, { suppressUnread: true })
-      return { previous, optimisticId, localUri: media.uri }
+      await putLocalMessage(optimistic)
+      await applyMessageToConversation(optimistic)
+      return { optimisticId, localUri: media.uri }
     },
-    onError: (err, media, ctx) => {
+    onError: async (err, media, ctx) => {
+      const cleanupId = ctx?.replaceMessageId ?? ctx?.optimisticId
+      if (cleanupId) progressThrottle.delete(cleanupId)
       if (err instanceof Error && err.message === 'QUEUED_OFFLINE') {
-        const queued = (err as Error & { queued?: { id: string; createdAt: string } }).queued
-        if (queued && ctx?.optimisticId) {
-          qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
-            patchMessageFieldsInfinite(old, ctx.optimisticId!, {
-              sendPhase: 'queued',
-              status: 'pending',
-            }),
-          )
+        if (ctx?.optimisticId) {
+          await patchLocalMessage(ctx.optimisticId, { sendPhase: 'queued', status: 'pending' })
         }
         return
       }
       const errMsg = mediaSendErrorMessage(err)
       const trackingId = ctx?.replaceMessageId ?? ctx?.optimisticId
-      const cached = trackingId
-        ? flattenMessagesPages(
-            qc.getQueryData<MessagesInfinite>(['messages', conversationId]),
-          ).find((m) => m.id === trackingId)
-        : undefined
+      const cached = trackingId ? await getMessageById(trackingId) : null
       const clientSend = cached ? readClientSendMeta(cached) : undefined
       const previewUri = clientSend?.preparedUri ?? cached?.localPreviewUri ?? ctx?.localUri
 
       if (ctx?.replaceMessageId) {
-        qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
-          patchMessageStatusInfinite(old, ctx.replaceMessageId!, 'failed', {
-            errorMessage: errMsg,
-            sendPhase: undefined,
-            localPreviewUri: previewUri,
-          }),
-        )
+        await patchLocalMessage(ctx.replaceMessageId, {
+          status: 'failed',
+          sendPhase: undefined,
+          errorMessage: errMsg,
+          localPreviewUri: previewUri,
+        })
         return
       }
       if (!ctx?.optimisticId) return
       const failed = buildOptimisticMediaMessage(conversationId, ctx.optimisticId, media)
-      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
-        upsertMessageInfinite(
-          old,
-          {
-            ...failed,
-            status: 'failed',
-            errorMessage: errMsg,
-            sendPhase: undefined,
-            localPreviewUri: previewUri,
-            metadata: cached?.metadata ?? failed.metadata,
-          },
-          { localPreviewUri: previewUri },
-        ),
-      )
+      await putLocalMessage({
+        ...failed,
+        status: 'failed',
+        errorMessage: errMsg,
+        sendPhase: undefined,
+        localPreviewUri: previewUri,
+        metadata: cached?.metadata ?? failed.metadata,
+      })
     },
-    onSuccess: (message, _media, ctx) => {
+    onSuccess: async (message, _media, ctx) => {
       if (message.type === 'audio' && message.status === 'sent') {
         void playWaFeedbackAsync('sent')
       }
       const trackingId = ctx?.replaceMessageId ?? ctx?.optimisticId
-      const cached = trackingId
-        ? flattenMessagesPages(
-            qc.getQueryData<MessagesInfinite>(['messages', conversationId]),
-          ).find((m) => m.id === trackingId)
-        : undefined
+      if (trackingId) progressThrottle.delete(trackingId)
+      const cached = trackingId ? await getMessageById(trackingId) : null
       const previewUri =
         readClientSendMeta(cached ?? message)?.preparedUri ??
         cached?.localPreviewUri ??
         ctx?.localUri
-      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) => {
-        const enriched = {
-          ...message,
-          sendPhase: message.status === 'sent' ? undefined : ('sending' as const),
-          localPreviewUri: previewUri,
-          metadata: cached?.metadata ?? message.metadata,
-        }
-        if (ctx?.replaceMessageId && old?.pages.length) {
-          const pages = [...old.pages]
-          const first = pages[0]
-          pages[0] = {
-            ...first,
-            messages: first.messages.filter((m) => m.id !== ctx.replaceMessageId),
-          }
-          return upsertMessageInfinite({ ...old, pages }, enriched, { localPreviewUri: previewUri })
-        }
-        return upsertMessageInfinite(old, enriched, {
-          removeId: ctx?.optimisticId,
-          localPreviewUri: previewUri,
-        })
-      })
-      if (message.mediaUrl) {
-        void qc.invalidateQueries({ queryKey: ['media', message.mediaUrl] })
+      const enriched: Message = {
+        ...message,
+        sendPhase: message.status === 'sent' ? undefined : 'sending',
+        localPreviewUri: previewUri,
+        metadata: cached?.metadata ?? message.metadata,
       }
+      if (ctx?.replaceMessageId) {
+        await replaceLocalMessage(ctx.replaceMessageId, enriched)
+      } else {
+        await replaceLocalMessage(ctx?.optimisticId ?? '', enriched)
+      }
+      await applyMessageToConversation(enriched)
       if (message.type !== 'text' && message.type !== 'location') {
         queueMessageMediaSync(message)
       }
-      patchInboxQueriesForMessage(qc, conversationId, message, { suppressUnread: true })
+      scheduleSync()
     },
   })
 }
 
 export function useResendMessage(conversationId: string) {
-  const qc = useQueryClient()
   return useMutation({
     mutationFn: async (messageId: string) => {
       const res = await api.post<{ message: Message }>(
@@ -769,33 +726,22 @@ export function useResendMessage(conversationId: string) {
       )
       return normalizeMessage(res.data.message as Message & Record<string, unknown>)
     },
-    onMutate: (messageId) => {
+    onMutate: async (messageId) => {
       void playWaFeedback('send')
-      const previous = qc.getQueryData<MessagesInfinite>(['messages', conversationId])
-      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
-        patchMessageStatusInfinite(old, messageId, 'pending'),
-      )
-      return { previous, messageId }
+      await patchLocalMessage(messageId, { status: 'pending', errorMessage: null })
+      return { messageId }
     },
-    onError: (_err, messageId, ctx) => {
-      if (ctx?.previous) {
-        qc.setQueryData(['messages', conversationId], ctx.previous)
-        return
-      }
-      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
-        patchMessageStatusInfinite(old, messageId, 'failed'),
-      )
+    onError: async (_err, messageId) => {
+      await patchLocalMessage(messageId, { status: 'failed' })
     },
-    onSuccess: (message) => {
-      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
-        patchMessageInCacheInfinite(old, message),
-      )
+    onSuccess: async (message) => {
+      await patchLocalMessage(message.id, message)
+      scheduleSync()
     },
   })
 }
 
 export function useSendTemplate(conversationId: string) {
-  const qc = useQueryClient()
   return useMutation({
     mutationFn: async (input: {
       templateName: string
@@ -808,11 +754,10 @@ export function useSendTemplate(conversationId: string) {
       )
       return normalizeMessage(res.data.message as Message & Record<string, unknown>)
     },
-    onSuccess: (message) => {
-      qc.setQueryData<MessagesInfinite>(['messages', conversationId], (old) =>
-        upsertMessageInfinite(old, message),
-      )
-      patchInboxQueriesForMessage(qc, conversationId, message, { suppressUnread: true })
+    onSuccess: async (message) => {
+      await putLocalMessage(message)
+      await applyMessageToConversation(message)
+      scheduleSync()
     },
   })
 }
@@ -854,7 +799,6 @@ export interface WaTemplate {
 }
 
 export function useUpdateConversation(conversationId: string) {
-  const qc = useQueryClient()
   return useMutation({
     mutationFn: async (patch: {
       status?: 'open' | 'resolved' | 'pending'
@@ -867,9 +811,9 @@ export function useUpdateConversation(conversationId: string) {
       )
       return res.data.conversation
     },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['conversation', conversationId] })
-      qc.invalidateQueries({ queryKey: ['conversations'] })
+    onSuccess: async (conversation) => {
+      await upsertConversations([normalizeConversation(conversation)])
+      scheduleSync()
     },
   })
 }

@@ -32,6 +32,7 @@ import { Avatar } from '@/components/Avatar'
 import { PressableScale } from '@/components/PressableScale'
 import { hapticLight, hapticMedium, hapticWarning } from '@/lib/haptics'
 import { clearDraft, loadDraft, saveDraft } from '@/lib/drafts'
+import { newPendingId } from '@/lib/clientId'
 import { ForwardMessageSheet } from '@/components/ForwardMessageSheet'
 import { ChatMessagesList } from '@/components/ChatMessagesList'
 import { ReplyQuoteBlock } from '@/components/ReplyQuoteBlock'
@@ -66,11 +67,16 @@ import {
   useSendLocation,
   useForwardMessage,
   isNetworkError,
+  buildOptimisticMediaMessage,
 } from '@/hooks/useConversations'
 import { useConversationRoom } from '@/hooks/useSocket'
 import { useTypingEmitter, useTypingIndicator } from '@/hooks/useTyping'
 import { useMessageSearch } from '@/hooks/useConversations'
 import { useDeepLinkScrollToMessage } from '@/hooks/useDeepLinkScrollToMessage'
+import {
+  useToggleMessageReaction,
+  useToggleMessageStar,
+} from '@/hooks/useMessageFeatures'
 import { scrollToChatMessage } from '@/lib/scrollToChatMessage'
 import {
   AssignSheet,
@@ -88,15 +94,20 @@ import {
   cancelVoiceRecording,
   startVoiceRecording,
   stopVoiceRecording,
+  warmVoiceRecorder,
   type VoiceRecording,
 } from '@/lib/voiceRecording'
+import {
+  deleteMessages,
+  patchLocalMessage,
+  putOptimisticOutboundMessage,
+} from '@/lib/db/repo'
 import { formatDuration } from '@/lib/format'
 import { prepareMediaFileForUpload } from '@/lib/prepareUpload'
 import { resolveUploadUri } from '@/lib/uploadUri'
 import { buildVoiceNoteRuns } from '@/lib/voiceNoteQueue'
 import {
   playWaFeedback,
-  playWaFeedbackAsync,
   warmWaFeedbackSounds,
 } from '@/lib/waFeedbackSounds'
 import { ScrollToLatestButton } from '@/components/ScrollToLatestButton'
@@ -148,6 +159,8 @@ export default function ChatScreen() {
   const [actionsOpen, setActionsOpen] = useState(false)
   const [forwardMessage, setForwardMessage] = useState<Message | null>(null)
   const forwardMutation = useForwardMessage()
+  const toggleStar = useToggleMessageStar(conversationId)
+  const toggleReaction = useToggleMessageReaction(conversationId)
   const [attachMenuOpen, setAttachMenuOpen] = useState(false)
   const [attachPanelHeight, setAttachPanelHeight] = useState(ATTACH_TRAY_HEIGHT)
   const [keyboardVisible, setKeyboardVisible] = useState(false)
@@ -179,7 +192,6 @@ export default function ChatScreen() {
     return () => clearTimeout(t)
   }, [conversationId, draft])
   const { data: searchHits } = useMessageSearch(conversationId, searchTerm)
-  const [sendingVoice, setSendingVoice] = useState(false)
   const [assignOpen, setAssignOpen] = useState(false)
   const [templateOpen, setTemplateOpen] = useState(false)
   const [attribOpen, setAttribOpen] = useState(false)
@@ -188,7 +200,9 @@ export default function ChatScreen() {
   const [videoTrimRestore, setVideoTrimRestore] = useState<VideoTrimSource | null>(null)
   const [pendingLocation, setPendingLocation] = useState<PendingLocation | null>(null)
   const [recordingOpen, setRecordingOpen] = useState(false)
-  const [micReady, setMicReady] = useState(false)
+  // Locked = the user slid up (or tapped) so recording continues hands-free and
+  // is sent via the bar's send button instead of on finger release.
+  const [recordingLocked, setRecordingLocked] = useState(false)
   const [recordingMs, setRecordingMs] = useState(0)
   const recordingTimer = useRef<ReturnType<typeof setInterval> | null>(null)
   const recordingStartedAt = useRef<number>(0)
@@ -315,6 +329,8 @@ export default function ChatScreen() {
     markedReadForFocusRef.current = conversationId
     const task = InteractionManager.runAfterInteractions(() => {
       void warmWaFeedbackSounds()
+      void warmVoiceRecorder()
+      void import('@/lib/postMediaMessage')
       void markReadAsync(conversationId).catch(() => undefined)
     })
     return () => task.cancel()
@@ -334,7 +350,7 @@ export default function ChatScreen() {
       recordingTimer.current = null
     }
     setRecordingOpen(false)
-    setMicReady(false)
+    setRecordingLocked(false)
     setRecordingMs(0)
     setVoiceRecorderLive(null)
     recordingStartedAt.current = 0
@@ -370,11 +386,10 @@ export default function ChatScreen() {
 
     voiceStartInFlight.current = true
     try {
-      await playWaFeedbackAsync('recordStart')
       const rec = await startVoiceRecording()
       voiceRecorder.current = rec
       setVoiceRecorderLive(rec)
-      setMicReady(true)
+      playWaFeedback('recordStart')
       return rec
     } catch (err) {
       clearRecordingUi()
@@ -648,6 +663,7 @@ export default function ChatScreen() {
     name: string,
     mimeType: string,
     caption?: string,
+    opts?: { skipPrepare?: boolean; clientMessageId?: string },
   ) {
     closeAttachMenu()
     const normalized = normalizeUploadMime(mimeType, name)
@@ -664,6 +680,8 @@ export default function ChatScreen() {
         caption,
         replyToMessageId,
         replyToPreview,
+        skipPrepare: opts?.skipPrepare,
+        clientMessageId: opts?.clientMessageId,
       })
       setPendingMedia(null)
       scrollToLatest()
@@ -757,7 +775,7 @@ export default function ChatScreen() {
     setVideoTrimRestore(null)
     setVideoTrimSource(null)
     closeAttachMenu()
-    const clientMessageId = `pending-media-${Date.now()}`
+    const clientMessageId = newPendingId('media')
     sendMedia.mutate(
       {
         uri: resolveUploadUri(src.uri),
@@ -799,7 +817,7 @@ export default function ChatScreen() {
     setPendingMedia(null)
     if (replyToMessageId) setReplyTo(null)
     scrollToLatest()
-    const clientMessageId = `pending-media-${Date.now()}`
+    const clientMessageId = newPendingId('media')
     sendMedia.mutate(
       {
         uri: resolveUploadUri(uri),
@@ -827,10 +845,9 @@ export default function ChatScreen() {
 
   function startRecording() {
     if (recordingOpen) return
+    void ensureVoiceRecorder()
     startRecordingTimer()
     setRecordingOpen(true)
-    void import('@/lib/prepareVoiceForSend')
-    void ensureVoiceRecorder()
   }
 
   function cancelRecording() {
@@ -861,27 +878,77 @@ export default function ChatScreen() {
     const elapsedMs = recordingStartedAt.current
       ? Date.now() - recordingStartedAt.current
       : recordingMs
-    try {
-      const { uri, durationMs, filename, mimeType } = await stopVoiceRecording(rec, elapsedMs)
+
+    if (elapsedMs < 400) {
       voiceRecorder.current = null
       clearRecordingUi()
+      await cancelVoiceRecording(rec)
+      toast.show('Recording too short', 'error')
+      return
+    }
+
+    const clientMessageId = newPendingId('media')
+    const savedReply = replyTo
+    const replyToMessageId = savedReply?.id
+    const replyToPreview = savedReply ? messageToReplyPreview(savedReply) : undefined
+    if (replyToMessageId) setReplyTo(null)
+
+    const optimistic = {
+      ...buildOptimisticMediaMessage(conversationId, clientMessageId, {
+        uri: '',
+        name: `voice-${Date.now()}.ogg`,
+        mimeType: 'audio/ogg',
+        replyToMessageId,
+        replyToPreview,
+      }),
+      sendPhase: 'preparing' as const,
+    }
+    voiceRecorder.current = null
+    clearRecordingUi()
+    playWaFeedback('send')
+    await putOptimisticOutboundMessage(optimistic)
+    scrollToLatest()
+
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    })
+
+    try {
+      const { uri, durationMs, filename, mimeType } = await stopVoiceRecording(rec, elapsedMs)
       if (durationMs < 400) {
+        await deleteMessages([clientMessageId])
         toast.show('Recording too short', 'error')
         return
       }
-      setSendingVoice(true)
-      await playWaFeedbackAsync('send')
-      try {
-        await uploadAsset(uri, filename, mimeType)
-      } catch {
-        /* toast shown in uploadAsset */
-      } finally {
-        setSendingVoice(false)
-      }
+
+      await patchLocalMessage(clientMessageId, { localPreviewUri: uri })
+
+      sendMedia.mutate(
+        {
+          uri: resolveUploadUri(uri),
+          name: filename,
+          mimeType,
+          skipPrepare: true,
+          clientMessageId,
+          replyToMessageId,
+          replyToPreview,
+        },
+        {
+          onSuccess: () => scrollToLatest(),
+          onError: (err) => {
+            if (err instanceof Error && err.message === 'QUEUED_OFFLINE') return
+            toast.show(mediaSendErrorMessage(err), 'error')
+            if (savedReply) setReplyTo(savedReply)
+          },
+        },
+      )
     } catch (err) {
+      await patchLocalMessage(clientMessageId, {
+        status: 'failed',
+        sendPhase: undefined,
+        errorMessage: apiErrorMessage(err),
+      })
       toast.show(apiErrorMessage(err), 'error')
-      voiceRecorder.current = null
-      clearRecordingUi()
     }
   }
 
@@ -1041,51 +1108,10 @@ export default function ChatScreen() {
           }}
         >
           {canSendSession ? (
-          recordingOpen ? (
-            <View className="bg-white px-4 py-3 dark:bg-wa-panelDeep">
-              <View className="flex-row items-center gap-3">
-                <PressableScale
-                  onPress={cancelRecording}
-                  haptic="none"
-                  hitSlop={8}
-                  className="h-10 w-10 items-center justify-center rounded-full bg-neutral-100 dark:bg-wa-elevated"
-                >
-                  <Ionicons name="trash-outline" size={20} color={isDark ? '#f87171' : '#ef4444'} />
-                </PressableScale>
-                <View className="h-11 flex-1 flex-row items-center gap-2 rounded-2xl bg-neutral-100 px-3 dark:bg-wa-elevated">
-                  <RecordingPulse />
-                  <VoiceRecordingWaveform
-                    recorder={voiceRecorderLive}
-                    active={!!voiceRecorderLive}
-                  />
-                  <Text className="shrink-0 text-sm font-medium tabular-nums text-neutral-700 dark:text-neutral-300">
-                    {formatDuration(recordingMs / 1000)}
-                  </Text>
-                </View>
-                <PressableScale
-                  onPress={() => {
-                    hapticLight()
-                    void finishVoiceRecording()
-                  }}
-                  haptic="none"
-                  disabled={!micReady || sendMedia.isPending || sendingVoice}
-                  className={`h-11 w-11 items-center justify-center rounded-full shadow-sm ${
-                    micReady ? 'bg-wa-teal' : 'bg-neutral-300 dark:bg-wa-elevated'
-                  }`}
-                >
-                  {sendMedia.isPending || sendingVoice ? (
-                    <ActivityIndicator color="#fff" size="small" />
-                  ) : (
-                    <Ionicons name="send" size={19} color="#ffffff" style={{ marginLeft: 2 }} />
-                  )}
-                </PressableScale>
-              </View>
-            </View>
-          ) : (
             <View
-              className={`bg-white dark:bg-wa-panelDeep ${attachMenuOpen ? '' : 'border-t border-neutral-100 dark:border-white/5'}`}
+              className={`bg-white dark:bg-wa-panelDeep ${attachMenuOpen || recordingOpen ? '' : 'border-t border-neutral-100 dark:border-white/5'}`}
             >
-              {replyTo ? (
+              {replyTo && !recordingOpen ? (
                 <View className="flex-row items-center gap-2 border-b border-neutral-100 px-3 py-2 dark:border-white/5">
                   <View className="flex-1">
                     <ReplyQuoteBlock
@@ -1099,63 +1125,113 @@ export default function ChatScreen() {
                   </Pressable>
                 </View>
               ) : null}
-            <View className="flex-row items-center gap-2 px-3 py-2.5">
-              <Pressable
-                onPress={onComposerSidePress}
-                hitSlop={12}
-                accessibilityRole="button"
-                accessibilityLabel={
-                  showKeyboardIcon ? 'Show keyboard' : 'Attach file'
-                }
-                className="h-11 w-11 shrink-0 items-center justify-center rounded-full bg-neutral-100 dark:bg-transparent"
-              >
-                {showKeyboardIcon ? (
-                  <KeyboardIcon color={isDark ? '#aebac1' : '#54656f'} />
+              <View className="flex-row items-center gap-2 px-3 py-2.5">
+                {/* LEFT: discard while recording, attach/keyboard otherwise. */}
+                {recordingOpen ? (
+                  <PressableScale
+                    onPress={cancelRecording}
+                    haptic="none"
+                    hitSlop={8}
+                    className="h-11 w-11 shrink-0 items-center justify-center rounded-full bg-neutral-100 dark:bg-wa-elevated"
+                  >
+                    <Ionicons name="trash-outline" size={20} color={isDark ? '#f87171' : '#ef4444'} />
+                  </PressableScale>
                 ) : (
-                  <Ionicons name="attach" size={24} color={isDark ? '#aebac1' : '#54656f'} />
+                  <Pressable
+                    onPress={onComposerSidePress}
+                    hitSlop={12}
+                    accessibilityRole="button"
+                    accessibilityLabel={showKeyboardIcon ? 'Show keyboard' : 'Attach file'}
+                    className="h-11 w-11 shrink-0 items-center justify-center rounded-full bg-neutral-100 dark:bg-transparent"
+                  >
+                    {showKeyboardIcon ? (
+                      <KeyboardIcon color={isDark ? '#aebac1' : '#54656f'} />
+                    ) : (
+                      <Ionicons name="attach" size={24} color={isDark ? '#aebac1' : '#54656f'} />
+                    )}
+                  </Pressable>
                 )}
-              </Pressable>
-              <Pressable
-                style={{ flex: 1 }}
-                pointerEvents={attachMenuOpen ? 'auto' : 'box-none'}
-                onPress={attachMenuOpen ? () => focusComposer() : undefined}
-              >
-                <TextInput
-                  ref={draftInputRef}
-                  value={draft}
-                  onChangeText={setDraft}
-                  onFocus={() => setKeyboardVisible(true)}
-                  onBlur={() => {
-                    setTimeout(() => setKeyboardVisible(false), 120)
-                  }}
-                  showSoftInputOnFocus={!attachMenuOpen}
-                  editable={!attachMenuOpen}
-                  pointerEvents={attachMenuOpen ? 'none' : 'auto'}
-                  placeholder="Type a message"
-                  multiline
-                  textAlignVertical="center"
-                  className="max-h-28 min-h-[44px] flex-1 rounded-3xl border border-neutral-200 bg-neutral-50 px-4 py-2 text-[15px] leading-5 text-neutral-900 dark:border-transparent dark:bg-wa-elevated dark:text-wa-textDark"
-                  placeholderTextColor={isDark ? '#8696A0' : '#9ca3af'}
-                />
-              </Pressable>
-              {draft.trim() ? (
-                <PressableScale
-                  onPress={onSendText}
-                  haptic="light"
-                  disabled={sendText.isPending}
-                  className="h-11 w-11 shrink-0 items-center justify-center rounded-full bg-wa-teal shadow-sm"
-                >
-                  <Ionicons name="send" size={19} color="#ffffff" style={{ marginLeft: 2 }} />
-                </PressableScale>
-              ) : (
-                <VoiceRecordButton
-                  disabled={sendMedia.isPending || sendingVoice || recordingOpen}
-                  onPress={startRecording}
-                />
-              )}
+
+                {/* MIDDLE: live waveform while recording, text input otherwise. */}
+                {recordingOpen ? (
+                  <View className="h-11 flex-1 flex-row items-center gap-2 rounded-2xl bg-neutral-100 px-3 dark:bg-wa-elevated">
+                    <RecordingPulse />
+                    <VoiceRecordingWaveform recorder={voiceRecorderLive} active={recordingOpen} />
+                    <Text className="shrink-0 text-sm font-medium tabular-nums text-neutral-700 dark:text-neutral-300">
+                      {formatDuration(recordingMs / 1000)}
+                    </Text>
+                    {!recordingLocked ? (
+                      <Text className="shrink-0 text-[11px] text-neutral-400 dark:text-wa-subDark">
+                        ‹ slide to cancel
+                      </Text>
+                    ) : null}
+                  </View>
+                ) : (
+                  <Pressable
+                    style={{ flex: 1 }}
+                    pointerEvents={attachMenuOpen ? 'auto' : 'box-none'}
+                    onPress={attachMenuOpen ? () => focusComposer() : undefined}
+                  >
+                    <TextInput
+                      ref={draftInputRef}
+                      value={draft}
+                      onChangeText={setDraft}
+                      onFocus={() => setKeyboardVisible(true)}
+                      onBlur={() => {
+                        setTimeout(() => setKeyboardVisible(false), 120)
+                      }}
+                      showSoftInputOnFocus={!attachMenuOpen}
+                      editable={!attachMenuOpen}
+                      pointerEvents={attachMenuOpen ? 'none' : 'auto'}
+                      placeholder="Type a message"
+                      multiline
+                      textAlignVertical="center"
+                      className="max-h-28 min-h-[44px] flex-1 rounded-3xl border border-neutral-200 bg-neutral-50 px-4 py-2 text-[15px] leading-5 text-neutral-900 dark:border-transparent dark:bg-wa-elevated dark:text-wa-textDark"
+                      placeholderTextColor={isDark ? '#8696A0' : '#9ca3af'}
+                    />
+                  </Pressable>
+                )}
+
+                {/* RIGHT: text send, locked-voice send, or the hold-to-record mic.
+                    The mic stays mounted through start so its pan gesture is never
+                    interrupted by a layout swap. */}
+                {!recordingOpen && draft.trim() ? (
+                  <PressableScale
+                    onPress={onSendText}
+                    haptic="light"
+                    disabled={sendText.isPending}
+                    className="h-11 w-11 shrink-0 items-center justify-center rounded-full bg-wa-teal shadow-sm"
+                  >
+                    <Ionicons name="send" size={19} color="#ffffff" style={{ marginLeft: 2 }} />
+                  </PressableScale>
+                ) : recordingOpen && recordingLocked ? (
+                  <PressableScale
+                    onPress={() => {
+                      hapticLight()
+                      void finishVoiceRecording()
+                    }}
+                    haptic="none"
+                    disabled={sendMedia.isPending}
+                    className="h-11 w-11 shrink-0 items-center justify-center rounded-full bg-wa-teal shadow-sm"
+                  >
+                    {sendMedia.isPending ? (
+                      <ActivityIndicator color="#fff" size="small" />
+                    ) : (
+                      <Ionicons name="send" size={19} color="#ffffff" style={{ marginLeft: 2 }} />
+                    )}
+                  </PressableScale>
+                ) : (
+                  <VoiceRecordButton
+                    disabled={sendMedia.isPending}
+                    recording={recordingOpen}
+                    onStart={startRecording}
+                    onSend={() => void finishVoiceRecording()}
+                    onCancel={cancelRecording}
+                    onLock={() => setRecordingLocked(true)}
+                  />
+                )}
+              </View>
             </View>
-            </View>
-          )
         ) : needsTemplate ? (
           <View className="bg-white px-4 py-3 dark:bg-wa-panelDeep">
             <Pressable
@@ -1203,6 +1279,12 @@ export default function ChatScreen() {
           void Clipboard.setStringAsync(m.body)
           toast.show('Copied to clipboard')
         }}
+        onStar={(m) => {
+          void toggleStar.mutateAsync({ messageId: m.id, starred: !m.starredAt })
+        }}
+        onReact={(m, emoji) => {
+          void toggleReaction.mutateAsync({ messageId: m.id, emoji })
+        }}
       />
 
       <ForwardMessageSheet
@@ -1239,6 +1321,10 @@ export default function ChatScreen() {
         onAttribution={() => {
           setMenuOpen(false)
           setAttribOpen(true)
+        }}
+        onMediaGallery={() => {
+          setMenuOpen(false)
+          router.push(`/conversation/${conversationId}/media`)
         }}
       />
 

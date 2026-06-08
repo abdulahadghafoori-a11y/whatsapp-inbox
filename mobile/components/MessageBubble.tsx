@@ -1,16 +1,21 @@
 import { memo } from 'react'
-import { View, Text, Pressable, StyleSheet, useWindowDimensions } from 'react-native'
+import { View, Text, Pressable, StyleSheet, Dimensions } from 'react-native'
 import { MediaMessage } from './MediaMessage'
 import { LocationMessage } from './LocationMessage'
 import { ContactCardMessage } from './ContactCardMessage'
 import { InteractiveMessage } from './InteractiveMessage'
 import { MessageMeta } from './MessageMeta'
+import { MessageReactionsBar } from './MessageReactionsBar'
 import { RetryIcon } from './ChatIcons'
 import { ReplyQuoteBlock } from './ReplyQuoteBlock'
 import { isStalePendingMessage } from '@/lib/messageStalePending'
 import { outboundFailureLabel } from '@/lib/mediaSendErrors'
 import { messageRenderEqual } from '@/lib/messageRenderEqual'
 import type { Message } from '@/types'
+
+// App is portrait-locked, so the bubble max width is constant — avoid a
+// per-bubble useWindowDimensions subscription (one fewer re-render source each).
+const BUBBLE_MAX_WIDTH = Math.round(Dimensions.get('window').width * 0.82)
 
 function MessageBubbleBase({
   message,
@@ -29,18 +34,17 @@ function MessageBubbleBase({
   onReplyQuotePress?: (messageId: string) => void
   highlight?: boolean
 }) {
-  const { width: screenW } = useWindowDimensions()
-  const bubbleMaxW = Math.round(screenW * 0.82)
+  const bubbleMaxW = BUBBLE_MAX_WIDTH
 
   const outbound = message.direction === 'outbound'
   const isLocation = message.type === 'location'
   const isContacts = message.type === 'contacts'
   const isInteractive = message.type === 'interactive' || message.type === 'button'
+  const isSticker = message.type === 'sticker'
   const isMedia =
-    message.type !== 'text' && !isLocation && !isContacts && !isInteractive
+    !isSticker && message.type !== 'text' && !isLocation && !isContacts && !isInteractive
   const isAudio = message.type === 'audio'
-  const isVisualMedia =
-    message.type === 'image' || message.type === 'video' || message.type === 'sticker'
+  const isVisualMedia = message.type === 'image' || message.type === 'video'
   const hasCaption = !!message.body && !isLocation && !isContacts && !isInteractive
   const mediaOnly = isVisualMedia && !hasCaption
   const deleted = !!message.deletedAt
@@ -81,6 +85,7 @@ function MessageBubbleBase({
       status={tickStatus}
       messageType={message.type}
       overlay={mediaOnly}
+      starred={!!message.starredAt}
     />
   )
 
@@ -93,6 +98,56 @@ function MessageBubbleBase({
         >
           <Text className="text-sm italic text-neutral-500 dark:text-wa-subDark">Message deleted</Text>
         </View>
+      </View>
+    )
+  }
+
+  if (isSticker) {
+    return (
+      <View className={`my-0.5 px-1.5 ${outbound ? 'items-end' : 'items-start'}`}>
+        <View className={`flex-row ${outbound ? 'justify-end' : 'justify-start'}`}>
+          {showRetry && onRetry ? (
+            <Pressable
+              onPress={() => onRetry(message)}
+              hitSlop={10}
+              className="mr-2 self-center items-center"
+              accessibilityLabel={outboundFailureLabel(message.errorMessage)}
+            >
+              <RetryIcon />
+            </Pressable>
+          ) : null}
+          <Pressable
+            onLongPress={() => onLongPress?.(message)}
+            delayLongPress={280}
+            style={{ maxWidth: bubbleMaxW }}
+            className={highlight ? 'border-2 border-wa-teal/50 rounded-2xl' : undefined}
+          >
+            {message.replyTo ? (
+              <ReplyQuoteBlock
+                reply={message.replyTo}
+                contactName={contactName}
+                isOutboundBubble={outbound}
+                onPress={onReplyQuotePress}
+              />
+            ) : null}
+            <MediaMessage
+              message={message}
+              variant={outbound ? 'outbound' : 'inbound'}
+              contactName={contactName}
+              contactAvatarUrl={contactAvatarUrl}
+              onReplyQuotePress={onReplyQuotePress}
+            />
+            <View className="mt-0.5 flex-row justify-end">{meta}</View>
+          </Pressable>
+        </View>
+        {message.reactions?.length ? (
+          <MessageReactionsBar reactions={message.reactions} outbound={outbound} />
+        ) : null}
+        {showRetry && (failed || stalePending) && message.errorMessage ? (
+          <Text className="mt-0.5 max-w-[82%] text-[11px] text-red-600 dark:text-red-300">
+            {outboundFailureLabel(message.errorMessage)}
+          </Text>
+        ) : null}
       </View>
     )
   }
@@ -173,6 +228,9 @@ function MessageBubbleBase({
         <Text className="mt-0.5 text-[11px] text-neutral-400 dark:text-wa-subDark">
           Sent from WhatsApp app
         </Text>
+      ) : null}
+      {message.reactions?.length ? (
+        <MessageReactionsBar reactions={message.reactions} outbound={outbound} />
       ) : null}
       {showRetry && (failed || stalePending) && message.errorMessage ? (
         <Text className="mt-0.5 max-w-[82%] text-[11px] text-red-600 dark:text-red-300">

@@ -4,7 +4,12 @@ import { whatsapp } from './whatsapp.js'
 import { prepareOutboundMedia } from '../utils/prepare-outbound-media.js'
 import { validateImageForWhatsApp } from '../utils/prepare-image.js'
 import { prepareDocumentForWhatsApp } from '../utils/prepare-document.js'
-import { contentAddressedKey } from '../utils/content-addressed-key.js'
+import { contentAddressedKeyParts } from '../utils/content-addressed-key.js'
+import {
+  getReusableWaMediaId,
+  recordWaMediaId,
+  registerBlob,
+} from './media-blobs.js'
 import {
   mediaKindFromMime,
   useOutboundFastPath,
@@ -15,6 +20,17 @@ import {
   voiceNoteFromMime,
   waMimeFromStored,
 } from '../utils/stored-media.js'
+import { enrichImageMediaMeta } from '../utils/image-thumb.js'
+
+function storedMediaExtras(persisted: {
+  mediaThumbUrl?: string | null
+  mediaFileSize?: number
+}) {
+  return {
+    mediaThumbUrl: persisted.mediaThumbUrl ?? null,
+    mediaFileSize: persisted.mediaFileSize ?? null,
+  }
+}
 
 async function persistAndMaybeUploadWa(
   app: FastifyInstance,
@@ -25,18 +41,44 @@ async function persistAndMaybeUploadWa(
     type: WaMediaKind
     sourceBytes: number
   },
-): Promise<{ s3Key: string; s3DedupHit: boolean; mediaId?: string; path: 'fast' | 'deferred'; waUploadMs?: number }> {
+): Promise<{
+  s3Key: string
+  s3DedupHit: boolean
+  mediaId?: string
+  path: 'fast' | 'deferred'
+  waUploadMs?: number
+  mediaThumbUrl?: string | null
+  mediaFileSize?: number
+}> {
   const started = Date.now()
-  const s3Key = contentAddressedKey(opts.buffer, opts.filename, opts.mime)
+  const { sha256, key: s3Key } = contentAddressedKeyParts(
+    opts.buffer,
+    opts.filename,
+    opts.mime,
+  )
   const existed = await app.s3.objectExists(s3Key)
   const fast = useOutboundFastPath(opts.type, opts.buffer.length)
 
+  // Register the content-addressed blob so identical bytes are never duplicated
+  // and the WhatsApp handle can be reused across messages/conversations.
+  await registerBlob({
+    sha256,
+    storageKey: s3Key,
+    mimeType: opts.mime,
+    sizeBytes: opts.buffer.length,
+  })
+
   if (fast) {
+    const reusableWaId = await getReusableWaMediaId(sha256)
     const waStart = Date.now()
-    const [, uploaded] = await Promise.all([
+    const [, meta, uploaded] = await Promise.all([
       app.s3.uploadToS3IfMissing(s3Key, opts.buffer, opts.mime),
-      whatsapp.uploadMedia(app.log, opts.buffer, opts.mime, opts.filename),
+      enrichImageMediaMeta(app.s3, opts.buffer, opts.mime, opts.filename),
+      reusableWaId
+        ? Promise.resolve({ id: reusableWaId })
+        : whatsapp.uploadMedia(app.log, opts.buffer, opts.mime, opts.filename),
     ])
+    if (!reusableWaId) await recordWaMediaId(sha256, uploaded.id)
     const waUploadMs = Date.now() - waStart
     app.log.info(
       {
@@ -45,15 +87,25 @@ async function persistAndMaybeUploadWa(
         sourceBytes: opts.sourceBytes,
         preparedBytes: opts.buffer.length,
         s3DedupHit: existed,
+        waReuseHit: !!reusableWaId,
         waUploadMs,
         totalMs: Date.now() - started,
       },
       'outbound_media_prepared',
     )
-    return { s3Key, s3DedupHit: existed, mediaId: uploaded.id, path: 'fast', waUploadMs }
+    return {
+      s3Key,
+      s3DedupHit: existed,
+      mediaId: uploaded.id,
+      path: 'fast',
+      waUploadMs,
+      mediaThumbUrl: meta.mediaThumbUrl,
+      mediaFileSize: meta.mediaFileSize,
+    }
   }
 
   await app.s3.uploadToS3IfMissing(s3Key, opts.buffer, opts.mime)
+  const meta = await enrichImageMediaMeta(app.s3, opts.buffer, opts.mime, opts.filename)
   app.log.info(
     {
       path: 'deferred',
@@ -65,7 +117,13 @@ async function persistAndMaybeUploadWa(
     },
     'outbound_media_prepared',
   )
-  return { s3Key, s3DedupHit: existed, path: 'deferred' }
+  return {
+    s3Key,
+    s3DedupHit: existed,
+    path: 'deferred',
+    mediaThumbUrl: meta.mediaThumbUrl,
+    mediaFileSize: meta.mediaFileSize,
+  }
 }
 
 export async function sendOutboundMediaBuffer(
@@ -108,6 +166,7 @@ export async function sendOutboundMediaBuffer(
     voiceNote,
     replyToMessageId: opts.replyToMessageId,
     replyToWaMessageId: opts.replyToWaMessageId,
+    ...storedMediaExtras(persisted),
   })
 }
 
@@ -163,6 +222,7 @@ export async function sendOutboundMediaFromS3Key(
         voiceNote: false,
         replyToMessageId: opts.replyToMessageId,
         replyToWaMessageId: opts.replyToWaMessageId,
+        ...storedMediaExtras(persisted),
       })
     }
 
@@ -192,6 +252,7 @@ export async function sendOutboundMediaFromS3Key(
         voiceNote: false,
         replyToMessageId: opts.replyToMessageId,
         replyToWaMessageId: opts.replyToWaMessageId,
+        ...storedMediaExtras(persisted),
       })
     }
 
@@ -218,6 +279,7 @@ export async function sendOutboundMediaFromS3Key(
       voiceNote: type === 'audio' && voiceNoteFromMime(opts.mimeType),
       replyToMessageId: opts.replyToMessageId,
       replyToWaMessageId: opts.replyToWaMessageId,
+      ...storedMediaExtras(persisted),
     })
   }
 
@@ -247,6 +309,7 @@ export async function sendOutboundMediaFromS3Key(
     voiceNote,
     replyToMessageId: opts.replyToMessageId,
     replyToWaMessageId: opts.replyToWaMessageId,
+    ...storedMediaExtras(persisted),
   })
 }
 

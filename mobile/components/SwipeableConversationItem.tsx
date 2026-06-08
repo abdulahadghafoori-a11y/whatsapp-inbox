@@ -4,6 +4,7 @@ import Swipeable from 'react-native-gesture-handler/Swipeable'
 import { Ionicons } from '@expo/vector-icons'
 import { ConversationItem } from '@/components/ConversationItem'
 import { hapticLight } from '@/lib/haptics'
+import { conversationInboxEqual } from '@/lib/inboxList'
 import type { ConversationListItem } from '@/types'
 
 const ACTION_WIDTH = 80
@@ -12,6 +13,7 @@ const ACTIONS_WIDTH = ACTION_WIDTH * 2
 type SwipeableConversationItemProps = {
   conversation: ConversationListItem
   onPress: (id: string) => void
+  onLongPress?: (id: string) => void
   onMarkRead: (id: string) => void
   onMarkUnread: (id: string) => void
   onTogglePin: (id: string, pinned: boolean) => void
@@ -21,6 +23,7 @@ type SwipeableConversationItemProps = {
 function SwipeableConversationItemBase({
   conversation,
   onPress,
+  onLongPress,
   onMarkRead,
   onMarkUnread,
   onTogglePin,
@@ -134,10 +137,25 @@ function SwipeableConversationItemBase({
       onSwipeableWillOpen={() => onSwipeOpen?.(conversation.id, swipeRef.current)}
     >
       <View className="bg-white dark:bg-wa-panelDeep">
-        <ConversationItem conversation={conversation} onPress={onPress} />
+        <ConversationItem
+          variant="inbox"
+          conversation={conversation}
+          onPress={onPress}
+          onLongPress={onLongPress}
+        />
       </View>
     </Swipeable>
   )
 }
 
-export const SwipeableConversationItem = memo(SwipeableConversationItemBase)
+export const SwipeableConversationItem = memo(
+  SwipeableConversationItemBase,
+  (prev, next) =>
+    prev.onPress === next.onPress &&
+    prev.onLongPress === next.onLongPress &&
+    prev.onMarkRead === next.onMarkRead &&
+    prev.onMarkUnread === next.onMarkUnread &&
+    prev.onTogglePin === next.onTogglePin &&
+    prev.onSwipeOpen === next.onSwipeOpen &&
+    conversationInboxEqual(prev.conversation, next.conversation),
+)

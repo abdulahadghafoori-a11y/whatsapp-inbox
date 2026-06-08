@@ -1,22 +1,33 @@
 import { memo, type ComponentProps } from 'react'
-import { View, Text, Pressable } from 'react-native'
+import { View, Text, Pressable, StyleSheet } from 'react-native'
 import { Ionicons } from '@expo/vector-icons'
 import { formatTime } from '@/lib/format'
+import { INBOX_ROW_HEIGHT } from '@/lib/inboxList'
 import { StatusTicks } from '@/components/StatusTicks'
 import { Avatar } from '@/components/Avatar'
 import type { ConversationListItem, MessageStatus, MessageType } from '@/types'
+
+const inboxRowStyle = StyleSheet.create({
+  row: {
+    height: INBOX_ROW_HEIGHT,
+    overflow: 'hidden',
+  },
+})
 
 function ConversationItemBase({
   conversation,
   onPress,
   onLongPress,
   selected,
+  variant = 'default',
 }: {
   conversation: ConversationListItem
   onPress: (id: string) => void
   onLongPress?: (id: string) => void
   selected?: boolean
+  variant?: 'default' | 'inbox'
 }) {
+  const isInbox = variant === 'inbox'
   const { contact } = conversation
   const name = contact.name || contact.waId
   const isPinned = !!conversation.pinnedAt
@@ -29,6 +40,7 @@ function ConversationItemBase({
       onPress={() => onPress(conversation.id)}
       onLongPress={onLongPress ? () => onLongPress(conversation.id) : undefined}
       delayLongPress={280}
+      style={isInbox ? inboxRowStyle.row : undefined}
       className={`flex-row items-center gap-3 border-b border-neutral-100 px-3 py-3 active:bg-neutral-50 dark:border-white/5 dark:active:bg-wa-panel ${
         selected ? 'bg-wa-teal/10 dark:bg-wa-teal/20' : 'bg-white dark:bg-wa-panelDeep'
       }`}
@@ -103,8 +115,11 @@ function ConversationItemBase({
           </View>
         </View>
 
-        {conversation.assignedAgent?.name ? (
-          <Text className="mt-0.5 text-[13px] text-neutral-400 dark:text-wa-subDark">
+        {!isInbox && conversation.assignedAgent?.name ? (
+          <Text
+            numberOfLines={1}
+            className="mt-0.5 text-[13px] text-neutral-400 dark:text-wa-subDark"
+          >
             Assigned: {conversation.assignedAgent.name}
           </Text>
         ) : null}
@@ -120,6 +135,7 @@ function conversationItemEqual(
   return (
     prev.conversation === next.conversation &&
     prev.selected === next.selected &&
+    prev.variant === next.variant &&
     prev.onPress === next.onPress &&
     prev.onLongPress === next.onLongPress
   )

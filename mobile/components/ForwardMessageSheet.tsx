@@ -9,7 +9,7 @@ import {
   ActivityIndicator,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
-import { useConversations } from '@/hooks/useConversations'
+import { useInbox } from '@/hooks/useConversations'
 import { ConversationItem } from '@/components/ConversationItem'
 import { MessageBubble } from '@/components/MessageBubble'
 import { Avatar } from '@/components/Avatar'
@@ -38,7 +38,7 @@ export function ForwardMessageSheet({
   const [step, setStep] = useState<Step>('select')
   const [search, setSearch] = useState('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
-  const { data, isPending } = useConversations('all', search)
+  const { conversations: forwardTargets, isLoading: isPending } = useInbox('all', search)
 
   useEffect(() => {
     if (open) {
@@ -48,10 +48,10 @@ export function ForwardMessageSheet({
     }
   }, [open])
 
-  const list = useMemo(() => {
-    const rows = data?.pages.flatMap((p) => p.conversations) ?? []
-    return rows.filter((c) => c.id !== currentConversationId)
-  }, [currentConversationId, data?.pages])
+  const list = useMemo(
+    () => forwardTargets.filter((c) => c.id !== currentConversationId),
+    [currentConversationId, forwardTargets],
+  )
 
   const selectedList = useMemo(
     () => list.filter((c) => selected.has(c.id)),

@@ -7,6 +7,13 @@ import { jobs, messages, type Job } from '../db/schema.js'
 import { metadataWithoutSendInFlight } from '../services/outbound.js'
 import { whatsapp } from '../services/whatsapp.js'
 import { processDownloadMedia } from '../services/media-processor.js'
+import {
+  getBlobByStorageKey,
+  getReusableWaMediaId,
+  recordWaMediaId,
+  registerBlob,
+} from '../services/media-blobs.js'
+import { contentAddressedKeyParts } from '../utils/content-addressed-key.js'
 import { processAIAgentReply } from '../services/ai-agent.js'
 import { sendPushNotification } from '../services/push-notifications.js'
 import type { JobPayloads } from '../services/jobs.js'
@@ -263,29 +270,62 @@ async function handleSendMessage(
       if (!mediaId) {
         const s3Key = p.s3Key
         if (!s3Key) throw new Error('mediaId or s3Key required for media send')
-        const row = await db.query.messages.findFirst({
-          where: eq(messages.id, p.messageId),
-          columns: { mediaMimeType: true, mediaFilename: true },
-        })
-        if (!row?.mediaMimeType) throw new Error('Message media metadata missing')
-        const waStart = Date.now()
-        const waBuffer = await app.s3.downloadFromS3(s3Key)
-        const uploaded = await whatsapp.uploadMedia(
-          app.log,
-          waBuffer,
-          row.mediaMimeType,
-          row.mediaFilename ?? 'upload',
-        )
-        mediaId = uploaded.id
-        app.log.info(
-          {
-            path: 'deferred',
-            messageId: p.messageId,
-            preparedBytes: waBuffer.length,
-            waUploadMs: Date.now() - waStart,
-          },
-          'outbound_media_wa_upload',
-        )
+
+        // Reuse a still-fresh WhatsApp handle for these exact bytes (forward / resend).
+        const blob = await getBlobByStorageKey(s3Key)
+        if (blob) {
+          const reusable = await getReusableWaMediaId(blob.sha256)
+          if (reusable) {
+            mediaId = reusable
+            app.log.info(
+              { path: 'reuse', messageId: p.messageId },
+              'outbound_media_wa_reuse',
+            )
+          }
+        }
+
+        if (!mediaId) {
+          const row = await db.query.messages.findFirst({
+            where: eq(messages.id, p.messageId),
+            columns: { mediaMimeType: true, mediaFilename: true },
+          })
+          if (!row?.mediaMimeType) throw new Error('Message media metadata missing')
+          const waStart = Date.now()
+          const waBuffer = await app.s3.downloadFromS3(s3Key)
+          const uploaded = await whatsapp.uploadMedia(
+            app.log,
+            waBuffer,
+            row.mediaMimeType,
+            row.mediaFilename ?? 'upload',
+          )
+          mediaId = uploaded.id
+          // Record the handle so later sends of the same bytes skip the upload.
+          if (blob) {
+            await recordWaMediaId(blob.sha256, uploaded.id)
+          } else {
+            const { sha256 } = contentAddressedKeyParts(
+              waBuffer,
+              row.mediaFilename ?? 'upload',
+              row.mediaMimeType,
+            )
+            await registerBlob({
+              sha256,
+              storageKey: s3Key,
+              mimeType: row.mediaMimeType,
+              sizeBytes: waBuffer.length,
+            })
+            await recordWaMediaId(sha256, uploaded.id)
+          }
+          app.log.info(
+            {
+              path: 'deferred',
+              messageId: p.messageId,
+              preparedBytes: waBuffer.length,
+              waUploadMs: Date.now() - waStart,
+            },
+            'outbound_media_wa_upload',
+          )
+        }
       }
       const mediaOpts: { voice?: boolean; replyToWaMessageId?: string } = {}
       if (p.replyToWaMessageId) mediaOpts.replyToWaMessageId = p.replyToWaMessageId

@@ -121,6 +121,7 @@ export function OverflowMenu({
   onReopen,
   onAssign,
   onAttribution,
+  onMediaGallery,
 }: {
   open: boolean
   onClose: () => void
@@ -129,9 +130,13 @@ export function OverflowMenu({
   onReopen: () => void
   onAssign: () => void
   onAttribution: () => void
+  onMediaGallery?: () => void
 }) {
   return (
     <BottomSheet open={open} onClose={onClose}>
+      {onMediaGallery ? (
+        <Row label="Media, links & docs" icon="images-outline" onPress={onMediaGallery} />
+      ) : null}
       {status === 'resolved' ? (
         <Row label="Reopen" icon="refresh" onPress={onReopen} />
       ) : (

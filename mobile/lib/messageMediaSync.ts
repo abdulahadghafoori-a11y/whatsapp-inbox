@@ -1,11 +1,8 @@
 import { InteractionManager } from 'react-native'
 import { api } from '@/services/api'
 import { mediaApiPath } from '@/lib/mediaApi'
-import { isOnline, isOnWifi } from '@/lib/network'
-import {
-  getMediaDownloadPrefs,
-  messageTypeToDownloadKind,
-} from '@/lib/mediaDownloadPrefs'
+import { isOnline } from '@/lib/network'
+import { isAutoDownloadAllowed } from '@/lib/mediaAutoDownload'
 import {
   aliasMessageToBlob,
   cacheMediaFromLocalFile,
@@ -16,12 +13,14 @@ import {
   getCachedUriForS3KeySync,
 } from '@/lib/messageMediaCache'
 import { hashMediaFile } from '@/lib/mediaContentHash'
+import { isHeavyMediaType, isStickerType } from '@/lib/messageMediaKind'
 import type { Message, MessageType } from '@/types'
 
 export type SyncableMediaMessage = {
   id: string
   conversationId: string
   type: MessageType
+  direction?: Message['direction']
   mediaUrl: string | null
   mediaStatus: Message['mediaStatus']
   localPreviewUri?: string | null
@@ -32,11 +31,45 @@ export type SyncableMediaMessage = {
 const inflight = new Map<string, Promise<string | null>>()
 const queuedIds = new Set<string>()
 const syncQueue: SyncableMediaMessage[] = []
+const downloadingIds = new Set<string>()
+const downloadListeners = new Map<string, Set<() => void>>()
 let activeSyncs = 0
 const MAX_CONCURRENT_SYNCS = 2
 
 function inflightKey(message: SyncableMediaMessage) {
   return message.mediaUrl ?? `msg:${message.id}`
+}
+
+function notifyDownload(messageId: string) {
+  downloadListeners.get(messageId)?.forEach((cb) => cb())
+}
+
+export function isMessageMediaDownloading(messageId: string | undefined): boolean {
+  if (!messageId) return false
+  return downloadingIds.has(messageId)
+}
+
+export function subscribeMessageMediaDownload(
+  messageId: string | undefined,
+  cb: () => void,
+): () => void {
+  if (!messageId) return () => undefined
+  let set = downloadListeners.get(messageId)
+  if (!set) {
+    set = new Set()
+    downloadListeners.set(messageId, set)
+  }
+  set.add(cb)
+  return () => {
+    set!.delete(cb)
+    if (set!.size === 0) downloadListeners.delete(messageId)
+  }
+}
+
+function setDownloading(messageId: string, on: boolean) {
+  if (on) downloadingIds.add(messageId)
+  else downloadingIds.delete(messageId)
+  notifyDownload(messageId)
 }
 
 function isCacheableMedia(message: SyncableMediaMessage): boolean {
@@ -51,7 +84,6 @@ function isAlreadyCachedSync(message: SyncableMediaMessage): boolean {
   return false
 }
 
-// Was: mediaApiPath(s3Key) sent messageId=undefined -> backend 400. Pass the message id.
 async function presignedUrlForKey(s3Key: string, messageId: string): Promise<string | null> {
   try {
     const res = await api.get<{ url: string }>(mediaApiPath(s3Key, messageId))
@@ -101,16 +133,6 @@ async function syncMessageMediaInner(message: SyncableMediaMessage): Promise<str
   )
 }
 
-async function autoDownloadAllowed(message: SyncableMediaMessage): Promise<boolean> {
-  const kind = messageTypeToDownloadKind(message.type)
-  if (!kind) return true
-  const prefs = await getMediaDownloadPrefs()
-  const policy = prefs[kind]
-  if (policy === 'never') return false
-  if (policy === 'wifi' && !(await isOnWifi())) return false
-  return true
-}
-
 function drainSyncQueue() {
   while (activeSyncs < MAX_CONCURRENT_SYNCS && syncQueue.length > 0) {
     const message = syncQueue.shift()!
@@ -137,17 +159,21 @@ function drainSyncQueue() {
 
 async function runSyncJob(message: SyncableMediaMessage): Promise<string | null> {
   if (!isCacheableMedia(message)) return null
-  if (!(await autoDownloadAllowed(message))) return null
+  if (!(await isAutoDownloadAllowed(message))) return null
 
   await ensureMediaIndexLoaded()
   if (isAlreadyCachedSync(message)) return getCachedMediaUriSync(message.id)
 
-  return syncMessageMediaInner(message)
+  setDownloading(message.id, true)
+  try {
+    return await syncMessageMediaInner(message)
+  } finally {
+    setDownloading(message.id, false)
+  }
 }
 
 /**
  * Queue on-device cache download (max 2 concurrent). Skips if already cached or queued.
- * UI can show presigned URLs while cache fills in the background.
  */
 export function queueMessageMediaSync(
   message: SyncableMediaMessage,
@@ -170,7 +196,7 @@ export async function syncMessageMedia(
   opts?: { force?: boolean },
 ): Promise<string | null> {
   if (!isCacheableMedia(message)) return null
-  if (!opts?.force && !(await autoDownloadAllowed(message))) return null
+  if (!opts?.force && !(await isAutoDownloadAllowed(message))) return null
 
   await ensureMediaIndexLoaded()
 
@@ -181,34 +207,37 @@ export async function syncMessageMedia(
   const pending = inflight.get(key)
   if (pending) return pending
 
+  setDownloading(message.id, true)
   const promise = syncMessageMediaInner(message).finally(() => {
     inflight.delete(key)
+    setDownloading(message.id, false)
   })
   inflight.set(key, promise)
   return promise
 }
 
+/** Visible viewport order (WhatsApp-style) — no type-based priority. */
 export function syncVisibleMessageMedia(messages: SyncableMediaMessage[]) {
+  const seen = new Set<string>()
   for (const message of messages) {
+    if (seen.has(message.id)) continue
+    if (!isCacheableMedia(message)) continue
+    if (!isHeavyMediaType(message.type) && !isStickerType(message.type)) continue
+    seen.add(message.id)
     queueMessageMediaSync(message)
   }
 }
 
-/** Background cache for one conversation — capped and staggered so opening a chat stays smooth. */
+/** Small prefetch window around visible rows only. */
 export function syncConversationMedia(
   messages: SyncableMediaMessage[],
   opts?: { maxItems?: number },
 ) {
-  const maxItems = opts?.maxItems ?? 24
-  const cacheable = messages.filter(isCacheableMedia)
-  const priority = cacheable.filter((m) => m.type === 'audio' || m.type === 'video')
-  const rest = cacheable.filter((m) => m.type !== 'audio' && m.type !== 'video')
-  const ordered = [...priority, ...rest].slice(0, maxItems)
+  const maxItems = opts?.maxItems ?? 6
+  const cacheable = messages.filter(isCacheableMedia).slice(0, maxItems)
 
   const task = InteractionManager.runAfterInteractions(() => {
-    for (const message of ordered) {
-      queueMessageMediaSync(message)
-    }
+    syncVisibleMessageMedia(cacheable)
   })
   return () => task.cancel()
 }

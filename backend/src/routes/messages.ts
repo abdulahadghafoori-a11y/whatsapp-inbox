@@ -1,8 +1,9 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { and, desc, eq, ilike, isNull, lt } from 'drizzle-orm'
+import { and, desc, eq, ilike, isNotNull, isNull, lt } from 'drizzle-orm'
 import { db } from '../db/index.js'
-import { conversations, contacts, messages } from '../db/schema.js'
+import { conversations, contacts, messageReactions, messages } from '../db/schema.js'
+import { attachMediaMeta, attachReactions } from '../utils/message-enrichment.js'
 import { enqueueJob } from '../services/jobs.js'
 import { errors } from '../utils/errors.js'
 import { isMediaMessageType, waMediaIdFromMetadata } from '../utils/wa-media.js'
@@ -25,7 +26,11 @@ export async function messageRoutes(app: FastifyInstance) {
       .parse(request.query)
 
     const term = `%${q.q}%`
-    const conds = [ilike(messages.body, term), isNull(conversations.deletedAt)]
+    const conds = [
+      ilike(messages.body, term),
+      isNull(conversations.deletedAt),
+      isNull(messages.deletedAt),
+    ]
     if (q.cursor) conds.push(lt(messages.sentAt, new Date(q.cursor)))
 
     const PAGE = 30
@@ -63,6 +68,107 @@ export async function messageRoutes(app: FastifyInstance) {
       })),
       nextCursor: hasMore && last ? last.toISOString() : null,
     }
+  })
+
+  // GET /api/messages/starred — all starred messages for the signed-in agent's inbox
+  app.get('/starred', async (request) => {
+    const q = z
+      .object({ cursor: z.string().datetime().optional() })
+      .parse(request.query)
+
+    const conds = [isNotNull(messages.starredAt), isNull(messages.deletedAt), isNull(conversations.deletedAt)]
+    if (q.cursor) conds.push(lt(messages.starredAt!, new Date(q.cursor)))
+
+    const PAGE = 30
+    const rows = await db
+      .select({
+        message: messages,
+        contactName: contacts.name,
+        contactWaId: contacts.waId,
+      })
+      .from(messages)
+      .innerJoin(conversations, eq(messages.conversationId, conversations.id))
+      .innerJoin(contacts, eq(conversations.contactId, contacts.id))
+      .where(and(...conds))
+      .orderBy(desc(messages.starredAt))
+      .limit(PAGE + 1)
+
+    const hasMore = rows.length > PAGE
+    const page = rows.slice(0, PAGE)
+    const enriched = await attachMediaMeta(
+      await attachReactions(page.map((r) => r.message)),
+    )
+    const last = page[page.length - 1]?.message.starredAt
+    return {
+      messages: enriched.map((m, i) => ({
+        ...m,
+        contactName: page[i]!.contactName ?? page[i]!.contactWaId,
+        contactWaId: page[i]!.contactWaId,
+      })),
+      nextCursor: hasMore && last ? last.toISOString() : null,
+    }
+  })
+
+  // PATCH /api/messages/:messageId/star
+  app.patch('/:messageId/star', async (request) => {
+    const { messageId } = z.object({ messageId: z.string().uuid() }).parse(request.params)
+    const body = z.object({ starred: z.boolean() }).parse(request.body)
+
+    const msg = await db.query.messages.findFirst({ where: eq(messages.id, messageId) })
+    if (!msg) throw errors.notFound('Message not found')
+
+    const conversation = await db.query.conversations.findFirst({
+      where: and(eq(conversations.id, msg.conversationId), isNull(conversations.deletedAt)),
+      columns: { id: true },
+    })
+    if (!conversation) throw errors.conversationNotFound()
+
+    const [updated] = await db
+      .update(messages)
+      .set({ starredAt: body.starred ? new Date() : null })
+      .where(eq(messages.id, messageId))
+      .returning()
+
+    const [withReactions] = await attachReactions([updated!])
+    return { message: withReactions }
+  })
+
+  // POST /api/messages/:messageId/reactions — toggle emoji reaction
+  app.post('/:messageId/reactions', async (request) => {
+    const { messageId } = z.object({ messageId: z.string().uuid() }).parse(request.params)
+    const body = z
+      .object({ emoji: z.string().min(1).max(8) })
+      .parse(request.body)
+
+    const msg = await db.query.messages.findFirst({ where: eq(messages.id, messageId) })
+    if (!msg) throw errors.notFound('Message not found')
+
+    const conversation = await db.query.conversations.findFirst({
+      where: and(eq(conversations.id, msg.conversationId), isNull(conversations.deletedAt)),
+      columns: { id: true },
+    })
+    if (!conversation) throw errors.conversationNotFound()
+
+    const existing = await db.query.messageReactions.findFirst({
+      where: and(
+        eq(messageReactions.messageId, messageId),
+        eq(messageReactions.agentId, request.agent.id),
+        eq(messageReactions.emoji, body.emoji),
+      ),
+    })
+
+    if (existing) {
+      await db.delete(messageReactions).where(eq(messageReactions.id, existing.id))
+    } else {
+      await db.insert(messageReactions).values({
+        messageId,
+        agentId: request.agent.id,
+        emoji: body.emoji,
+      })
+    }
+
+    const reactions = await attachReactions([msg])
+    return { messageId, reactions: reactions[0]?.reactions ?? [] }
   })
 
   // POST /api/messages/media/:messageId/retry — re-download from WhatsApp → S3

@@ -3,6 +3,7 @@ import { Image as RNImage } from 'react-native'
 import { appStorage } from '@/lib/appStorage'
 import { hashBlobId, hashPreparedFile } from '@/lib/mediaContentHash'
 import { resolveUploadUri } from '@/lib/uploadUri'
+import { generateImageThumbFile, thumbPathForBlob } from '@/lib/mediaThumb'
 
 const INDEX_KEY = 'wa-message-media-v2'
 const LEGACY_INDEX_KEY = 'wa-message-media-v1'
@@ -21,6 +22,8 @@ export type BlobRecord = {
   width?: number
   height?: number
   cachedAt: string
+  /** JPEG preview for images (on-device, no server thumb). */
+  thumbUri?: string
 }
 
 type MediaIndexV2 = {
@@ -236,8 +239,41 @@ export async function enforceMediaCacheBudget(index?: MediaIndexV2): Promise<voi
   }
 }
 
+let budgetTimer: ReturnType<typeof setTimeout> | null = null
+
+/**
+ * Debounced budget enforcement after cache writes. Was: the budget was only
+ * enforced at cold start, so the cache could grow unbounded within a session.
+ */
+export function scheduleMediaCacheBudgetCheck(): void {
+  if (budgetTimer) return
+  budgetTimer = setTimeout(() => {
+    budgetTimer = null
+    void enforceMediaCacheBudget().catch(() => {})
+  }, 4000)
+}
+
+/** Approximate on-device media cache usage (blob files only). */
+export async function getMediaCacheUsageBytes(): Promise<number> {
+  const idx = await loadIndex()
+  let total = 0
+  for (const blob of Object.values(idx.blobs)) {
+    try {
+      const info = await FileSystem.getInfoAsync(blob.localUri)
+      if (info.exists && typeof info.size === 'number') total += info.size
+    } catch {
+      // ignore missing files
+    }
+  }
+  return total
+}
+
 /** Wipe all cached media + indexes (used on logout so the next agent starts clean). */
 export async function clearMediaCache(): Promise<void> {
+  if (budgetTimer) {
+    clearTimeout(budgetTimer)
+    budgetTimer = null
+  }
   try {
     await FileSystem.deleteAsync(MEDIA_DIR, { idempotent: true })
   } catch {
@@ -293,6 +329,13 @@ export function getCachedMediaUriSync(messageId: string): string | null {
   const blobId = indexMem.messageToBlob[messageId]
   if (!blobId || !validatedBlobs.has(blobId)) return null
   return indexMem.blobs[blobId]?.localUri ?? null
+}
+
+export function getCachedMediaThumbUriSync(messageId: string): string | null {
+  if (!indexMem) return null
+  const blobId = indexMem.messageToBlob[messageId]
+  if (!blobId || !validatedBlobs.has(blobId)) return null
+  return indexMem.blobs[blobId]?.thumbUri ?? null
 }
 
 /** Reuse an on-device file already fetched for the same S3 object. */
@@ -358,18 +401,27 @@ async function fileExists(uri: string): Promise<boolean> {
   }
 }
 
+async function ensureBlobThumb(blobId: string, record: BlobRecord): Promise<BlobRecord> {
+  if (record.thumbUri || !record.mimeType.startsWith('image/')) return record
+  const dest = thumbPathForBlob(blobId)
+  const thumbUri = await generateImageThumbFile(record.localUri, dest)
+  if (!thumbUri) return record
+  return { ...record, thumbUri }
+}
+
 async function linkMessageToBlob(
   messageId: string,
   blobId: string,
   record: BlobRecord,
 ): Promise<string> {
+  const withThumb = await ensureBlobThumb(blobId, record)
   const index = await loadIndex()
-  index.blobs[blobId] = record
+  index.blobs[blobId] = withThumb
   index.messageToBlob[messageId] = blobId
   validatedBlobs.add(blobId)
   await saveIndex(index)
   notifyMessageCacheListeners([messageId])
-  return record.localUri
+  return withThumb.localUri
 }
 
 export async function getCachedMediaEntry(messageId: string) {
@@ -537,6 +589,9 @@ export async function cacheMediaFromRemoteUrl(
 
   // Dedup alias by content hash — deferred so chat scroll is not blocked on large files.
   void registerInboundContentHashAlias(dest, id, record)
+
+  // Keep on-device media within budget as the cache grows during a session.
+  scheduleMediaCacheBudgetCheck()
 
   return uri
 }

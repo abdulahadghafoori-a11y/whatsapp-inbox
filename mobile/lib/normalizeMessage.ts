@@ -25,6 +25,17 @@ function normalizeReplyPreview(raw: unknown): MessageReplyPreview | null {
 /** Normalize API/socket payloads (handles accidental snake_case). */
 export function normalizeMessage(raw: Message & Record<string, unknown>): Message {
   const mediaUrl = (raw.mediaUrl ?? raw.media_url ?? null) as string | null
+  const mediaThumbUrl = (raw.mediaThumbUrl ?? raw.media_thumb_url ?? null) as string | null
+  const mediaFileSizeRaw = raw.mediaFileSize ?? raw.media_file_size
+  const mediaFileSize =
+    typeof mediaFileSizeRaw === 'number' && mediaFileSizeRaw > 0 ? mediaFileSizeRaw : null
+  const thumbhash = (raw.thumbhash ?? null) as string | null
+  const mediaWidthRaw = raw.mediaWidth ?? raw.media_width
+  const mediaWidth =
+    typeof mediaWidthRaw === 'number' && mediaWidthRaw > 0 ? mediaWidthRaw : null
+  const mediaHeightRaw = raw.mediaHeight ?? raw.media_height
+  const mediaHeight =
+    typeof mediaHeightRaw === 'number' && mediaHeightRaw > 0 ? mediaHeightRaw : null
   const mediaMimeType = (raw.mediaMimeType ?? raw.media_mime_type ?? null) as string | null
   const mediaFilename = (raw.mediaFilename ?? raw.media_filename ?? null) as string | null
   const mediaStatus = (raw.mediaStatus ?? raw.media_status ?? null) as MediaStatus
@@ -40,6 +51,11 @@ export function normalizeMessage(raw: Message & Record<string, unknown>): Messag
     type: (raw.type ?? 'text') as MessageType,
     body: (raw.body ?? null) as string | null,
     mediaUrl,
+    mediaThumbUrl,
+    mediaFileSize,
+    thumbhash,
+    mediaWidth,
+    mediaHeight,
     mediaMimeType,
     mediaFilename,
     mediaStatus,
@@ -50,6 +66,14 @@ export function normalizeMessage(raw: Message & Record<string, unknown>): Messag
       | null,
     deletedAt: (raw.deletedAt ?? raw.deleted_at ?? null) as string | null,
     editedAt: (raw.editedAt ?? raw.edited_at ?? null) as string | null,
+    starredAt: (raw.starredAt ?? raw.starred_at ?? null) as string | null,
+    reactions: Array.isArray(raw.reactions)
+      ? (raw.reactions as unknown as Array<Record<string, unknown>>).map((r) => ({
+          emoji: String(r.emoji),
+          agentId: String(r.agentId ?? r.agent_id),
+          agentName: (r.agentName ?? r.agent_name ?? null) as string | null,
+        }))
+      : undefined,
     replyTo: normalizeReplyPreview(raw.replyTo),
     sentAt,
     createdAt,

@@ -86,7 +86,8 @@
       "@sentry/react-native",
       "react-native-compressor",
       "./plugins/withFfmpeg16Kb.js",
-      "expo-build-properties"
+      "expo-build-properties",
+      "expo-sqlite"
     ],
     "extra": {
       "router": {

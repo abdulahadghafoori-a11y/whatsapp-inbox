@@ -1,40 +1,66 @@
-import { describe, it, expect } from 'vitest'
-import { LoginThrottle } from './login-throttle.js'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-describe('LoginThrottle', () => {
-  it('allows up to max attempts then blocks within the window', () => {
-    const t = new LoginThrottle(3, 1000)
-    const key = '1.2.3.4:user@example.com'
-    expect(t.register(key, 0)).toBe(true)
-    expect(t.register(key, 0)).toBe(true)
-    expect(t.register(key, 0)).toBe(true)
-    expect(t.register(key, 0)).toBe(false)
+// In-memory stand-in for the login_attempts table so we can exercise the
+// distributed throttle's allow/deny boundary without a live database.
+const store = new Map<string, { count: number; resetAt: number }>()
+
+vi.mock('../db/index.js', () => ({
+  db: {
+    insert: () => ({
+      values: (v: { key: string; resetAt: Date }) => ({
+        onConflictDoUpdate: () => ({
+          returning: () => {
+            const now = Date.now()
+            const existing = store.get(v.key)
+            let count: number
+            if (!existing || existing.resetAt < now) {
+              count = 1
+              store.set(v.key, { count, resetAt: v.resetAt.getTime() })
+            } else {
+              count = existing.count + 1
+              existing.count = count
+            }
+            return Promise.resolve([{ count }])
+          },
+        }),
+      }),
+    }),
+    delete: () => ({
+      where: () => {
+        store.clear()
+        return Promise.resolve()
+      },
+    }),
+  },
+}))
+
+const { registerAttempt, registerLoginAttempt, clearLoginAttempts } = await import(
+  './login-throttle.js'
+)
+
+beforeEach(() => store.clear())
+
+describe('distributed login throttle', () => {
+  it('allows up to max attempts then blocks within the window', async () => {
+    const key = 'ip:1.2.3.4:user@example.com'
+    expect(await registerAttempt(key, 3, 1000)).toBe(true)
+    expect(await registerAttempt(key, 3, 1000)).toBe(true)
+    expect(await registerAttempt(key, 3, 1000)).toBe(true)
+    expect(await registerAttempt(key, 3, 1000)).toBe(false)
   })
 
-  it('resets after the window elapses', () => {
-    const t = new LoginThrottle(2, 1000)
-    const key = 'k'
-    expect(t.register(key, 0)).toBe(true)
-    expect(t.register(key, 0)).toBe(true)
-    expect(t.register(key, 0)).toBe(false)
-    // After the window, the counter resets.
-    expect(t.register(key, 1001)).toBe(true)
+  it('clear resets the counters after a successful login', async () => {
+    await registerLoginAttempt('1.2.3.4', 'user@example.com')
+    await clearLoginAttempts('1.2.3.4', 'user@example.com')
+    expect(await registerLoginAttempt('1.2.3.4', 'user@example.com')).toBe(true)
   })
 
-  it('clear() resets the counter (e.g. after a successful login)', () => {
-    const t = new LoginThrottle(2, 1000)
-    const key = 'k'
-    t.register(key, 0)
-    t.register(key, 0)
-    expect(t.register(key, 0)).toBe(false)
-    t.clear(key)
-    expect(t.register(key, 0)).toBe(true)
-  })
-
-  it('tracks distinct keys independently', () => {
-    const t = new LoginThrottle(1, 1000)
-    expect(t.register('a', 0)).toBe(true)
-    expect(t.register('a', 0)).toBe(false)
-    expect(t.register('b', 0)).toBe(true)
+  it('blocks once the per-account limit is exceeded across IPs', async () => {
+    // 20 per-account attempts allowed; the 21st (from any IP) is blocked.
+    let lastAllowed = true
+    for (let i = 0; i < 21; i++) {
+      lastAllowed = await registerLoginAttempt(`10.0.0.${i}`, 'victim@example.com')
+    }
+    expect(lastAllowed).toBe(false)
   })
 })

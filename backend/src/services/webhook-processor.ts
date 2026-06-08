@@ -220,43 +220,51 @@ async function handleMessageEchoes(
 
     const echoMedia = inboundMediaMeta(msg)
 
-    const inserted = await db
-      .insert(messages)
-      .values({
-        conversationId: conversation.id,
-        waMessageId: msg.id,
-        direction: 'outbound',
-        type: msg.type,
-        body: inboundBody(msg),
-        mediaStatus: isMediaType(msg.type) ? 'pending' : null,
-        mediaMimeType: echoMedia.mediaMimeType,
-        mediaFilename: echoMedia.mediaFilename,
-        metadata: { ...msg, source: 'message_echo' } as Record<string, unknown>,
-        status: 'sent',
-        sentAt: new Date(Number(msg.timestamp) * 1000),
-      })
-      .onConflictDoNothing({ target: messages.waMessageId })
-      .returning()
+    // Atomic: the echo row and its conversation bump commit together, so a
+    // crash can't leave a stored echo that never updated the inbox preview
+    // (the duplicate path on replay would otherwise skip the bump).
+    const message = await db.transaction(async (tx) => {
+      const inserted = await tx
+        .insert(messages)
+        .values({
+          conversationId: conversation.id,
+          waMessageId: msg.id,
+          direction: 'outbound',
+          type: msg.type,
+          body: inboundBody(msg),
+          mediaStatus: isMediaType(msg.type) ? 'pending' : null,
+          mediaMimeType: echoMedia.mediaMimeType,
+          mediaFilename: echoMedia.mediaFilename,
+          metadata: { ...msg, source: 'message_echo' } as Record<string, unknown>,
+          status: 'sent',
+          sentAt: new Date(Number(msg.timestamp) * 1000),
+        })
+        .onConflictDoNothing({ target: messages.waMessageId })
+        .returning()
 
-    if (inserted.length === 0) {
+      if (inserted.length === 0) return null
+      const m = inserted[0]
+
+      await tx
+        .update(conversations)
+        .set({
+          lastMessageAt: m.sentAt,
+          lastMessagePreview: getPreview(msg),
+          ...conversationPreviewFromMessage(m),
+        })
+        .where(eq(conversations.id, conversation.id))
+      return m
+    })
+
+    if (!message) {
       app.log.debug({ waMessageId: msg.id }, 'duplicate message echo ignored')
       continue
     }
-    const message = inserted[0]
 
     app.log.info(
       { conversationId: conversation.id, waMessageId: msg.id, to: customerWaId },
       'message_echo stored (sent outside inbox app)',
     )
-
-    await db
-      .update(conversations)
-      .set({
-        lastMessageAt: message.sentAt,
-        lastMessagePreview: getPreview(msg),
-        ...conversationPreviewFromMessage(message),
-      })
-      .where(eq(conversations.id, conversation.id))
 
     const messaging = await loadMessagingPayload(conversation.id)
     emitNewMessage(app.io, conversation.id, message, messaging)
@@ -298,42 +306,90 @@ async function handleMessages(app: FastifyInstance, value: WaChangeValue): Promi
 
     const mediaMeta = inboundMediaMeta(msg)
 
-    // Idempotent insert: duplicate webhook deliveries hit the unique wa_message_id.
-    const inserted = await db
-      .insert(messages)
-      .values({
-        conversationId: conversation.id,
-        waMessageId: msg.id,
-        direction: 'inbound',
-        type: msg.type,
-        body: inboundBody(msg),
-        mediaStatus: isMediaType(msg.type) ? 'pending' : null,
-        mediaMimeType: mediaMeta.mediaMimeType,
-        mediaFilename: mediaMeta.mediaFilename,
-        replyToMessageId,
-        metadata: msg as unknown as Record<string, unknown>,
-        sentAt: new Date(Number(msg.timestamp) * 1000),
-      })
-      .onConflictDoNothing({ target: messages.waMessageId })
-      .returning()
-
     const windowExpiresAt = customerServiceWindowExpiresAt(Number(msg.timestamp))
     const inboundAt = new Date(Number(msg.timestamp) * 1000)
     const isCtwaInbound = !!msg.referral
 
-    if (inserted.length === 0) {
-      app.log.debug({ waMessageId: msg.id }, 'duplicate webhook message ignored')
-      await db
+    // Atomic: idempotent insert + the conversation bump (+ reopen event) commit
+    // together so a crash never leaves a stored message without its inbox update.
+    const outcome = await db.transaction(async (tx) => {
+      const inserted = await tx
+        .insert(messages)
+        .values({
+          conversationId: conversation.id,
+          waMessageId: msg.id,
+          direction: 'inbound',
+          type: msg.type,
+          body: inboundBody(msg),
+          mediaStatus: isMediaType(msg.type) ? 'pending' : null,
+          mediaMimeType: mediaMeta.mediaMimeType,
+          mediaFilename: mediaMeta.mediaFilename,
+          replyToMessageId,
+          metadata: msg as unknown as Record<string, unknown>,
+          sentAt: new Date(Number(msg.timestamp) * 1000),
+        })
+        .onConflictDoNothing({ target: messages.waMessageId })
+        .returning()
+
+      if (inserted.length === 0) {
+        await tx
+          .update(conversations)
+          .set({
+            windowExpiresAt,
+            // Use the message timestamp — Meta retries must not bump the chat with wall-clock now().
+            lastMessageAt: inboundAt,
+            ...(isCtwaInbound && !conversation.ctwaStartedAt
+              ? { ctwaStartedAt: inboundAt }
+              : {}),
+          })
+          .where(eq(conversations.id, conversation.id))
+        return { duplicate: true as const }
+      }
+
+      const message = inserted[0]
+      const wasResolved = conversation.status === 'resolved'
+
+      await tx
         .update(conversations)
         .set({
           windowExpiresAt,
-          // Use the message timestamp — Meta retries must not bump the chat with wall-clock now().
+          status: wasResolved ? 'open' : conversation.status,
           lastMessageAt: inboundAt,
-          ...(isCtwaInbound && !conversation.ctwaStartedAt
-            ? { ctwaStartedAt: inboundAt }
+          lastMessagePreview: getPreview(msg),
+          ...conversationPreviewFromMessage(message),
+          unreadCount: sql`${conversations.unreadCount} + 1`,
+          ...(isCtwaInbound
+            ? {
+                ctwaClid: msg.referral!.ctwa_clid ?? conversation.ctwaClid,
+                referralSourceUrl: msg.referral!.source_url ?? conversation.referralSourceUrl,
+                referralSourceType: msg.referral!.source_type ?? conversation.referralSourceType,
+                adId: msg.referral!.source_id ?? conversation.adId,
+                adTitle: msg.referral!.headline ?? conversation.adTitle,
+                adBody: msg.referral!.body ?? conversation.adBody,
+                referralMetadata: {
+                  image_url: msg.referral!.image_url,
+                  media_type: msg.referral!.media_type,
+                  welcome_message: msg.referral!.welcome_message,
+                },
+                ctwaStartedAt: conversation.ctwaStartedAt ?? inboundAt,
+              }
             : {}),
         })
         .where(eq(conversations.id, conversation.id))
+
+      if (wasResolved) {
+        await tx.insert(conversationEvents).values({
+          conversationId: conversation.id,
+          type: 'reopened',
+          payload: { trigger: 'inbound_message' },
+        })
+      }
+
+      return { duplicate: false as const, message }
+    })
+
+    if (outcome.duplicate) {
+      app.log.debug({ waMessageId: msg.id }, 'duplicate webhook message ignored')
 
       // Recover side effects that a crashed earlier attempt may have skipped after
       // the row was already inserted: re-enqueue a stuck media download so the
@@ -356,45 +412,8 @@ async function handleMessages(app: FastifyInstance, value: WaChangeValue): Promi
       }
       continue
     }
-    const message = inserted[0]
 
-    const wasResolved = conversation.status === 'resolved'
-
-    await db
-      .update(conversations)
-      .set({
-        windowExpiresAt,
-        status: wasResolved ? 'open' : conversation.status,
-        lastMessageAt: inboundAt,
-        lastMessagePreview: getPreview(msg),
-        ...conversationPreviewFromMessage(message),
-        unreadCount: sql`${conversations.unreadCount} + 1`,
-        ...(isCtwaInbound
-          ? {
-              ctwaClid: msg.referral!.ctwa_clid ?? conversation.ctwaClid,
-              referralSourceUrl: msg.referral!.source_url ?? conversation.referralSourceUrl,
-              referralSourceType: msg.referral!.source_type ?? conversation.referralSourceType,
-              adId: msg.referral!.source_id ?? conversation.adId,
-              adTitle: msg.referral!.headline ?? conversation.adTitle,
-              adBody: msg.referral!.body ?? conversation.adBody,
-              referralMetadata: {
-                image_url: msg.referral!.image_url,
-                media_type: msg.referral!.media_type,
-                welcome_message: msg.referral!.welcome_message,
-              },
-              ctwaStartedAt: conversation.ctwaStartedAt ?? inboundAt,
-            }
-          : {}),
-      })
-      .where(eq(conversations.id, conversation.id))
-
-    if (wasResolved) {
-      await db.insert(conversationEvents).values({
-        conversationId: conversation.id,
-        type: 'reopened',
-        payload: { trigger: 'inbound_message' },
-      })
-    }
+    const message = outcome.message
 
     const messaging = await loadMessagingPayload(conversation.id)
     emitNewMessage(app.io, conversation.id, message, messaging)

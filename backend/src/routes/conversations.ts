@@ -24,8 +24,10 @@ import {
   createOutboundText,
   resendOutboundMessage,
 } from '../services/outbound.js'
-import { resolveMessagingState, shapeMessagingFields } from '../utils/messaging-windows.js'
+import { resolveMessagingState } from '../utils/messaging-windows.js'
+import { shapeConversation as shape } from '../utils/conversation-shape.js'
 import { attachReplyPreviews } from '../utils/message-shape.js'
+import { attachMediaMeta, attachReactions } from '../utils/message-enrichment.js'
 import {
   sendOutboundMediaBuffer,
   sendOutboundMediaFromS3Key,
@@ -375,8 +377,9 @@ export async function conversationRoutes(app: FastifyInstance) {
         .orderBy(desc(messages.sentAt))
         .limit(50)
       const ordered = rows.slice().reverse()
+      const withReplies = await attachReplyPreviews(ordered)
       return {
-        messages: await attachReplyPreviews(ordered),
+        messages: await attachMediaMeta(await attachReactions(withReplies)),
         nextCursor: null,
       }
     }
@@ -405,8 +408,69 @@ export async function conversationRoutes(app: FastifyInstance) {
     const hasMore = rows.length > PAGE
     const page = rows.slice(0, PAGE)
     const ordered = page.slice().reverse()
+    const withReplies = await attachReplyPreviews(ordered)
     return {
-      messages: await attachReplyPreviews(ordered),
+      messages: await attachMediaMeta(await attachReactions(withReplies)),
+      nextCursor: hasMore ? page[page.length - 1]?.id : null,
+    }
+  })
+
+  // GET /api/conversations/:id/media-gallery — images/videos for per-chat gallery
+  app.get('/:id/media-gallery', async (request) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params)
+    await requireConversation(id)
+    const q = z
+      .object({
+        before: z.string().uuid().optional(),
+        type: z.enum(['image', 'video', 'all']).default('all'),
+      })
+      .parse(request.query)
+
+    let beforeSentAt: Date | undefined
+    if (q.before) {
+      const cursorMsg = await db.query.messages.findFirst({
+        where: and(eq(messages.id, q.before), eq(messages.conversationId, id)),
+        columns: { sentAt: true },
+      })
+      if (!cursorMsg) throw errors.notFound('Message not found')
+      beforeSentAt = cursorMsg.sentAt
+    }
+
+    const typeConds =
+      q.type === 'all'
+        ? [sql`${messages.type} in ('image', 'video', 'sticker')`]
+        : [eq(messages.type, q.type)]
+
+    const conds = [
+      eq(messages.conversationId, id),
+      isNull(messages.deletedAt),
+      sql`${messages.mediaUrl} is not null`,
+      ...typeConds,
+    ]
+    if (beforeSentAt) conds.push(lt(messages.sentAt, beforeSentAt))
+
+    const rows = await db
+      .select({
+        id: messages.id,
+        type: messages.type,
+        body: messages.body,
+        mediaUrl: messages.mediaUrl,
+        mediaThumbUrl: messages.mediaThumbUrl,
+        mediaFileSize: messages.mediaFileSize,
+        mediaMimeType: messages.mediaMimeType,
+        mediaFilename: messages.mediaFilename,
+        sentAt: messages.sentAt,
+        direction: messages.direction,
+      })
+      .from(messages)
+      .where(and(...conds))
+      .orderBy(desc(messages.sentAt))
+      .limit(PAGE + 1)
+
+    const hasMore = rows.length > PAGE
+    const page = rows.slice(0, PAGE)
+    return {
+      items: page,
       nextCursor: hasMore ? page[page.length - 1]?.id : null,
     }
   })
@@ -448,10 +512,11 @@ export async function conversationRoutes(app: FastifyInstance) {
             }),
             z.object({
               type: z.literal('audio'),
-              filename: z.string().min(1),
-              mimeType: z.string().min(1),
-              data: z.string().min(100),
-              caption: z.string().optional(),
+              filename: z.string().min(1).max(256),
+              mimeType: z.string().min(1).max(128),
+              // Base64 of the OGG voice note. Cap ~22MB (16MB binary) to bound memory.
+              data: z.string().min(100).max(22 * 1024 * 1024),
+              caption: z.string().max(4096).optional(),
               replyToMessageId: z.string().uuid().optional(),
             }),
             z.object({
@@ -671,32 +736,3 @@ export async function conversationRoutes(app: FastifyInstance) {
   })
 }
 
-function shape(
-  c: Conversation,
-  contact: { id: string; waId: string; name: string | null; profilePictureUrl: string | null },
-  assignedName: string | null,
-  assignedAvatar: string | null,
-) {
-  return {
-    id: c.id,
-    status: c.status,
-    contact: {
-      id: contact.id,
-      waId: contact.waId,
-      name: contact.name,
-      profilePictureUrl: contact.profilePictureUrl,
-    },
-    assignedTo: c.assignedTo,
-    assignedAgent: c.assignedTo ? { name: assignedName, avatarUrl: assignedAvatar } : null,
-    lastMessageAt: c.lastMessageAt,
-    lastMessagePreview: c.lastMessagePreview,
-    lastMessageId: c.lastMessageId,
-    lastMessageDirection: c.lastMessageDirection,
-    lastMessageStatus: c.lastMessageStatus,
-    lastMessageType: c.lastMessageType,
-    pinnedAt: c.pinnedAt?.toISOString() ?? null,
-    unreadCount: c.unreadCount,
-    aiHandled: c.aiHandled,
-    ...shapeMessagingFields(c),
-  }
-}

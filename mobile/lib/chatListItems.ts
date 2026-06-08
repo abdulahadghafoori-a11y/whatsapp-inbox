@@ -23,8 +23,10 @@ export function buildChatListItems(messages: Message[]): ChatListItem[] {
     const older = reversed[i + 1]
     if (!older || dayKey(msg.sentAt) !== dayKey(older.sentAt)) {
       items.push({
+        // Stable per calendar day — never include the array index, or loading
+        // older pages shifts indices and remounts every date row (scroll jumps).
         kind: 'date',
-        id: `date-${dayKey(msg.sentAt)}-${i}`,
+        id: `date-${dayKey(msg.sentAt)}`,
         dateIso: msg.sentAt,
         label: formatDateLabel(msg.sentAt),
       })

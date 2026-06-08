@@ -1,12 +1,7 @@
-import type { QueryClient } from '@tanstack/react-query'
 import { appStorage } from '@/lib/appStorage'
 import { api } from '@/services/api'
-import { queryClient } from '@/lib/queryClient'
-import {
-  removeMessageInfinite,
-  upsertMessageInfinite,
-  type MessagesInfinite,
-} from '@/lib/messagesQueryCache'
+import { putLocalMessage, deleteMessages } from '@/lib/db/repo'
+import { scheduleSync } from '@/lib/sync/syncEngine'
 import type { Message } from '@/types'
 
 const KEY = 'wa-inbox-outbound-queue'
@@ -105,13 +100,9 @@ async function doFlushOutboundQueue(): Promise<{ sent: number; failed: number }>
         { headers: { 'Content-Type': 'application/json' } },
       )
       sent++
-      // Drop the optimistic placeholder now that the server has the message. The
-      // real row arrives via the new_message socket event / refetch. Was: the
-      // pending bubble lingered and showed as a duplicate alongside the echo.
-      queryClient.setQueryData<MessagesInfinite>(
-        ['messages', item.conversationId],
-        (old) => removeMessageInfinite(old, item.id),
-      )
+      // Drop the optimistic placeholder now that the server has the message; the
+      // real row arrives via the change-feed sync we kick below.
+      await deleteMessages([item.id])
     } catch {
       failed++
       remaining.push(item)
@@ -119,16 +110,15 @@ async function doFlushOutboundQueue(): Promise<{ sent: number; failed: number }>
   }
 
   await saveOutboundQueue(remaining)
+  if (sent > 0) scheduleSync()
   return { sent, failed }
 }
 
-/** Restore queued outbound text bubbles after app restart. */
-export async function hydrateOutboundQueue(qc: QueryClient): Promise<void> {
+/** Restore queued outbound text bubbles (into the device DB) after app restart. */
+export async function hydrateOutboundQueue(): Promise<void> {
   const queue = await loadOutboundQueue()
   for (const item of queue) {
-    qc.setQueryData<MessagesInfinite>(['messages', item.conversationId], (old) =>
-      upsertMessageInfinite(old, optimisticMessage(item)),
-    )
+    await putLocalMessage(optimisticMessage(item))
   }
 }
 

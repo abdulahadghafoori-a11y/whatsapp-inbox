@@ -51,6 +51,23 @@ export function emitMediaFailed(
   io.emit('media_failed', { conversationId, messageId })
 }
 
+/** The first client to compute a ThumbHash registered it; tell everyone else. */
+export function emitMediaThumbhash(
+  io: SocketIOServer,
+  conversationId: string,
+  messageId: string,
+  thumbhash: string,
+  dimensions?: { width: number | null; height: number | null },
+): void {
+  io.emit('media_thumbhash', {
+    conversationId,
+    messageId,
+    thumbhash,
+    width: dimensions?.width ?? null,
+    height: dimensions?.height ?? null,
+  })
+}
+
 /** Delivery receipts — broadcast so agents see ticks without joining a room. */
 export function emitMessageStatus(
   io: SocketIOServer,

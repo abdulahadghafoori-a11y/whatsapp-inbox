@@ -30,28 +30,32 @@ export function useVoiceMetering(
   }, [levels])
 
   useEffect(() => {
-    if (!active || !recorder) {
+    if (!active) {
       staleMeteringTicks.current = 0
       return
     }
 
     const tick = () => {
       let level = IDLE
-      try {
-        const status = recorder.getStatus()
-        const raw = status.metering
-        if (raw == null || Number.isNaN(raw)) {
+      if (recorder) {
+        try {
+          const status = recorder.getStatus()
+          const raw = status.metering
+          if (raw == null || Number.isNaN(raw)) {
+            staleMeteringTicks.current += 1
+          } else {
+            staleMeteringTicks.current = 0
+            level = meteringToLevel(raw)
+          }
+        } catch {
           staleMeteringTicks.current += 1
-        } else {
-          staleMeteringTicks.current = 0
-          level = meteringToLevel(raw)
         }
-      } catch {
-        staleMeteringTicks.current += 1
+      } else {
+        staleMeteringTicks.current = 3
       }
 
-      // When the platform omits metering, synthesize a gentle pulse so bars stay alive.
-      if (staleMeteringTicks.current > 2) {
+      // Warming pulse while the mic starts, or when metering is missing.
+      if (!recorder || staleMeteringTicks.current > 2) {
         const t = Date.now() / 1000
         level = 0.18 + Math.abs(Math.sin(t * 4.2)) * 0.35 + Math.abs(Math.sin(t * 2.1)) * 0.15
       }

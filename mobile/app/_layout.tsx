@@ -11,10 +11,12 @@ import { View, ActivityIndicator, StyleSheet } from 'react-native'
 import { useAuthStore } from '@/stores/authStore'
 import { ToastProvider } from '@/components/Toast'
 import { SocketBridge } from '@/components/SocketBridge'
+import { SyncBridge } from '@/components/SyncBridge'
 import { GlobalAudioHost } from '@/components/GlobalAudioHost'
 import { OfflineSyncBridge } from '@/components/OfflineSyncBridge'
 import { PushNotificationBridge } from '@/components/PushNotificationBridge'
 import { MediaCacheBridge } from '@/components/MediaCacheBridge'
+import { RootErrorBoundary } from '@/components/RootErrorBoundary'
 import { queryPersister, queryClient, shouldDehydrateQuery } from '@/lib/queryClient'
 import { stackTransitionOptions } from '@/lib/navigation'
 import { initErrorReporting } from '@/lib/errorReporting'
@@ -83,6 +85,7 @@ function AuthGate() {
   return (
     <>
       {accessToken ? <SocketBridge /> : null}
+      {accessToken ? <SyncBridge /> : null}
       {accessToken ? <OfflineSyncBridge /> : null}
       {accessToken ? <MediaCacheBridge /> : null}
       {accessToken ? <PushNotificationBridge /> : null}
@@ -116,24 +119,26 @@ const styles = StyleSheet.create({
 export default function RootLayout() {
   const { colorScheme: scheme } = useColorScheme()
   return (
-    <GestureHandlerRootView style={{ flex: 1 }}>
-      <SafeAreaProvider>
-        <KeyboardProvider preload={false}>
-        <PersistQueryClientProvider
-          client={queryClient}
-          persistOptions={{
-            persister: queryPersister,
-            maxAge: 7 * 24 * 60 * 60 * 1000,
-            dehydrateOptions: { shouldDehydrateQuery },
-          }}
-        >
-          <ToastProvider>
-            <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />
-            <AuthGate />
-          </ToastProvider>
-        </PersistQueryClientProvider>
-        </KeyboardProvider>
-      </SafeAreaProvider>
-    </GestureHandlerRootView>
+    <RootErrorBoundary>
+      <GestureHandlerRootView style={{ flex: 1 }}>
+        <SafeAreaProvider>
+          <KeyboardProvider preload={false}>
+          <PersistQueryClientProvider
+            client={queryClient}
+            persistOptions={{
+              persister: queryPersister,
+              maxAge: 7 * 24 * 60 * 60 * 1000,
+              dehydrateOptions: { shouldDehydrateQuery },
+            }}
+          >
+            <ToastProvider>
+              <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />
+              <AuthGate />
+            </ToastProvider>
+          </PersistQueryClientProvider>
+          </KeyboardProvider>
+        </SafeAreaProvider>
+      </GestureHandlerRootView>
+    </RootErrorBoundary>
   )
 }

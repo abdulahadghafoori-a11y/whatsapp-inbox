@@ -4,6 +4,7 @@ node_modules/
 # Env
 .env
 .env.local
+.env.production
 *.local
 
 # Build output
@@ -11,8 +12,10 @@ backend/dist/
 
 # Expo
 mobile/.expo/
+mobile/.expo-android-bundle-test/
 mobile/dist/
 mobile/web-build/
+**/android/build/
 *.orig.*
 
 # Logs

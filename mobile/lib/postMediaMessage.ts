@@ -5,6 +5,7 @@ import { api, ensureAccessTokenFresh } from '@/services/api'
 import { normalizeMessage } from '@/lib/normalizeMessage'
 import { normalizeUploadMime } from '@/lib/mediaMime'
 import { prepareImageForSend } from '@/lib/prepareImageSend'
+import { assertVoiceFileReady, prepareVoiceForSend } from '@/lib/prepareVoiceForSend'
 import { prepareStickerForSend } from '@/lib/prepareStickerForSend'
 import { prepareMediaFileForUpload } from '@/lib/prepareUpload'
 import { assertMediaUploadable } from '@/lib/waMediaLimits'
@@ -27,6 +28,8 @@ export type PreparedMediaPayload = {
   fileUri: string
   fileName: string
   mimeType: string
+  /** SHA-256 of the prepared bytes; hashed once during prep, reused for S3 dedupe. */
+  contentHash?: string | null
 }
 
 export type MediaPostInput = {
@@ -61,10 +64,11 @@ async function storePreparedInCache(
   cacheKey: string | null,
   payload: PreparedMediaPayload,
 ): Promise<PreparedMediaPayload> {
-  if (!cacheKey) return payload
+  // Hash the prepared bytes exactly once here and carry it on the payload so the
+  // upload step can reuse it for S3 dedupe instead of re-reading the whole file.
   const contentHash = await hashPreparedFile(payload.fileUri)
-  await putPreparedInCache(cacheKey, payload, contentHash)
-  return payload
+  if (cacheKey) await putPreparedInCache(cacheKey, payload, contentHash)
+  return { ...payload, contentHash }
 }
 
 export async function prepareMediaPayload(input: MediaPostInput): Promise<PreparedMediaPayload> {
@@ -92,9 +96,14 @@ export async function prepareMediaPayload(input: MediaPostInput): Promise<Prepar
   input.onPhase?.('preparing')
 
   if (mimeHint.startsWith('audio/')) {
-    const { prepareVoiceForSend } = await import('@/lib/prepareVoiceForSend')
+    // contentHash: null → skip S3 dedupe for voice (would require another full-file
+    // read); voice notes are unique per recording so dedupe has no real payoff.
+    if (input.skipPrepare) {
+      await assertVoiceFileReady(input.uri)
+      return { fileUri: input.uri, fileName: input.name, mimeType: 'audio/ogg', contentHash: null }
+    }
     const voice = await prepareVoiceForSend(input.uri, input.name, mimeHint)
-    return { fileUri: voice.uri, fileName: voice.name, mimeType: 'audio/ogg' }
+    return { fileUri: voice.uri, fileName: voice.name, mimeType: 'audio/ogg', contentHash: null }
   }
 
   if (input.sendAsDocument) {
@@ -155,9 +164,6 @@ export async function postPreparedMedia(
   meta: {
     caption?: string
     replyToMessageId?: string
-    mimeHintForAudio?: boolean
-    audioBase64?: string
-    audioFileName?: string
     onPhase?: (phase: MediaSendPhase) => void
     onUploadProgress?: (progress: number) => void
   },
@@ -165,24 +171,10 @@ export async function postPreparedMedia(
   meta.onPhase?.('uploading')
   await ensureAccessTokenFresh()
 
-  if (meta.mimeHintForAudio && meta.audioBase64) {
-    const res = await api.post<{ message: Message }>(
-      `/conversations/${conversationId}/messages`,
-      {
-        type: 'audio' as const,
-        filename: meta.audioFileName ?? 'voice.ogg',
-        mimeType: 'audio/ogg',
-        data: meta.audioBase64,
-        ...(meta.caption ? { caption: meta.caption } : {}),
-        ...(meta.replyToMessageId ? { replyToMessageId: meta.replyToMessageId } : {}),
-      },
-      { timeout: 120_000 },
-    )
-    meta.onPhase?.('sending')
-    return normalizeMessage(res.data.message as Message & Record<string, unknown>)
-  }
-
-  const contentHash = await hashPreparedFile(prepared.fileUri)
+  const contentHash =
+    prepared.contentHash !== undefined
+      ? prepared.contentHash
+      : await hashPreparedFile(prepared.fileUri)
   if (contentHash) {
     const reuseS3Key = await getS3KeyForContentHash(contentHash)
     if (reuseS3Key) {
@@ -279,20 +271,20 @@ export async function postMediaMessage(
   const mimeHint = normalizeUploadMime(input.mimeType, input.name)
 
   if (mimeHint.startsWith('audio/')) {
+    input.onPhase?.('preparing')
     const prepared = await prepareMediaPayload(input)
-    const data = await FileSystem.readAsStringAsync(prepared.fileUri, {
-      encoding: FileSystem.EncodingType.Base64,
-    })
-    if (!data || data.length < 280) {
+    // Was: read the whole OGG as base64 and POST it in JSON (~22MB string on the
+    // JS thread → jank/OOM on long notes). Now upload as multipart like all media.
+    const info = await FileSystem.getInfoAsync(prepared.fileUri)
+    if (!info.exists || (typeof info.size === 'number' && info.size < 200)) {
       throw new Error('Recording could not be read. Please try again.')
     }
+    input.onPhase?.('uploading')
     return postPreparedMedia(conversationId, prepared, {
       caption: input.caption,
       replyToMessageId: input.replyToMessageId,
-      mimeHintForAudio: true,
-      audioBase64: data,
-      audioFileName: prepared.fileName,
       onPhase: input.onPhase,
+      onUploadProgress: input.onUploadProgress,
     })
   }
 

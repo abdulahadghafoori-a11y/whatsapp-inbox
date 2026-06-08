@@ -2,6 +2,8 @@ import NetInfo from '@react-native-community/netinfo'
 import { onlineManager } from '@tanstack/react-query'
 
 let subscribed = false
+/** Last-known Wi‑Fi/ethernet state, kept warm by the shared NetInfo listener. */
+let lastWifi: boolean | null = null
 
 function isReachable(
   isConnected: boolean | null,
@@ -13,22 +15,33 @@ function isReachable(
   return true
 }
 
+function wifiFromState(state: { isConnected: boolean | null; type: string }): boolean {
+  return !!state.isConnected && (state.type === 'wifi' || state.type === 'ethernet')
+}
+
 export function initNetworkListener() {
   if (subscribed) return
   subscribed = true
 
   onlineManager.setEventListener((setOnline) => {
     return NetInfo.addEventListener((state) => {
+      lastWifi = wifiFromState(state)
       setOnline(isReachable(state.isConnected, state.isInternetReachable))
     })
   })
 }
 
+/** Synchronous, last-known Wi‑Fi state (null until the first NetInfo event/fetch). */
+export function getWifiSync(): boolean | null {
+  return lastWifi
+}
+
 /** Wait briefly when reachability is unknown before treating the device as offline. */
 export async function isOnWifi(): Promise<boolean> {
   const state = await NetInfo.fetch()
-  if (!state.isConnected) return false
-  return state.type === 'wifi' || state.type === 'ethernet'
+  const wifi = wifiFromState(state)
+  lastWifi = wifi
+  return wifi
 }
 
 export async function isOnline(graceMs = 2500): Promise<boolean> {

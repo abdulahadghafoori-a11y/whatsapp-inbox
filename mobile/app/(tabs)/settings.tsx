@@ -20,9 +20,13 @@ import { loadThemePref, setThemePref, type ThemePref } from '@/lib/theme'
 import {
   getMediaDownloadPrefs,
   setMediaDownloadPref,
+  subscribeMediaDownloadPrefs,
   type DownloadPolicy,
   type MediaDownloadPrefs,
+  type NetworkDownloadPrefs,
 } from '@/lib/mediaDownloadPrefs'
+import { clearMediaCache, getMediaCacheUsageBytes } from '@/lib/messageMediaCache'
+import { formatMediaSize } from '@/lib/formatMediaSize'
 import { hapticSelection, hapticWarning } from '@/lib/haptics'
 
 const DOWNLOAD_ROWS: {
@@ -39,6 +43,11 @@ const DOWNLOAD_POLICIES: { key: DownloadPolicy; label: string }[] = [
   { key: 'always', label: 'Always' },
   { key: 'wifi', label: 'Wi‑Fi only' },
   { key: 'never', label: 'Never' },
+]
+
+const NETWORK_COLUMNS: { key: keyof NetworkDownloadPrefs; label: string }[] = [
+  { key: 'cellular', label: 'When using mobile data' },
+  { key: 'wifi', label: 'When connected on Wi‑Fi' },
 ]
 
 const THEME_OPTIONS: { key: ThemePref; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
@@ -129,11 +138,17 @@ export default function SettingsScreen() {
   const [notificationsEnabled, setNotificationsEnabledState] = useState(true)
   const [theme, setThemeState] = useState<ThemePref>('system')
   const [downloadPrefs, setDownloadPrefsState] = useState<MediaDownloadPrefs | null>(null)
+  const [cacheBytes, setCacheBytes] = useState<number | null>(null)
+  const [clearingCache, setClearingCache] = useState(false)
 
   useEffect(() => {
     void getNotificationsEnabled().then(setNotificationsEnabledState)
     void loadThemePref().then(setThemeState)
     void getMediaDownloadPrefs().then(setDownloadPrefsState)
+    void getMediaCacheUsageBytes().then(setCacheBytes)
+    return subscribeMediaDownloadPrefs(() => {
+      void getMediaDownloadPrefs().then(setDownloadPrefsState)
+    })
   }, [])
 
   async function toggleNotifications(next: boolean) {
@@ -159,10 +174,9 @@ export default function SettingsScreen() {
       if (refreshToken) await api.post('/auth/logout', { refreshToken })
     } catch {
       /* ignore network errors on logout */
-    } finally {
-      await clear()
-      router.replace('/(auth)/login')
     }
+    await clear()
+    router.replace('/(auth)/login')
   }
 
   return (
@@ -217,6 +231,31 @@ export default function SettingsScreen() {
             </View>
             <Text className="flex-1 text-[16px] text-neutral-900 dark:text-wa-textDark">Storage & data</Text>
           </View>
+          <Text className="border-t border-neutral-100 px-4 pb-2 pt-1 text-[12px] leading-4 text-neutral-500 dark:border-wa-border/40 dark:text-wa-subDark">
+            Media in chats downloads when visible, using these auto-download rules (same idea as
+            WhatsApp Business).
+          </Text>
+          <View className="border-t border-neutral-100 px-4 py-3 dark:border-wa-border/40">
+            <Text className="text-[14px] text-neutral-600 dark:text-wa-subDark">
+              Media cache: {formatMediaSize(cacheBytes) ?? '—'}
+            </Text>
+            <Pressable
+              disabled={clearingCache}
+              onPress={() => {
+                hapticSelection()
+                setClearingCache(true)
+                void clearMediaCache()
+                  .then(() => getMediaCacheUsageBytes())
+                  .then(setCacheBytes)
+                  .finally(() => setClearingCache(false))
+              }}
+              className="mt-2 self-start rounded-full bg-neutral-100 px-3 py-1.5 dark:bg-wa-panelDeep"
+            >
+              <Text className="text-[12px] font-medium text-wa-teal dark:text-wa-green">
+                {clearingCache ? 'Clearing…' : 'Clear media cache'}
+              </Text>
+            </Pressable>
+          </View>
           {downloadPrefs
             ? DOWNLOAD_ROWS.map((row) => (
                 <View
@@ -226,43 +265,74 @@ export default function SettingsScreen() {
                   <Text className="mb-2 text-[14px] font-medium text-neutral-800 dark:text-wa-textDark">
                     {row.label}
                   </Text>
-                  <View className="flex-row gap-2">
-                    {DOWNLOAD_POLICIES.map((opt) => {
-                      const active = downloadPrefs[row.key] === opt.key
-                      return (
-                        <Pressable
-                          key={opt.key}
-                          onPress={() => {
-                            hapticSelection()
-                            void setMediaDownloadPref(row.key, opt.key).then(() =>
-                              setDownloadPrefsState((p) =>
-                                p ? { ...p, [row.key]: opt.key } : p,
-                              ),
-                            )
-                          }}
-                          className={`rounded-full px-3 py-1.5 ${
-                            active
-                              ? 'bg-wa-teal/15 dark:bg-wa-green/20'
-                              : 'bg-neutral-100 dark:bg-wa-panelDeep'
-                          }`}
-                        >
-                          <Text
-                            className={`text-[12px] font-medium ${
-                              active
-                                ? 'text-wa-teal dark:text-wa-green'
-                                : 'text-neutral-500 dark:text-wa-subDark'
-                            }`}
-                          >
-                            {opt.label}
-                          </Text>
-                        </Pressable>
-                      )
-                    })}
-                  </View>
+                  {NETWORK_COLUMNS.map((network) => (
+                    <View key={network.key} className="mb-2">
+                      <Text className="mb-1 text-[11px] text-neutral-500 dark:text-wa-subDark">
+                        {network.label}
+                      </Text>
+                      <View className="flex-row flex-wrap gap-2">
+                        {DOWNLOAD_POLICIES.map((opt) => {
+                          const active = downloadPrefs[row.key][network.key] === opt.key
+                          return (
+                            <Pressable
+                              key={opt.key}
+                              onPress={() => {
+                                hapticSelection()
+                                void setMediaDownloadPref(row.key, network.key, opt.key).then(
+                                  () =>
+                                    setDownloadPrefsState((p) =>
+                                      p
+                                        ? {
+                                            ...p,
+                                            [row.key]: {
+                                              ...p[row.key],
+                                              [network.key]: opt.key,
+                                            },
+                                          }
+                                        : p,
+                                    ),
+                                )
+                              }}
+                              className={`rounded-full px-3 py-1.5 ${
+                                active
+                                  ? 'bg-wa-teal/15 dark:bg-wa-green/20'
+                                  : 'bg-neutral-100 dark:bg-wa-panelDeep'
+                              }`}
+                            >
+                              <Text
+                                className={`text-[12px] font-medium ${
+                                  active
+                                    ? 'text-wa-teal dark:text-wa-green'
+                                    : 'text-neutral-500 dark:text-wa-subDark'
+                                }`}
+                              >
+                                {opt.label}
+                              </Text>
+                            </Pressable>
+                          )
+                        })}
+                      </View>
+                    </View>
+                  ))}
                 </View>
               ))
             : null}
         </View>
+
+        <Pressable
+          onPress={() => router.push('/starred')}
+          className="mt-3 overflow-hidden rounded-xl bg-white px-4 py-3.5 dark:bg-wa-panel"
+        >
+          <View className="flex-row items-center">
+            <View className="mr-3 h-9 w-9 items-center justify-center rounded-full bg-[#E7F5F1] dark:bg-wa-green/15">
+              <Ionicons name="star-outline" size={20} color={isDark ? '#00A884' : '#008069'} />
+            </View>
+            <Text className="flex-1 text-[16px] text-neutral-900 dark:text-wa-textDark">
+              Starred messages
+            </Text>
+            <Ionicons name="chevron-forward" size={18} color={isDark ? '#8696A0' : '#667781'} />
+          </View>
+        </Pressable>
 
         <View className="mt-3 overflow-hidden rounded-xl bg-white p-4 dark:bg-wa-panel">
           <View className="mb-3 flex-row items-center">

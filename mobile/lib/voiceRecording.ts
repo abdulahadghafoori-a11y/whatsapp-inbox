@@ -4,8 +4,14 @@ import {
   startOpusVoiceRecording,
   type OpusVoiceHandle,
 } from '@/lib/opusVoiceRecorder'
+import { warmMicPermission } from '@/lib/micPermission'
 
 export type VoiceRecording = OpusVoiceHandle
+
+/** Cache mic permission while the chat is open so record starts faster. */
+export function warmVoiceRecorder(): Promise<void> {
+  return warmMicPermission()
+}
 
 /** Stop playback and start Opus voice capture (OGG on stop). */
 export async function startVoiceRecording(): Promise<VoiceRecording> {

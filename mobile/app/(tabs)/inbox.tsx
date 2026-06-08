@@ -2,25 +2,27 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   View,
   Text,
-  FlatList,
   TextInput,
   Pressable,
-  RefreshControl,
   ActivityIndicator,
   StyleSheet,
   Keyboard,
+  Alert,
+  ActionSheetIOS,
+  Platform,
 } from 'react-native'
+import { type FlashListRef } from '@shopify/flash-list'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { StatusBar } from 'expo-status-bar'
-import { useRouter, useFocusEffect } from 'expo-router'
+import { useRouter } from 'expo-router'
 import { useColorScheme } from 'nativewind'
-import { useQueryClient } from '@tanstack/react-query'
-import { SwipeableConversationItem } from '@/components/SwipeableConversationItem'
+import { InboxConversationList } from '@/components/InboxConversationList'
+import { InboxSkeleton } from '@/components/Skeleton'
 import { QueryError } from '@/components/QueryState'
 import { useToast } from '@/components/Toast'
 import { Avatar } from '@/components/Avatar'
 import {
-  useConversations,
+  useInbox,
   useMarkRead,
   useMarkUnread,
   usePinConversation,
@@ -33,12 +35,13 @@ import {
 import { apiErrorMessage } from '@/services/api'
 import { formatTime } from '@/lib/format'
 import type { ConversationListItem } from '@/types'
-import type Swipeable from 'react-native-gesture-handler/Swipeable'
 import { registerInboxScrollToTop } from '@/lib/inboxScroll'
 import { userFacingLoadError } from '@/lib/userFacingError'
 import { SocketConnectionBanner } from '@/components/SocketConnectionBanner'
 import { hapticSelection } from '@/lib/haptics'
 import { conversationHref } from '@/lib/scrollToChatMessage'
+import { stabilizeConversationList } from '@/lib/inboxList'
+import { hapticLight } from '@/lib/haptics'
 
 const FILTERS: { key: InboxFilter; label: string }[] = [
   { key: 'all', label: 'All' },
@@ -81,13 +84,12 @@ export default function InboxScreen() {
   const router = useRouter()
   const { colorScheme: scheme } = useColorScheme()
   const isDark = scheme === 'dark'
-  const queryClient = useQueryClient()
   const toast = useToast()
   const markRead = useMarkRead()
   const markUnread = useMarkUnread()
   const pinConversation = usePinConversation()
-  const openSwipeRef = useRef<Swipeable | null>(null)
-  const listRef = useRef<FlatList<ConversationListItem>>(null)
+  const listRef = useRef<FlashListRef<ConversationListItem>>(null)
+  const conversationsById = useRef(new Map<string, ConversationListItem>())
   const searchInputRef = useRef<TextInput>(null)
   const [filter, setFilter] = useState<InboxFilter>('all')
   const [searchInput, setSearchInput] = useState('')
@@ -95,54 +97,28 @@ export default function InboxScreen() {
   const [searchFocused, setSearchFocused] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
-  const canLoadMore = useRef(false)
-  const endReachedBusy = useRef(false)
+  const loadMoreBusy = useRef(false)
 
   const {
-    data,
+    conversations: rawConversations,
     isLoading,
     isError,
     error,
     refetch,
     fetchNextPage,
     hasNextPage,
-  } = useConversations(filter, search)
+  } = useInbox(filter, search)
 
   const { data: messageHits, isFetching: messageSearchFetching } = useGlobalMessageSearch(search)
   const showMessageHits = search.trim().length >= 2
 
+  const conversationsRef = useRef<ConversationListItem[]>([])
   const conversations = useMemo(() => {
-    const seen = new Set<string>()
-    const list: ConversationListItem[] = []
-    for (const c of data?.pages.flatMap((p) => p.conversations) ?? []) {
-      if (seen.has(c.id)) continue
-      seen.add(c.id)
-      list.push(c)
-    }
-    return list
-  }, [data])
-
-  const showSkeleton = isLoading && conversations.length === 0 && !showMessageHits
-
-  const queryKey = useMemo(() => ['conversations', filter, search] as const, [filter, search])
-
-  useFocusEffect(
-    useCallback(() => {
-      canLoadMore.current = false
-      endReachedBusy.current = false
-      setRefreshing(false)
-      setLoadingMore(false)
-      openSwipeRef.current?.close()
-      openSwipeRef.current = null
-
-      return () => {
-        canLoadMore.current = false
-        endReachedBusy.current = false
-        setLoadingMore(false)
-        void queryClient.cancelQueries({ queryKey })
-      }
-    }, [queryKey, queryClient]),
-  )
+    const stabilized = stabilizeConversationList(conversationsRef.current, rawConversations)
+    conversationsRef.current = stabilized
+    conversationsById.current = new Map(stabilized.map((c) => [c.id, c]))
+    return stabilized
+  }, [rawConversations])
 
   useEffect(() => {
     const t = setTimeout(() => setSearch(searchInput.trim()), 300)
@@ -150,23 +126,26 @@ export default function InboxScreen() {
   }, [searchInput])
 
   useEffect(() => {
-    registerInboxScrollToTop(() => {
-      openSwipeRef.current?.close()
-      dismissInboxSearch()
-      listRef.current?.scrollToOffset({ offset: 0, animated: true })
-    })
-    return () => registerInboxScrollToTop(null)
-  }, [])
+    listRef.current?.scrollToOffset({ offset: 0, animated: false })
+  }, [filter, search])
 
-  function dismissInboxSearch() {
+  const dismissInboxSearch = useCallback(() => {
     setSearchFocused(false)
     setSearchInput('')
     setSearch('')
     searchInputRef.current?.blur()
     Keyboard.dismiss()
-  }
+  }, [])
 
-  async function onPullRefresh() {
+  useEffect(() => {
+    registerInboxScrollToTop(() => {
+      dismissInboxSearch()
+      listRef.current?.scrollToOffset({ offset: 0, animated: true })
+    })
+    return () => registerInboxScrollToTop(null)
+  }, [dismissInboxSearch])
+
+  const onPullRefresh = useCallback(async () => {
     if (refreshing) return
     setRefreshing(true)
     try {
@@ -174,14 +153,7 @@ export default function InboxScreen() {
     } finally {
       setRefreshing(false)
     }
-  }
-
-  const onSwipeOpen = useCallback((id: string, ref: Swipeable | null) => {
-    if (openSwipeRef.current && openSwipeRef.current !== ref) {
-      openSwipeRef.current.close()
-    }
-    openSwipeRef.current = ref
-  }, [])
+  }, [refreshing, refetch])
 
   const onToggleRead = useCallback(
     async (conversationId: string, currentlyUnread: boolean) => {
@@ -206,37 +178,73 @@ export default function InboxScreen() {
     [pinConversation, toast],
   )
 
-  const renderConversation = useCallback(
-    ({ item }: { item: ConversationListItem }) => (
-      <View onStartShouldSetResponder={() => true}>
-        <SwipeableConversationItem
-          conversation={item}
-          onPress={(id) => {
-            openSwipeRef.current?.close()
-            dismissInboxSearch()
-            router.push(`/conversation/${id}`)
-          }}
-          onMarkRead={(id) => void onToggleRead(id, true)}
-          onMarkUnread={(id) => void onToggleRead(id, false)}
-          onTogglePin={(id, pinned) => void onTogglePin(id, pinned)}
-          onSwipeOpen={onSwipeOpen}
-        />
-      </View>
-    ),
-    [onSwipeOpen, onTogglePin, onToggleRead, router],
+  // Swipe-action adapters (stable refs so the memoized rows don't re-render).
+  const onSwipeMarkRead = useCallback((id: string) => void onToggleRead(id, true), [onToggleRead])
+  const onSwipeMarkUnread = useCallback(
+    (id: string) => void onToggleRead(id, false),
+    [onToggleRead],
+  )
+  const onSwipeTogglePin = useCallback(
+    (id: string, pinned: boolean) => void onTogglePin(id, pinned),
+    [onTogglePin],
   )
 
-  async function loadMore() {
-    if (!hasNextPage || loadingMore || endReachedBusy.current) return
-    endReachedBusy.current = true
+  const handleConversationPress = useCallback(
+    (id: string) => {
+      dismissInboxSearch()
+      router.push(`/conversation/${id}`)
+    },
+    [dismissInboxSearch, router],
+  )
+
+  const handleConversationLongPress = useCallback(
+    (id: string) => {
+      const conversation = conversationsById.current.get(id)
+      if (!conversation) return
+      hapticLight()
+      const isUnread = conversation.unreadCount > 0
+      const isPinned = !!conversation.pinnedAt
+      const pinLabel = isPinned ? 'Unpin' : 'Pin'
+      const readLabel = isUnread ? 'Mark as read' : 'Mark as unread'
+      const title = conversation.contact.name || conversation.contact.waId
+
+      const onPick = (index: number) => {
+        if (index === 0) void onTogglePin(id, !isPinned)
+        if (index === 1) void onToggleRead(id, isUnread)
+      }
+
+      if (Platform.OS === 'ios') {
+        ActionSheetIOS.showActionSheetWithOptions(
+          { options: [pinLabel, readLabel, 'Cancel'], cancelButtonIndex: 2, title },
+          onPick,
+        )
+        return
+      }
+
+      Alert.alert(title, undefined, [
+        { text: pinLabel, onPress: () => onPick(0) },
+        { text: readLabel, onPress: () => onPick(1) },
+        { text: 'Cancel', style: 'cancel' },
+      ])
+    },
+    [onTogglePin, onToggleRead],
+  )
+
+  const onLoadMore = useCallback(async () => {
+    if (!hasNextPage || loadingMore || loadMoreBusy.current) return
+    loadMoreBusy.current = true
     setLoadingMore(true)
     try {
       await fetchNextPage()
     } finally {
-      endReachedBusy.current = false
+      loadMoreBusy.current = false
       setLoadingMore(false)
     }
-  }
+  }, [fetchNextPage, hasNextPage, loadingMore])
+
+  const onListScrollBeginDrag = useCallback(() => {
+    if (searchFocused) dismissInboxSearch()
+  }, [dismissInboxSearch, searchFocused])
 
   const messageResultsHeader = useMemo(() => {
     if (!showMessageHits) return null
@@ -286,7 +294,21 @@ export default function InboxScreen() {
         ) : null}
       </View>
     )
-  }, [showMessageHits, messageHits, messageSearchFetching, router])
+  }, [showMessageHits, messageHits, messageSearchFetching, router, dismissInboxSearch])
+
+  const listEmpty = useMemo(() => {
+    if (isLoading && conversations.length === 0) {
+      return <InboxSkeleton />
+    }
+    if (!showMessageHits || (messageHits?.length ?? 0) === 0) {
+      return (
+        <View className="mt-20 items-center">
+          <Text className="text-neutral-400 dark:text-wa-subDark">No conversations</Text>
+        </View>
+      )
+    }
+    return null
+  }, [conversations.length, isLoading, messageHits, showMessageHits])
 
   return (
     <Pressable
@@ -349,55 +371,23 @@ export default function InboxScreen() {
             message={userFacingLoadError(error, 'inbox')}
             onRetry={() => void refetch()}
           />
-        ) : showSkeleton ? (
-          <SkeletonList />
         ) : (
-          <FlatList
-            ref={listRef}
-            key={`${filter}-${search}`}
-            data={conversations}
-            initialNumToRender={12}
-            maxToRenderPerBatch={8}
-            windowSize={7}
-            removeClippedSubviews
-            keyExtractor={(item) => item.id}
-            keyboardShouldPersistTaps="handled"
-            onScrollBeginDrag={() => {
-              canLoadMore.current = true
-              if (searchFocused) dismissInboxSearch()
-            }}
-            ListHeaderComponent={messageResultsHeader}
-            renderItem={renderConversation}
-            refreshControl={
-              <RefreshControl
-                refreshing={refreshing}
-                onRefresh={onPullRefresh}
-                tintColor="#00A884"
-                colors={['#00A884']}
-              />
-            }
-            onMomentumScrollBegin={() => {
-              canLoadMore.current = true
-            }}
-            onEndReachedThreshold={0.3}
-            onEndReached={() => {
-              if (!canLoadMore.current) return
-              void loadMore()
-            }}
-            ListFooterComponent={
-              loadingMore ? (
-                <View className="items-center py-4">
-                  <ActivityIndicator color="#00A884" />
-                </View>
-              ) : null
-            }
-            ListEmptyComponent={
-              !showMessageHits || (messageHits?.length ?? 0) === 0 ? (
-                <View className="mt-20 items-center">
-                  <Text className="text-neutral-400 dark:text-wa-subDark">No conversations</Text>
-                </View>
-              ) : null
-            }
+          <InboxConversationList
+            listRef={listRef}
+            conversations={conversations}
+            header={messageResultsHeader}
+            refreshing={refreshing}
+            onRefresh={onPullRefresh}
+            loadingMore={loadingMore}
+            hasNextPage={!!hasNextPage}
+            onLoadMore={onLoadMore}
+            onPress={handleConversationPress}
+            onLongPress={handleConversationLongPress}
+            onMarkRead={onSwipeMarkRead}
+            onMarkUnread={onSwipeMarkUnread}
+            onTogglePin={onSwipeTogglePin}
+            onScrollBeginDrag={onListScrollBeginDrag}
+            empty={listEmpty}
           />
         )}
       </View>
@@ -405,18 +395,3 @@ export default function InboxScreen() {
   )
 }
 
-function SkeletonList() {
-  return (
-    <View className="px-4 pt-2">
-      {Array.from({ length: 8 }).map((_, i) => (
-        <View key={i} className="flex-row items-center gap-3 py-3">
-          <View className="h-12 w-12 rounded-full bg-neutral-200 dark:bg-neutral-800" />
-          <View className="flex-1 gap-2">
-            <View className="h-3.5 rounded bg-neutral-200 dark:bg-neutral-800" style={{ width: '50%' }} />
-            <View className="h-3 rounded bg-neutral-100 dark:bg-neutral-800/60" style={{ width: '75%' }} />
-          </View>
-        </View>
-      ))}
-    </View>
-  )
-}

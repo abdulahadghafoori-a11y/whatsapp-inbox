@@ -7,15 +7,13 @@ import { db } from '../db/index.js'
 import { refreshTokens, teamMembers, type TeamMember } from '../db/schema.js'
 import { errors } from '../utils/errors.js'
 import { BCRYPT_ROUNDS } from '../utils/bcrypt.js'
-import { LoginThrottle } from '../utils/login-throttle.js'
+import { clearLoginAttempts, registerLoginAttempt } from '../utils/login-throttle.js'
 import { parseRefreshToken } from '../utils/refresh-token.js'
 
 const REFRESH_TTL_DAYS = 30
 
 /** Constant-time decoy: compared against when the email is unknown. */
 const DUMMY_BCRYPT_HASH = bcrypt.hashSync('login-timing-decoy', BCRYPT_ROUNDS)
-
-const loginThrottle = new LoginThrottle()
 
 function publicAgent(m: TeamMember) {
   return {
@@ -69,8 +67,7 @@ export async function authRoutes(app: FastifyInstance) {
     async (request) => {
       const { email, password } = loginSchema.parse(request.body)
       const normalizedEmail = email.toLowerCase()
-      const throttleKey = `${request.ip}:${normalizedEmail}`
-      if (!loginThrottle.register(throttleKey)) {
+      if (!(await registerLoginAttempt(request.ip, normalizedEmail))) {
         throw errors.loginThrottled()
       }
 
@@ -86,7 +83,7 @@ export async function authRoutes(app: FastifyInstance) {
         throw errors.unauthorized('Invalid credentials.')
       }
 
-      loginThrottle.clear(throttleKey)
+      await clearLoginAttempts(request.ip, normalizedEmail)
       const tokens = await issueTokens(app, member)
       return { ...tokens, agent: publicAgent(member) }
     },

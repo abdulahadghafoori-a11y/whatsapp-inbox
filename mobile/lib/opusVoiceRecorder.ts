@@ -1,6 +1,7 @@
-import { Platform, PermissionsAndroid } from 'react-native'
+import { File } from 'expo-file-system'
 import * as FileSystem from 'expo-file-system/legacy'
 import Opuslib from '@imcooder/opuslib'
+import { ensureMicPermission } from '@/lib/micPermission'
 import { useGlobalAudioStore } from '@/stores/globalAudioStore'
 import { assertOggOpusStructure, muxOpusPacketsToOgg } from '@/lib/oggOpusMuxer'
 
@@ -30,16 +31,6 @@ let chunkSub: ChunkSub | null = null
 let ampSub: AmpSub | null = null
 let activeHandle: OpusVoiceHandle | null = null
 
-async function requestMicPermission(): Promise<boolean> {
-  if (Platform.OS === 'android') {
-    const granted = await PermissionsAndroid.request(
-      PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-    )
-    return granted === PermissionsAndroid.RESULTS.GRANTED
-  }
-  return true
-}
-
 export async function startOpusVoiceRecording(): Promise<OpusVoiceHandle> {
   if (activeHandle) {
     try {
@@ -49,7 +40,7 @@ export async function startOpusVoiceRecording(): Promise<OpusVoiceHandle> {
     }
   }
 
-  const permitted = await requestMicPermission()
+  const permitted = await ensureMicPermission()
   if (!permitted) {
     throw new Error('Microphone permission is required to record voice messages.')
   }
@@ -139,10 +130,7 @@ export async function finishOpusVoiceRecording(
   assertOggOpusStructure(ogg)
 
   const dest = `${FileSystem.cacheDirectory}wa-voice-${Date.now()}.ogg`
-  const base64 = uint8ToBase64(ogg)
-  await FileSystem.writeAsStringAsync(dest, base64, {
-    encoding: FileSystem.EncodingType.Base64,
-  })
+  writeOggBytes(dest, ogg)
 
   const info = await FileSystem.getInfoAsync(dest)
   const size = 'size' in info && typeof info.size === 'number' ? info.size : 0
@@ -164,12 +152,9 @@ export async function cancelOpusVoiceRecording(handle: OpusVoiceHandle): Promise
   await handle.stop().catch(() => undefined)
 }
 
-function uint8ToBase64(bytes: Uint8Array): string {
-  let binary = ''
-  const chunk = 0x8000
-  for (let i = 0; i < bytes.length; i += chunk) {
-    const sub = bytes.subarray(i, i + chunk)
-    binary += String.fromCharCode(...sub)
-  }
-  return btoa(binary)
+function writeOggBytes(destUri: string, bytes: Uint8Array): void {
+  const file = new File(destUri)
+  if (file.exists) file.delete()
+  file.create({ overwrite: true })
+  file.write(bytes)
 }

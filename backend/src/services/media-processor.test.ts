@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const findFirst = vi.fn()
 const update = vi.fn()
+const insert = vi.fn()
 const getMediaUrl = vi.fn()
 const downloadMedia = vi.fn()
 const uploadToS3IfMissing = vi.fn()
@@ -13,6 +14,11 @@ vi.mock('../db/index.js', () => ({
     update: () => ({
       set: () => ({
         where: () => update(),
+      }),
+    }),
+    insert: () => ({
+      values: () => ({
+        onConflictDoUpdate: () => insert(),
       }),
     }),
   },
@@ -46,6 +52,7 @@ const payload = {
 beforeEach(() => {
   vi.clearAllMocks()
   update.mockResolvedValue(undefined)
+  insert.mockResolvedValue(undefined)
 })
 
 describe('processDownloadMedia', () => {

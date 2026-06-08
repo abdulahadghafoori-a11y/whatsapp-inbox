@@ -4,6 +4,21 @@ import { WA_AUDIO_MAX_BYTES } from '@/lib/waMediaLimits'
 
 const MIN_BYTES = 200
 
+/** Size check only — use when the file was just muxed on-device (no copy). */
+export async function assertVoiceFileReady(uri: string): Promise<void> {
+  const source = resolveUploadUri(uri)
+  const info = await FileSystem.getInfoAsync(source)
+  if (!info.exists) throw new Error('Recording file not found.')
+
+  const size = 'size' in info && typeof info.size === 'number' ? info.size : 0
+  if (size < MIN_BYTES) {
+    throw new Error('Recording is too short or empty.')
+  }
+  if (size > WA_AUDIO_MAX_BYTES) {
+    throw new Error('Voice message is too large (max 16MB).')
+  }
+}
+
 /** Validate device-encoded OGG Opus voice note before upload. */
 export async function prepareVoiceForSend(
   uri: string,

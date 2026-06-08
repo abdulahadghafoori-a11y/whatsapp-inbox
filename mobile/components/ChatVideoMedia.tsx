@@ -10,6 +10,8 @@ import {
 type ChatVideoMediaProps = {
   uri: string
   messageId: string
+  active?: boolean
+  sizeBytes?: number | null
   uploading?: boolean
   uploadLabel?: string
   onPress?: () => void
@@ -18,11 +20,13 @@ type ChatVideoMediaProps = {
 export function ChatVideoMedia({
   uri,
   messageId,
+  active = true,
+  sizeBytes,
   uploading = false,
   uploadLabel,
   onPress,
 }: ChatVideoMediaProps) {
-  const videoMeta = useVideoDimensions(uri, messageId)
+  const videoMeta = useVideoDimensions(uri, messageId, active)
   const layout = useMemo(() => {
     if (videoMeta && videoMeta.width > 0 && videoMeta.height > 0) {
       return bubbleSizeFromPixelSize(videoMeta.width, videoMeta.height)
@@ -43,6 +47,8 @@ export function ChatVideoMedia({
         uri={uri}
         width={layout.width}
         height={layout.height}
+        active={active}
+        sizeBytes={sizeBytes}
         uploading={uploading}
         uploadLabel={uploadLabel}
         thumbUri={videoMeta?.thumbUri}

@@ -1,8 +1,8 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { Pressable, View, ActivityIndicator, StyleSheet } from 'react-native'
 import { MessageSendingOverlay } from '@/components/MessageSendingOverlay'
 import { Image } from 'expo-image'
-import { useImageDimensions } from '@/hooks/useImageDimensions'
+import type { PixelSize } from '@/hooks/useImageDimensions'
 import {
   BUBBLE_MEDIA_MAX_WIDTH,
   bubbleSizeFromPixelSize,
@@ -13,6 +13,11 @@ type ChatImageMediaProps = {
   sticker?: boolean
   uploading?: boolean
   uploadLabel?: string
+  /** Base64 ThumbHash — paints an instant blurred placeholder before decode. */
+  thumbhash?: string | null
+  /** Intrinsic media dimensions — reserve the correct aspect ratio up front. */
+  intrinsicWidth?: number | null
+  intrinsicHeight?: number | null
   onPress?: () => void
 }
 
@@ -21,18 +26,27 @@ export function ChatImageMedia({
   sticker = false,
   uploading = false,
   uploadLabel,
+  thumbhash,
+  intrinsicWidth,
+  intrinsicHeight,
   onPress,
 }: ChatImageMediaProps) {
-  const pixelSize = useImageDimensions(uri)
+  const [pixelSize, setPixelSize] = useState<PixelSize | null>(null)
+
   const layout = useMemo(() => {
-    if (pixelSize) {
-      return bubbleSizeFromPixelSize(pixelSize.width, pixelSize.height, { sticker })
+    // Prefer measured pixels, then server-provided intrinsic dims (no layout jump).
+    const w = pixelSize?.width ?? intrinsicWidth ?? null
+    const h = pixelSize?.height ?? intrinsicHeight ?? null
+    if (w && h) {
+      return bubbleSizeFromPixelSize(w, h, { sticker })
     }
     return {
       width: sticker ? 160 : BUBBLE_MEDIA_MAX_WIDTH,
       height: sticker ? 160 : Math.round(BUBBLE_MEDIA_MAX_WIDTH * 0.75),
     }
-  }, [pixelSize, sticker])
+  }, [pixelSize, sticker, intrinsicWidth, intrinsicHeight])
+
+  const placeholder = thumbhash ? { thumbhash } : undefined
 
   return (
     <Pressable
@@ -51,10 +65,22 @@ export function ChatImageMedia({
           },
         ]}
         contentFit="cover"
+        placeholder={placeholder}
+        placeholderContentFit="cover"
         transition={150}
+        recyclingKey={uri}
+        onLoad={(e) => {
+          const { width, height } = e.source
+          if (width > 0 && height > 0) {
+            setPixelSize((prev) =>
+              prev?.width === width && prev?.height === height ? prev : { width, height },
+            )
+          }
+        }}
       />
-      {!pixelSize ? (
-        <View style={styles.loading}>
+      {/* Spinner only when we have neither a ThumbHash placeholder nor a decoded size. */}
+      {!pixelSize && !placeholder ? (
+        <View style={styles.loading} pointerEvents="none">
           <ActivityIndicator color="#00A884" size="small" />
         </View>
       ) : null}

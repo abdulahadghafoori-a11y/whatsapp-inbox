@@ -1,4 +1,4 @@
-import { db } from '../db/index.js'
+import { db, type Executor } from '../db/index.js'
 import { jobs } from '../db/schema.js'
 
 export type JobType =
@@ -52,9 +52,10 @@ export interface JobPayloads {
 export async function enqueueJob<T extends JobType>(
   type: T,
   payload: JobPayloads[T],
-  opts: { maxAttempts?: number } = {},
+  opts: { maxAttempts?: number; executor?: Executor } = {},
 ): Promise<string> {
-  const [row] = await db
+  const exec = opts.executor ?? db
+  const [row] = await exec
     .insert(jobs)
     .values({
       type,

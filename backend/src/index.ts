@@ -8,7 +8,7 @@ import rateLimit from '@fastify/rate-limit'
 import { ZodError } from 'zod'
 import { sql } from 'drizzle-orm'
 import { config, corsOrigins, isProd } from './config.js'
-import { db } from './db/index.js'
+import { db, pool } from './db/index.js'
 import { AppError } from './utils/errors.js'
 import { redactForLog } from './utils/log-redact.js'
 import { captureException, initObservability } from './utils/observability.js'
@@ -20,12 +20,14 @@ import { webhookRoutes } from './routes/webhook.js'
 import { conversationRoutes } from './routes/conversations.js'
 import { messageRoutes } from './routes/messages.js'
 import { mediaRoutes } from './routes/media.js'
+import { syncRoutes } from './routes/sync.js'
 import { teamRoutes } from './routes/team.js'
 import { templateRoutes } from './routes/templates.js'
 import { tagRoutes } from './routes/tags.js'
 import { cannedResponseRoutes } from './routes/canned.js'
 import { internalRoutes } from './routes/internal.js'
 import { startJobProcessor, jobProcessorHeartbeat } from './workers/job-processor.js'
+import { startRetentionLoop } from './services/retention.js'
 import {
   replayUnprocessedWebhooks,
   startWebhookReplayLoop,
@@ -51,6 +53,9 @@ async function buildServer() {
       },
     },
     trustProxy: true,
+    // Cap JSON/raw bodies (base64 voice notes ride here ~22MB for a 16MB file).
+    // Large binary uploads go through @fastify/multipart, which has its own cap.
+    bodyLimit: 26 * 1024 * 1024,
     // Was: no request id — hard to trace webhook/job failures across logs.
     genReqId: () => randomUUID(),
     requestIdHeader: 'x-request-id',
@@ -114,6 +119,7 @@ async function buildServer() {
   await app.register(conversationRoutes, { prefix: '/api/conversations' })
   await app.register(messageRoutes, { prefix: '/api/messages' })
   await app.register(mediaRoutes, { prefix: '/api/media' })
+  await app.register(syncRoutes, { prefix: '/api/sync' })
   await app.register(teamRoutes, { prefix: '/api/team' })
   await app.register(templateRoutes, { prefix: '/api/templates' })
   await app.register(tagRoutes, { prefix: '/api/tags' })
@@ -181,13 +187,16 @@ async function main() {
 
   let stopProcessor = () => {}
   let stopReplayLoop = () => {}
+  let stopRetention = () => {}
 
   const shutdown = async (signal: string) => {
     try {
       app.log.info({ signal }, 'shutting down')
+      stopRetention()
       stopReplayLoop()
       stopProcessor()
       await app.close()
+      await pool.end().catch(() => {})
       process.exit(0)
     } catch (err) {
       console.error('shutdown failed:', err)
@@ -218,6 +227,7 @@ async function main() {
     app.log.info({ replayed }, 'replayed unprocessed webhook events')
   }
   stopReplayLoop = startWebhookReplayLoop(app)
+  stopRetention = startRetentionLoop(app)
 
   await app.listen({ port: config.PORT, host: '0.0.0.0' })
 }

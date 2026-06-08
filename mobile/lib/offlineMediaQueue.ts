@@ -2,14 +2,8 @@ import * as FileSystem from 'expo-file-system/legacy'
 import { appStorage } from '@/lib/appStorage'
 import { resolveUploadUri } from '@/lib/uploadUri'
 import { postMediaMessage } from '@/lib/postMediaMessage'
-import { queryClient } from '@/lib/queryClient'
-import type { QueryClient } from '@tanstack/react-query'
-import {
-  patchMessageFieldsInfinite,
-  removeMessageInfinite,
-  upsertMessageInfinite,
-  type MessagesInfinite,
-} from '@/lib/messagesQueryCache'
+import { deleteMessages, patchLocalMessage, putLocalMessage } from '@/lib/db/repo'
+import { scheduleSync } from '@/lib/sync/syncEngine'
 import type { MediaQualityTier } from '@/lib/imageQualityPreference'
 import type { Message } from '@/types'
 
@@ -117,10 +111,7 @@ async function doFlushMediaQueue(): Promise<{ sent: number; failed: number }> {
 
   for (const item of queue) {
     try {
-      queryClient.setQueryData<MessagesInfinite>(
-        ['messages', item.conversationId],
-        (old) => patchMessageFieldsInfinite(old, item.id, { sendPhase: 'uploading' }),
-      )
+      await patchLocalMessage(item.id, { sendPhase: 'uploading' })
       await postMediaMessage(item.conversationId, {
         uri: item.queueUri,
         name: item.name,
@@ -132,17 +123,11 @@ async function doFlushMediaQueue(): Promise<{ sent: number; failed: number }> {
         videoTrim: item.videoTrim,
         sendAsDocument: item.sendAsDocument,
         onPhase: (phase) => {
-          queryClient.setQueryData<MessagesInfinite>(
-            ['messages', item.conversationId],
-            (old) => patchMessageFieldsInfinite(old, item.id, { sendPhase: phase }),
-          )
+          void patchLocalMessage(item.id, { sendPhase: phase })
         },
       })
       sent++
-      queryClient.setQueryData<MessagesInfinite>(
-        ['messages', item.conversationId],
-        (old) => removeMessageInfinite(old, item.id),
-      )
+      await deleteMessages([item.id])
       try {
         await FileSystem.deleteAsync(item.queueUri, { idempotent: true })
       } catch {
@@ -151,36 +136,25 @@ async function doFlushMediaQueue(): Promise<{ sent: number; failed: number }> {
     } catch (err) {
       failed++
       remaining.push(item)
-      queryClient.setQueryData<MessagesInfinite>(
-        ['messages', item.conversationId],
-        (old) =>
-          patchMessageFieldsInfinite(old, item.id, {
-            status: 'failed',
-            sendPhase: undefined,
-            errorMessage:
-              err instanceof Error ? err.message : 'Upload failed. Tap to retry.',
-          }),
-      )
+      await patchLocalMessage(item.id, {
+        status: 'failed',
+        sendPhase: undefined,
+        errorMessage:
+          err instanceof Error ? err.message : 'Upload failed. Tap to retry.',
+      })
     }
   }
 
   await saveMediaQueue(remaining)
-  if (sent > 0) {
-    await queryClient.invalidateQueries({ queryKey: ['conversations'] })
-  }
+  if (sent > 0) scheduleSync()
   return { sent, failed }
 }
 
-/** Restore queued outbound bubbles after app restart. */
-export async function hydrateOfflineMediaQueue(qc: QueryClient): Promise<void> {
+/** Restore queued outbound bubbles (into the device DB) after app restart. */
+export async function hydrateOfflineMediaQueue(): Promise<void> {
   const queue = await loadMediaQueue()
   for (const item of queue) {
-    qc.setQueryData<MessagesInfinite>(['messages', item.conversationId], (old) =>
-      upsertMessageInfinite(
-        old,
-        buildQueuedMediaMessage(item.conversationId, item, item.queueUri),
-      ),
-    )
+    await putLocalMessage(buildQueuedMediaMessage(item.conversationId, item, item.queueUri))
   }
 }
 

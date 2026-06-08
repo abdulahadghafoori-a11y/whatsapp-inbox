@@ -4,6 +4,7 @@ import {
   uuid,
   text,
   integer,
+  bigserial,
   timestamp,
   jsonb,
   boolean,
@@ -143,6 +144,8 @@ export const messages = pgTable(
     type: text('type').notNull(), // text | image | video | audio | document | sticker
     body: text('body'),
     mediaUrl: text('media_url'), // S3 key, NOT a full URL
+    mediaThumbUrl: text('media_thumb_url'), // S3 key for chat thumbnail
+    mediaFileSize: integer('media_file_size'),
     mediaMimeType: text('media_mime_type'),
     mediaFilename: text('media_filename'),
     mediaStatus: text('media_status'), // pending | uploaded | failed
@@ -151,6 +154,7 @@ export const messages = pgTable(
     replyToMessageId: uuid('reply_to_message_id'),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
     editedAt: timestamp('edited_at', { withTimezone: true }),
+    starredAt: timestamp('starred_at', { withTimezone: true }),
     metadata: jsonb('metadata'),
     sentAt: timestamp('sent_at', { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -166,6 +170,76 @@ export const messages = pgTable(
     mediaUrlIdx: index('idx_messages_media_url')
       .on(t.mediaUrl)
       .where(sql`${t.mediaUrl} is not null`),
+  }),
+)
+
+/**
+ * Content-addressed media registry. One row per unique file (keyed by SHA-256),
+ * so identical bytes are stored once in object storage, share one ThumbHash, and
+ * reuse a single WhatsApp media handle no matter how many messages reference them.
+ */
+export const mediaBlobs = pgTable(
+  'media_blobs',
+  {
+    sha256: text('sha256').primaryKey(),
+    /** Object storage key (R2/S3): media/blobs/<sha256>.<ext>. */
+    storageKey: text('storage_key').notNull(),
+    mimeType: text('mime_type').notNull(),
+    sizeBytes: integer('size_bytes').notNull(),
+    width: integer('width'),
+    height: integer('height'),
+    /** ThumbHash placeholder (base64), generated client-side. */
+    thumbhash: text('thumbhash'),
+    /** Audio/video duration when known. */
+    durationMs: integer('duration_ms'),
+    /** Reusable WhatsApp media handle to avoid re-uploading the same bytes. */
+    waMediaId: text('wa_media_id'),
+    waMediaUploadedAt: timestamp('wa_media_uploaded_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    storageKeyUnique: uniqueIndex('uq_media_blobs_storage_key').on(t.storageKey),
+  }),
+)
+
+/**
+ * Phase 5: global change feed for delta sync. Rows are appended by AFTER
+ * INSERT/UPDATE/DELETE triggers on `messages` and `conversations` (see
+ * migration 0011). `seq` is a monotonic cursor the device pulls from.
+ */
+export const changeLog = pgTable(
+  'change_log',
+  {
+    seq: bigserial('seq', { mode: 'number' }).primaryKey(),
+    entity: text('entity').notNull(),
+    entityId: text('entity_id').notNull(),
+    conversationId: text('conversation_id'),
+    op: text('op').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    bySeq: index('idx_change_log_seq').on(t.seq),
+  }),
+)
+export type ChangeLogRow = typeof changeLog.$inferSelect
+
+export const messageReactions = pgTable(
+  'message_reactions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    messageId: uuid('message_id')
+      .references(() => messages.id, { onDelete: 'cascade' })
+      .notNull(),
+    agentId: uuid('agent_id')
+      .references(() => teamMembers.id, { onDelete: 'cascade' })
+      .notNull(),
+    emoji: text('emoji').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    messageIdx: index('idx_message_reactions_message').on(t.messageId),
+    uniqueReaction: uniqueIndex('uq_message_reaction').on(t.messageId, t.agentId, t.emoji),
   }),
 )
 
@@ -320,6 +394,8 @@ export type Contact = typeof contacts.$inferSelect
 export type Conversation = typeof conversations.$inferSelect
 export type Message = typeof messages.$inferSelect
 export type NewMessage = typeof messages.$inferInsert
+export type MediaBlob = typeof mediaBlobs.$inferSelect
+export type NewMediaBlob = typeof mediaBlobs.$inferInsert
 export type Job = typeof jobs.$inferSelect
 export type RefreshToken = typeof refreshTokens.$inferSelect
 export type Tag = typeof tags.$inferSelect
@@ -330,3 +406,16 @@ export interface AgentConfig {
   systemPrompt: string
   temperature: number
 }
+
+/**
+ * Distributed login throttle counters. Keyed by `ip:email` and by `email` so the
+ * limit holds across horizontally-scaled API instances (the in-memory guard
+ * multiplied the allowed attempts by the instance count).
+ */
+export const loginAttempts = pgTable('login_attempts', {
+  key: text('key').primaryKey(),
+  count: integer('count').notNull().default(0),
+  resetAt: timestamp('reset_at', { withTimezone: true }).notNull(),
+})
+
+export type LoginAttempt = typeof loginAttempts.$inferSelect
