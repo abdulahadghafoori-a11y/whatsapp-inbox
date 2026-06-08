@@ -16,15 +16,15 @@
       "distribution": "internal",
       "ios": { "simulator": false },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://your-domain.com",
-        "EXPO_PUBLIC_SOCKET_URL": "https://your-domain.com"
+        "EXPO_PUBLIC_API_URL": "https://whatsapp-inbox-4wqd.onrender.com",
+        "EXPO_PUBLIC_SOCKET_URL": "https://whatsapp-inbox-4wqd.onrender.com"
       }
     },
     "production": {
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://your-domain.com",
-        "EXPO_PUBLIC_SOCKET_URL": "https://your-domain.com"
+        "EXPO_PUBLIC_API_URL": "https://whatsapp-inbox-4wqd.onrender.com",
+        "EXPO_PUBLIC_SOCKET_URL": "https://whatsapp-inbox-4wqd.onrender.com"
       }
     }
   },

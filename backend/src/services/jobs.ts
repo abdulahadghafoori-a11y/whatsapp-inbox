@@ -36,6 +36,9 @@ export interface JobPayloads {
     waMediaId: string
     mimeType: string
     filename: string
+    /** WhatsApp-hosted file hash from webhook — skip CDN when already in media_blobs. */
+    waContentSha256?: string
+    waFileSizeBytes?: number
   }
   send_push_notification: {
     agentId: string

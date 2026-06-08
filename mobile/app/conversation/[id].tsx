@@ -104,6 +104,7 @@ import {
 } from '@/lib/db/repo'
 import { formatDuration } from '@/lib/format'
 import { prepareMediaFileForUpload } from '@/lib/prepareUpload'
+import { cacheMediaFromLocalFile } from '@/lib/messageMediaCache'
 import { resolveUploadUri } from '@/lib/uploadUri'
 import { buildVoiceNoteRuns } from '@/lib/voiceNoteQueue'
 import {
@@ -436,13 +437,20 @@ export default function ChatScreen() {
   const showScrollFabRef = useRef(false)
 
   const onMessagesScroll = useCallback((offsetY: number) => {
-    const next = offsetY > 72
-    if (showScrollFabRef.current === next) return
-    showScrollFabRef.current = next
-    setShowScrollFab(next)
+    const show = showScrollFabRef.current
+    if (!show && offsetY > 96) {
+      showScrollFabRef.current = true
+      setShowScrollFab(true)
+      return
+    }
+    if (show && offsetY < 20) {
+      showScrollFabRef.current = false
+      setShowScrollFab(false)
+    }
   }, [])
 
   const scrollToLatest = useCallback(() => {
+    showScrollFabRef.current = false
     setShowScrollFab(false)
     requestAnimationFrame(() => {
       messagesListRef.current?.scrollToOffset({ offset: 0, animated: true })
@@ -809,7 +817,7 @@ export default function ChatScreen() {
   }) {
     if (!pendingMedia) return
     closeAttachMenu()
-    const { uri, name, mimeType, videoTrim } = pendingMedia
+    const { uri, name, mimeType, videoTrim, type: mediaType } = pendingMedia
     const normalized = normalizeUploadMime(mimeType, name)
     const savedReply = replyTo
     const replyToMessageId = savedReply?.id
@@ -818,6 +826,7 @@ export default function ChatScreen() {
     if (replyToMessageId) setReplyTo(null)
     scrollToLatest()
     const clientMessageId = newPendingId('media')
+    const sendAsDocument = opts?.sendAsDocument ?? mediaType === 'document'
     sendMedia.mutate(
       {
         uri: resolveUploadUri(uri),
@@ -827,7 +836,7 @@ export default function ChatScreen() {
         imageQuality: opts?.imageQuality,
         videoQuality: opts?.videoQuality,
         videoTrim,
-        sendAsDocument: opts?.sendAsDocument,
+        sendAsDocument,
         clientMessageId,
         replyToMessageId,
         replyToPreview,
@@ -922,6 +931,13 @@ export default function ChatScreen() {
       }
 
       await patchLocalMessage(clientMessageId, { localPreviewUri: uri })
+      void cacheMediaFromLocalFile(
+        clientMessageId,
+        conversationId,
+        uri,
+        mimeType,
+        filename,
+      )
 
       sendMedia.mutate(
         {

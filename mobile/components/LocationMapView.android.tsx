@@ -15,6 +15,9 @@ export function LocationMapView({
   height,
   fill,
   interactive = true,
+  showUserLocation = false,
+  userLatitude,
+  userLongitude,
   showMarker = true,
   onRegionChangeComplete,
   initialRegion,
@@ -28,7 +31,16 @@ export function LocationMapView({
       ? 'interactive'
       : 'static'
 
-  const html = useMemo(() => buildLocationMapHtml(lat, lon, mode), [lat, lon, mode])
+  const userLocation = useMemo(() => {
+    if (!showUserLocation) return null
+    if (userLatitude == null || userLongitude == null) return null
+    return { latitude: userLatitude, longitude: userLongitude }
+  }, [showUserLocation, userLatitude, userLongitude])
+
+  const html = useMemo(
+    () => buildLocationMapHtml(lat, lon, mode, 16, userLocation),
+    [lat, lon, mode, userLocation],
+  )
 
   const onMessage = useCallback(
     (event: WebViewMessageEvent) => {

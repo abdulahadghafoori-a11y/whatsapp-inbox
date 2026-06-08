@@ -71,6 +71,32 @@ async function storePreparedInCache(
   return { ...payload, contentHash }
 }
 
+async function tryReuseByPreparedCache(
+  conversationId: string,
+  input: MediaPostInput & { caption?: string; replyToMessageId?: string },
+): Promise<Message | null> {
+  const mimeHint = normalizeUploadMime(input.mimeType, input.name)
+  if (mimeHint.startsWith('audio/') || input.skipPrepare) return null
+
+  const cacheKey = await buildPrepareCacheKey(input.uri, prepareCacheOpts(input, mimeHint))
+  if (!cacheKey) return null
+
+  const cached = await getPreparedFromCache(cacheKey)
+  if (!cached?.contentHash) return null
+
+  const reuseS3Key = await getS3KeyForContentHash(cached.contentHash)
+  if (!reuseS3Key) return null
+
+  input.onPhase?.('sending')
+  return postPreparedMedia(conversationId, cached, {
+    caption: input.caption,
+    replyToMessageId: input.replyToMessageId,
+    asDocument: input.sendAsDocument,
+    onPhase: input.onPhase,
+    onUploadProgress: input.onUploadProgress,
+  })
+}
+
 export async function prepareMediaPayload(input: MediaPostInput): Promise<PreparedMediaPayload> {
   const mimeHint = normalizeUploadMime(input.mimeType, input.name)
   if (input.skipPrepare) {
@@ -164,6 +190,7 @@ export async function postPreparedMedia(
   meta: {
     caption?: string
     replyToMessageId?: string
+    asDocument?: boolean
     onPhase?: (phase: MediaSendPhase) => void
     onUploadProgress?: (progress: number) => void
   },
@@ -185,6 +212,7 @@ export async function postPreparedMedia(
           reuseS3Key,
           filename: prepared.fileName,
           mimeType: prepared.mimeType,
+          ...(meta.asDocument ? { asDocument: true } : {}),
           ...(meta.caption ? { caption: meta.caption } : {}),
           ...(meta.replyToMessageId ? { replyToMessageId: meta.replyToMessageId } : {}),
         },
@@ -209,6 +237,7 @@ export async function postPreparedMedia(
     } as unknown as Blob)
     if (meta.caption) form.append('caption', meta.caption)
     if (meta.replyToMessageId) form.append('replyToMessageId', meta.replyToMessageId)
+    if (meta.asDocument) form.append('asDocument', 'true')
     return form
   }
 
@@ -288,11 +317,15 @@ export async function postMediaMessage(
     })
   }
 
+  const reused = await tryReuseByPreparedCache(conversationId, input)
+  if (reused) return reused
+
   const prepared = await prepareMediaPayload(input)
   input.onPrepared?.(prepared)
   return postPreparedMedia(conversationId, prepared, {
     caption: input.caption,
     replyToMessageId: input.replyToMessageId,
+    asDocument: input.sendAsDocument,
     onPhase: input.onPhase,
     onUploadProgress: input.onUploadProgress,
   })

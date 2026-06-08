@@ -11,6 +11,7 @@
     "android": "expo run:android",
     "android:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-android-local.ps1",
     "android:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android-release.ps1",
+    "android:release:prod": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android-release.ps1 -ProductionSideload",
     "android:release:aab": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android-release.ps1 -Aab",
     "android:release:eas": "eas build --platform android --profile production",
     "ios": "expo run:ios",

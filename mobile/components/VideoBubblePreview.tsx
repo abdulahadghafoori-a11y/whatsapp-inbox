@@ -67,7 +67,10 @@ export function VideoBubblePreview({
     }
 
     if (!active) {
-      setThumbUri(null)
+      if (cached || thumbUri) {
+        setLoading(false)
+        return
+      }
       setLoading(false)
       return
     }

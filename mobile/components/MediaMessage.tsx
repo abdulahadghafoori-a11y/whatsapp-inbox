@@ -15,7 +15,7 @@ import { openDocumentFromUrl } from '@/lib/openDocument'
 import { BUBBLE_MEDIA_MAX_WIDTH } from '@/lib/chatMediaLayout'
 import { useMessageMedia } from '@/hooks/useMessageMedia'
 import { useMessageMediaActive } from '@/hooks/useMessageMediaActive'
-import { useCachedMediaUri } from '@/hooks/useCachedMediaUri'
+import { useResolvedCachedMediaUri } from '@/hooks/useCachedMediaUri'
 import { useMediaAutoDownload } from '@/hooks/useMediaAutoDownload'
 import { useMediaDownloadState } from '@/hooks/useMediaDownloadState'
 import { MediaShellPlaceholder } from '@/components/MediaShellPlaceholder'
@@ -142,8 +142,10 @@ function MediaMessageBase({
   const mediaLabel = MEDIA_LABEL[message.type] ?? 'Media'
 
   const mediaActive = useMessageMediaActive(message.id)
-  const cachedUri = useCachedMediaUri(message.id)
+  const cachedUri = useResolvedCachedMediaUri(message.id, message.mediaUrl)
   const hasLocalSource = !!(cachedUri || message.localPreviewUri)
+  const mediaReady = hasLocalSource || outbound
+  const showMedia = mediaActive || mediaReady
   const [manualDownload, setManualDownload] = useState(false)
   const { allowed: autoAllowed, blockReason } = useMediaAutoDownload({
     type: message.type,
@@ -176,7 +178,7 @@ function MediaMessageBase({
   }, [message.type, message.thumbhash, message.mediaUrl, message.id, thumbhashSource])
 
   const shouldLoadRemote =
-    mediaActive &&
+    showMedia &&
     (hasLocalSource || outbound || manualDownload || autoAllowed === true || isSticker)
 
   const { displayUrl, playbackUrl, remoteUrl, isLoading, isError } = useMessageMedia(message, {
@@ -218,9 +220,10 @@ function MediaMessageBase({
   }
 
   if (
-    !mediaActive &&
+    !showMedia &&
     !displayUrl &&
     !localPreview &&
+    !cachedUri &&
     message.mediaUrl &&
     message.mediaStatus !== 'pending' &&
     message.type !== 'text' &&
@@ -251,6 +254,7 @@ function MediaMessageBase({
     !manualDownload &&
     !displayUrl &&
     !localPreview &&
+    !cachedUri &&
     message.mediaUrl
   ) {
     return (
@@ -299,7 +303,7 @@ function MediaMessageBase({
     )
   }
 
-  if (!displayUrl && (isLoading || isDownloading)) {
+  if (!displayUrl && !localPreview && !cachedUri && (isLoading || isDownloading)) {
     return (
       <MediaPlaceholder minHeight={message.type === 'audio' ? 40 : FALLBACK_MEDIA_HEIGHT}>
         <ActivityIndicator color="#00A884" />
@@ -340,6 +344,7 @@ function MediaMessageBase({
       <>
         <ChatImageMedia
           uri={displayUrl}
+          cacheKey={message.id}
           sticker={sticker}
           thumbhash={message.thumbhash}
           intrinsicWidth={message.mediaWidth}
@@ -379,7 +384,7 @@ function MediaMessageBase({
         <ChatVideoMedia
           uri={displayUrl}
           messageId={message.id}
-          active={mediaActive}
+          active={showMedia}
           sizeBytes={fileSize}
           uploading={uploading}
           uploadLabel={sendOverlay ?? undefined}

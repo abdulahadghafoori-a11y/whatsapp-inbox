@@ -315,6 +315,10 @@ export async function replaceLocalMessage(
   optimisticId: string,
   message: Message,
 ): Promise<void> {
+  if (optimisticId && optimisticId !== message.id) {
+    const { transferMessageMediaCache } = await import('@/lib/messageMediaCache')
+    await transferMessageMediaCache(optimisticId, message.id)
+  }
   await runExclusiveDbWrite(async () => {
     const db = getRawDb()
     await upsertMessagesInTx(db, [message])

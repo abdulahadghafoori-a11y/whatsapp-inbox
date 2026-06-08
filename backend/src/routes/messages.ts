@@ -2,14 +2,16 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { and, desc, eq, ilike, isNotNull, isNull, lt } from 'drizzle-orm'
 import { db } from '../db/index.js'
-import { conversations, contacts, messageReactions, messages } from '../db/schema.js'
+import { changeLog, conversations, contacts, messageReactions, messages } from '../db/schema.js'
 import { attachMediaMeta, attachReactions } from '../utils/message-enrichment.js'
+import { attachReplyPreviews } from '../utils/message-shape.js'
 import { enqueueJob } from '../services/jobs.js'
 import { errors } from '../utils/errors.js'
-import { isMediaMessageType, waMediaIdFromMetadata } from '../utils/wa-media.js'
+import { isMediaMessageType, waMediaIdFromMetadata, waContentSha256FromMetadata, waFileSizeFromMetadata } from '../utils/wa-media.js'
 import { whatsapp } from '../services/whatsapp.js'
 import {
   emitMessageStatus,
+  emitMessageUpdated,
 } from '../services/socket-events.js'
 
 export async function messageRoutes(app: FastifyInstance) {
@@ -167,8 +169,20 @@ export async function messageRoutes(app: FastifyInstance) {
       })
     }
 
-    const reactions = await attachReactions([msg])
-    return { messageId, reactions: reactions[0]?.reactions ?? [] }
+    const [shaped] = await attachMediaMeta(
+      await attachReactions(await attachReplyPreviews([msg])),
+    )
+
+    await db.insert(changeLog).values({
+      entity: 'message',
+      entityId: messageId,
+      conversationId: msg.conversationId,
+      op: 'upsert',
+    })
+
+    emitMessageUpdated(app.io, msg.conversationId, shaped)
+
+    return { messageId, reactions: shaped.reactions ?? [] }
   })
 
   // POST /api/messages/media/:messageId/retry — re-download from WhatsApp → S3
@@ -199,12 +213,17 @@ export async function messageRoutes(app: FastifyInstance) {
       .set({ mediaStatus: 'pending', mediaUrl: null })
       .where(eq(messages.id, messageId))
 
+    const waContentSha256 = waContentSha256FromMetadata(msg.metadata, msg.type)
+    const waFileSizeBytes = waFileSizeFromMetadata(msg.metadata, msg.type)
+
     await enqueueJob('download_media', {
       messageId: msg.id,
       conversationId: msg.conversationId,
       waMediaId,
       mimeType: msg.mediaMimeType ?? 'application/octet-stream',
       filename: msg.mediaFilename ?? 'upload',
+      ...(waContentSha256 ? { waContentSha256 } : {}),
+      ...(waFileSizeBytes ? { waFileSizeBytes } : {}),
     })
 
     return { ok: true }

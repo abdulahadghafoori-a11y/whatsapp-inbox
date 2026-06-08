@@ -50,6 +50,10 @@ export async function getBlobByStorageKey(storageKey: string): Promise<MediaBlob
   return db.query.mediaBlobs.findFirst({ where: eq(mediaBlobs.storageKey, storageKey) })
 }
 
+export async function getBlobByWaMediaId(waMediaId: string): Promise<MediaBlob | undefined> {
+  return db.query.mediaBlobs.findFirst({ where: eq(mediaBlobs.waMediaId, waMediaId) })
+}
+
 /** Returns a still-fresh WhatsApp media handle for these bytes, or null. */
 export async function getReusableWaMediaId(sha256: string): Promise<string | null> {
   const row = await db.query.mediaBlobs.findFirst({

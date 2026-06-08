@@ -1,4 +1,5 @@
 import { formatDateLabel } from '@/lib/format'
+import { messageListKey } from '@/lib/messageListKey'
 import { messageRenderEqual } from '@/lib/messageRenderEqual'
 import type { Message } from '@/types'
 
@@ -19,7 +20,7 @@ export function buildChatListItems(messages: Message[]): ChatListItem[] {
 
   for (let i = 0; i < reversed.length; i++) {
     const msg = reversed[i]
-    items.push({ kind: 'message', id: msg.id, message: msg })
+    items.push({ kind: 'message', id: messageListKey(msg), message: msg })
     const older = reversed[i + 1]
     if (!older || dayKey(msg.sentAt) !== dayKey(older.sentAt)) {
       items.push({

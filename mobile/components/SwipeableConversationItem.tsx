@@ -132,8 +132,9 @@ function SwipeableConversationItemBase({
       renderLeftActions={renderLeftActions}
       overshootLeft={false}
       overshootFriction={8}
-      friction={1.8}
-      leftThreshold={ACTION_WIDTH * 0.7}
+      friction={2.4}
+      leftThreshold={ACTION_WIDTH * 0.55}
+      enableTrackpadTwoFingerGesture={false}
       onSwipeableWillOpen={() => onSwipeOpen?.(conversation.id, swipeRef.current)}
     >
       <View className="bg-white dark:bg-wa-panelDeep">

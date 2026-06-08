@@ -1,6 +1,7 @@
 import { memo, useCallback, useRef, type ReactElement, type RefObject } from 'react'
-import { View, ActivityIndicator, RefreshControl } from 'react-native'
+import { View, ActivityIndicator, Platform, RefreshControl } from 'react-native'
 import { FlashList, type FlashListRef } from '@shopify/flash-list'
+import { ScrollView } from 'react-native-gesture-handler'
 import type Swipeable from 'react-native-gesture-handler/Swipeable'
 import { SwipeableConversationItem } from '@/components/SwipeableConversationItem'
 import type { ConversationListItem } from '@/types'
@@ -81,6 +82,11 @@ export const InboxConversationList = memo(function InboxConversationList({
     onLoadMore()
   }, [hasNextPage, loadingMore, onLoadMore])
 
+  const closeOpenSwipe = useCallback(() => {
+    openRef.current?.ref?.close()
+    openRef.current = null
+  }, [])
+
   return (
     <FlashList
       ref={listRef}
@@ -88,7 +94,11 @@ export const InboxConversationList = memo(function InboxConversationList({
       data={conversations}
       keyExtractor={(item) => item.id}
       renderItem={renderItem}
+      renderScrollComponent={ScrollView}
       keyboardShouldPersistTaps="handled"
+      showsVerticalScrollIndicator
+      persistentScrollbar={Platform.OS === 'android'}
+      nestedScrollEnabled={Platform.OS === 'android'}
       ListHeaderComponent={header ?? undefined}
       ListFooterComponent={<ListFooter loading={loadingMore} />}
       ListEmptyComponent={empty}
@@ -102,10 +112,12 @@ export const InboxConversationList = memo(function InboxConversationList({
       }
       onScrollBeginDrag={() => {
         canLoadMore.current = true
+        closeOpenSwipe()
         onScrollBeginDrag()
       }}
       onMomentumScrollBegin={() => {
         canLoadMore.current = true
+        closeOpenSwipe()
       }}
       onEndReachedThreshold={0.4}
       onEndReached={handleEndReached}

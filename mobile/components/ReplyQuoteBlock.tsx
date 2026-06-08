@@ -1,7 +1,7 @@
 import { Pressable, View, Text, StyleSheet } from 'react-native'
 import { Image } from 'expo-image'
 import { useMediaUrl } from '@/hooks/useMedia'
-import { useCachedMediaUri } from '@/hooks/useCachedMediaUri'
+import { useResolvedCachedMediaUri } from '@/hooks/useCachedMediaUri'
 import {
   replyHasMediaThumb,
   replyPreviewLabel,
@@ -27,7 +27,7 @@ export function ReplyQuoteBlock({
   const nameColor = outbound ? '#f06292' : '#06cf9c'
   const bg = outbound ? 'rgba(240,98,146,0.12)' : 'rgba(0,0,0,0.04)'
   const showThumb = replyHasMediaThumb(reply)
-  const cachedUri = useCachedMediaUri(reply.id)
+  const cachedUri = useResolvedCachedMediaUri(reply.id, reply.mediaUrl)
   const remoteKey = reply.mediaUrl && !reply.localPreviewUri && !cachedUri ? reply.mediaUrl : null
   const { data: remoteUrl } = useMediaUrl(remoteKey, reply.id)
   const thumbUri = cachedUri ?? reply.localPreviewUri ?? remoteUrl ?? null

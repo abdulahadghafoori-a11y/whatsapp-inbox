@@ -11,6 +11,7 @@ import {
   getCachedMediaUri,
   getCachedMediaUriSync,
   getCachedUriForS3KeySync,
+  resolveCachedMediaUriSync,
 } from '@/lib/messageMediaCache'
 import { hashMediaFile } from '@/lib/mediaContentHash'
 import { isHeavyMediaType, isStickerType } from '@/lib/messageMediaKind'
@@ -79,9 +80,7 @@ function isCacheableMedia(message: SyncableMediaMessage): boolean {
 }
 
 function isAlreadyCachedSync(message: SyncableMediaMessage): boolean {
-  if (getCachedMediaUriSync(message.id)) return true
-  if (message.mediaUrl && getCachedUriForS3KeySync(message.mediaUrl)) return true
-  return false
+  return !!resolveCachedMediaUriSync(message.id, message.mediaUrl)
 }
 
 async function presignedUrlForKey(s3Key: string, messageId: string): Promise<string | null> {
@@ -162,7 +161,9 @@ async function runSyncJob(message: SyncableMediaMessage): Promise<string | null>
   if (!(await isAutoDownloadAllowed(message))) return null
 
   await ensureMediaIndexLoaded()
-  if (isAlreadyCachedSync(message)) return getCachedMediaUriSync(message.id)
+  if (isAlreadyCachedSync(message)) {
+    return resolveCachedMediaUriSync(message.id, message.mediaUrl)
+  }
 
   setDownloading(message.id, true)
   try {
@@ -200,7 +201,7 @@ export async function syncMessageMedia(
 
   await ensureMediaIndexLoaded()
 
-  const sync = getCachedMediaUriSync(message.id)
+  const sync = resolveCachedMediaUriSync(message.id, message.mediaUrl)
   if (sync) return sync
 
   const key = inflightKey(message)

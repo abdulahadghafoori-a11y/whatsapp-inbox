@@ -5,6 +5,7 @@ export function buildLocationMapHtml(
   longitude: number,
   mode: LocationMapMode,
   zoom = 16,
+  userLocation?: { latitude: number; longitude: number } | null,
 ): string {
   const lat = latitude.toFixed(6)
   const lon = longitude.toFixed(6)
@@ -14,6 +15,21 @@ export function buildLocationMapHtml(
   const markerBlock =
     mode === 'interactive' || mode === 'static'
       ? `L.marker([${lat}, ${lon}], { icon: icon }).addTo(map);`
+      : ''
+
+  const userDotBlock =
+    userLocation &&
+    Number.isFinite(userLocation.latitude) &&
+    Number.isFinite(userLocation.longitude)
+      ? `
+    L.circleMarker([${userLocation.latitude.toFixed(6)}, ${userLocation.longitude.toFixed(6)}], {
+      radius: 9,
+      color: '#ffffff',
+      weight: 3,
+      fillColor: '#4285F4',
+      fillOpacity: 1
+    }).addTo(map);
+  `
       : ''
 
   const pickerBlock = picker
@@ -68,6 +84,7 @@ export function buildLocationMapHtml(
       iconAnchor: [11, 22]
     });
     ${markerBlock}
+    ${userDotBlock}
     ${pickerBlock}
   </script>
 </body>

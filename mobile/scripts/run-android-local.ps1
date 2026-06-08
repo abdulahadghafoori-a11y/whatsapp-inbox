@@ -11,6 +11,7 @@ $ErrorActionPreference = "Stop"
 
 $sourceMobile = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $buildRoot = "C:\wi"
+$env:APP_VARIANT = "development"
 
 $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"

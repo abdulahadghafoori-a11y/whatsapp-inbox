@@ -532,6 +532,7 @@ export async function conversationRoutes(app: FastifyInstance) {
               reuseS3Key: z.string().min(1),
               filename: z.string().min(1),
               mimeType: z.string().min(1),
+              asDocument: z.boolean().optional(),
               caption: z.string().optional(),
               replyToMessageId: z.string().uuid().optional(),
             }),
@@ -565,6 +566,7 @@ export async function conversationRoutes(app: FastifyInstance) {
             replyToMessageId: replyCtx.replyToMessageId,
             replyToWaMessageId: replyCtx.replyToWaMessageId,
             passthrough: true,
+            forceDocument: body.asDocument === true,
           })
           const shaped = (await attachReplyPreviews([message]))[0]
           return reply.code(201).send({ message: shaped })
@@ -630,6 +632,8 @@ export async function conversationRoutes(app: FastifyInstance) {
       const replyToMessageId = (
         file.fields?.replyToMessageId as { value?: string } | undefined
       )?.value
+      const asDocumentField = (file.fields?.asDocument as { value?: string } | undefined)?.value
+      const forceDocument = asDocumentField === 'true'
       const replyCtx = await resolveReplyTargets(id, replyToMessageId)
 
       const raw = await sendOutboundMediaBuffer(app, {
@@ -637,11 +641,12 @@ export async function conversationRoutes(app: FastifyInstance) {
         contactWaId: conversation.contact.waId,
         buffer,
         filename: file.filename,
-        mimeHint: file.mimetype,
+        mimeHint: forceDocument ? 'application/octet-stream' : file.mimetype,
         caption,
         sentBy: request.agent.id,
         replyToMessageId: replyCtx.replyToMessageId,
         replyToWaMessageId: replyCtx.replyToWaMessageId,
+        forceDocument,
       })
       const message = (await attachReplyPreviews([raw]))[0]
       return reply.code(201).send({ message })

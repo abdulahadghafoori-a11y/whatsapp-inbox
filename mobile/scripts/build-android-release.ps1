@@ -8,13 +8,20 @@
 #   APK  -> C:\wi\android\app\build\outputs\apk\release\app-release.apk
 #   AAB  -> C:\wi\android\app\build\outputs\bundle\release\app-release.aab
 param(
-  [switch]$Aab
+  [switch]$Aab,
+  [switch]$ProductionSideload
 )
 
 $ErrorActionPreference = "Stop"
 
 $sourceMobile = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$buildRoot = "C:\wi"
+$buildRoot = if ($ProductionSideload) { "C:\wi-prod" } else { "C:\wi" }
+if ($ProductionSideload) {
+  $env:APP_VARIANT = "production"
+  Write-Host "Production sideload -> package com.salesinbox.app.prod (coexists with dev client)"
+} else {
+  $env:APP_VARIANT = "development"
+}
 $envProduction = Join-Path $sourceMobile ".env.production"
 $envExample = Join-Path $sourceMobile ".env.production.example"
 
@@ -51,7 +58,7 @@ foreach ($key in @("EXPO_PUBLIC_API_URL", "EXPO_PUBLIC_SOCKET_URL")) {
 
 $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
-$env:GRADLE_USER_HOME = "C:\gradle-wi"
+$env:GRADLE_USER_HOME = if ($ProductionSideload) { "C:\gradle-wi-prod" } else { "C:\gradle-wi" }
 $env:NODE_ENV = "production"
 $env:PATH = "$env:JAVA_HOME\bin;$env:ANDROID_HOME\platform-tools;$env:PATH"
 
@@ -78,8 +85,16 @@ $sdkProp = ($env:ANDROID_HOME -replace '\\', '/').Replace(':', '\:')
 ) | Set-Content "$buildRoot\android\local.properties"
 
 Set-Location $buildRoot
-if (-not (Test-Path node_modules)) { npm ci }
+# Always reinstall - stale node_modules skips new deps (e.g. drizzle-orm).
+npm ci
+if ($LASTEXITCODE -ne 0) { throw "npm ci failed (exit $LASTEXITCODE). Stop Gradle/Metro and retry." }
 node scripts/patch-opuslib-ndk.js 2>$null
+
+if ($ProductionSideload) {
+  Write-Host "Running expo prebuild for production package (com.salesinbox.app.prod)..."
+  npx expo prebuild --platform android --clean --no-install
+  if ($LASTEXITCODE -ne 0) { throw "expo prebuild failed (exit $LASTEXITCODE)" }
+}
 
 # Sentry Gradle plugin uploads source maps on release; skip when org/token are not set.
 if (-not $env:SENTRY_ORG -or -not $env:SENTRY_AUTH_TOKEN) {
@@ -107,7 +122,8 @@ $destDir = Join-Path $sourceMobile "dist"
 New-Item -ItemType Directory -Path $destDir -Force | Out-Null
 $stamp = Get-Date -Format "yyyyMMdd-HHmm"
 $ext = if ($Aab) { "aab" } else { "apk" }
-$dest = Join-Path $destDir "sales-inbox-$stamp.$ext"
+$prefix = if ($ProductionSideload) { "sales-inbox-prod" } else { "sales-inbox" }
+$dest = Join-Path $destDir "$prefix-$stamp.$ext"
 Copy-Item $out $dest -Force
 
 Write-Host ""

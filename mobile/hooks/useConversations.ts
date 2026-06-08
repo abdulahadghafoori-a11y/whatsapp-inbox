@@ -14,6 +14,7 @@ import { messageTypeFromMime, normalizeUploadMime } from '@/lib/mediaMime'
 import { playWaFeedback, playWaFeedbackAsync } from '@/lib/waFeedbackSounds'
 import { normalizeMessage, normalizeMessagesResponse } from '@/lib/normalizeMessage'
 import type { MediaQualityTier } from '@/lib/imageQualityPreference'
+import { cacheMediaFromLocalFile } from '@/lib/messageMediaCache'
 import { queueMessageMediaSync } from '@/lib/messageMediaSync'
 import { newPendingId } from '@/lib/clientId'
 import { ensureDbReady } from '@/lib/db/client'
@@ -519,7 +520,7 @@ export function buildOptimisticMediaMessage(
     sentAt: new Date().toISOString(),
     createdAt: new Date().toISOString(),
     localPreviewUri: media.uri,
-    metadata: clientSendMetadata(media),
+    metadata: clientSendMetadata(media, optimisticId),
   }
 }
 
@@ -560,16 +561,28 @@ export function useSendMedia(conversationId: string) {
     media: MediaUpload,
   ) {
     if (!messageId) return
+    const existing = await getMessageById(messageId)
+    const clientMessageId =
+      existing?.metadata && typeof existing.metadata === 'object'
+        ? (existing.metadata as Record<string, unknown>).clientMessageId
+        : messageId
+    // Keep localPreviewUri on the gallery/recording path so the bubble image never
+    // reloads when prepare finishes — prepared path is upload-only metadata.
     await patchLocalMessage(messageId, {
-      localPreviewUri: preparedUri,
-      metadata: clientSendMetadata({
-        uri: media.uri,
-        videoTrim: media.videoTrim,
-        sendAsDocument: media.sendAsDocument,
-        imageQuality: media.imageQuality,
-        videoQuality: media.videoQuality,
-        preparedUri,
-      }),
+      metadata: {
+        ...(existing?.metadata ?? {}),
+        ...clientSendMetadata(
+          {
+            uri: media.uri,
+            videoTrim: media.videoTrim,
+            sendAsDocument: media.sendAsDocument,
+            imageQuality: media.imageQuality,
+            videoQuality: media.videoQuality,
+            preparedUri,
+          },
+          typeof clientMessageId === 'string' ? clientMessageId : messageId,
+        ),
+      },
     })
   }
 
@@ -650,6 +663,13 @@ export function useSendMedia(conversationId: string) {
       }
       await putLocalMessage(optimistic)
       await applyMessageToConversation(optimistic)
+      void cacheMediaFromLocalFile(
+        optimisticId,
+        conversationId,
+        media.uri,
+        mime,
+        media.name,
+      )
       return { optimisticId, localUri: media.uri }
     },
     onError: async (err, media, ctx) => {
@@ -700,7 +720,8 @@ export function useSendMedia(conversationId: string) {
         ctx?.localUri
       const enriched: Message = {
         ...message,
-        sendPhase: message.status === 'sent' ? undefined : 'sending',
+        // Upload to our server is done — clear client send UI; bubble status handles WA delivery.
+        sendPhase: undefined,
         localPreviewUri: previewUri,
         metadata: cached?.metadata ?? message.metadata,
       }

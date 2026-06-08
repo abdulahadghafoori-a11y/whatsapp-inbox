@@ -226,7 +226,7 @@ export function MediaPreviewSheet({
               </View>
             ) : null}
 
-            {isVideo ? (
+            {isVideo || media?.type === 'image' ? (
               <Pressable
                 onPress={() =>
                   onSend({
@@ -238,7 +238,9 @@ export function MediaPreviewSheet({
               >
                 <Text style={styles.docSendText}>Send as document</Text>
                 <Text style={styles.docSendHint}>
-                  Original quality, up to 100MB. May not play inline in chat.
+                  {isVideo
+                    ? 'Original quality, up to 100MB. May not play inline in chat.'
+                    : 'Sends as a file attachment instead of an inline photo.'}
                 </Text>
               </Pressable>
             ) : null}

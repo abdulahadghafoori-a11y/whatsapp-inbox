@@ -26,11 +26,42 @@ import { emitMessageStatus, emitNewMessage } from './socket-events.js'
 const MEDIA_TYPES = new Set(['image', 'video', 'audio', 'document', 'sticker'])
 const isMediaType = (t: string) => MEDIA_TYPES.has(t)
 
+function downloadMediaDedupFields(media: WaMedia) {
+  const waContentSha256 =
+    typeof media.sha256 === 'string' && /^[0-9a-f]{64}$/i.test(media.sha256)
+      ? media.sha256.toLowerCase()
+      : undefined
+  const rawSize = media.file_size
+  const size =
+    typeof rawSize === 'number'
+      ? rawSize
+      : typeof rawSize === 'string'
+        ? Number(rawSize)
+        : NaN
+  const waFileSizeBytes = Number.isFinite(size) && size > 0 ? size : undefined
+  return { waContentSha256, waFileSizeBytes }
+}
+
+async function enqueueInboundDownload(
+  fields: {
+    messageId: string
+    conversationId: string
+    waMediaId: string
+    mimeType: string
+    filename: string
+  },
+  media: WaMedia,
+) {
+  await enqueueJob('download_media', { ...fields, ...downloadMediaDedupFields(media) })
+}
+
 interface WaMedia {
   id: string
   mime_type?: string
   filename?: string
   caption?: string
+  sha256?: string
+  file_size?: number | string
 }
 
 interface WaMessage {
@@ -272,13 +303,16 @@ async function handleMessageEchoes(
     if (isMediaType(msg.type)) {
       const media = msg[msg.type] as WaMedia | undefined
       if (media?.id) {
-        await enqueueJob('download_media', {
-          messageId: message.id,
-          conversationId: conversation.id,
-          waMediaId: media.id,
-          mimeType: media.mime_type ?? mimeForMediaType(msg.type, media.mime_type),
-          filename: media.filename ?? defaultFilename(msg.type),
-        })
+        await enqueueInboundDownload(
+          {
+            messageId: message.id,
+            conversationId: conversation.id,
+            waMediaId: media.id,
+            mimeType: media.mime_type ?? mimeForMediaType(msg.type, media.mime_type),
+            filename: media.filename ?? defaultFilename(msg.type),
+          },
+          media,
+        )
       }
     }
   }
@@ -401,13 +435,16 @@ async function handleMessages(app: FastifyInstance, value: WaChangeValue): Promi
         })
         const media = msg[msg.type] as WaMedia | undefined
         if (existing && existing.mediaStatus === 'pending' && !existing.mediaUrl && media?.id) {
-          await enqueueJob('download_media', {
-            messageId: existing.id,
-            conversationId: conversation.id,
-            waMediaId: media.id,
-            mimeType: media.mime_type ?? mimeForMediaType(msg.type, media.mime_type),
-            filename: media.filename ?? defaultFilename(msg.type),
-          })
+          await enqueueInboundDownload(
+            {
+              messageId: existing.id,
+              conversationId: conversation.id,
+              waMediaId: media.id,
+              mimeType: media.mime_type ?? mimeForMediaType(msg.type, media.mime_type),
+              filename: media.filename ?? defaultFilename(msg.type),
+            },
+            media,
+          )
         }
       }
       continue
@@ -421,13 +458,16 @@ async function handleMessages(app: FastifyInstance, value: WaChangeValue): Promi
     if (isMediaType(msg.type)) {
       const media = msg[msg.type] as WaMedia | undefined
       if (media?.id) {
-        await enqueueJob('download_media', {
-          messageId: message.id,
-          conversationId: conversation.id,
-          waMediaId: media.id,
-          mimeType: media.mime_type ?? mimeForMediaType(msg.type, media.mime_type),
-          filename: media.filename ?? defaultFilename(msg.type),
-        })
+        await enqueueInboundDownload(
+          {
+            messageId: message.id,
+            conversationId: conversation.id,
+            waMediaId: media.id,
+            mimeType: media.mime_type ?? mimeForMediaType(msg.type, media.mime_type),
+            filename: media.filename ?? defaultFilename(msg.type),
+          },
+          media,
+        )
       }
     }
 

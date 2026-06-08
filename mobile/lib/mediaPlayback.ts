@@ -3,7 +3,7 @@ import {
   ensureMediaIndexLoaded,
   getCachedMediaUri,
   getCachedMediaUriSync,
-  getCachedUriForS3KeySync,
+  resolveCachedMediaUriSync,
 } from '@/lib/messageMediaCache'
 import {
   queueMessageMediaSync,
@@ -19,15 +19,12 @@ export async function resolvePlaybackUri(
 ): Promise<string | null> {
   await ensureMediaIndexLoaded()
 
-  const cached = getCachedMediaUriSync(message.id)
-  if (cached) return cached
-
-  if (message.mediaUrl) {
-    const shared = getCachedUriForS3KeySync(message.mediaUrl)
-    if (shared) {
-      const aliased = await aliasMessageToBlob(message.id, message.mediaUrl)
-      if (aliased) return aliased
+  const cached = resolveCachedMediaUriSync(message.id, message.mediaUrl)
+  if (cached) {
+    if (!getCachedMediaUriSync(message.id) && message.mediaUrl?.startsWith('media/')) {
+      void aliasMessageToBlob(message.id, message.mediaUrl)
     }
+    return cached
   }
 
   if (message.localPreviewUri) {
@@ -50,8 +47,9 @@ export function resolvePlaybackUriSync(
   messageId: string,
   localPreviewUri?: string | null,
   remoteUrl?: string | null,
+  mediaUrl?: string | null,
 ): string | null {
-  const cached = getCachedMediaUriSync(messageId)
+  const cached = resolveCachedMediaUriSync(messageId, mediaUrl)
   if (cached) return cached
   if (localPreviewUri) return resolveUploadUri(localPreviewUri)
   return remoteUrl ?? null
@@ -65,6 +63,7 @@ export async function warmPlaybackCache(
     message.id,
     message.localPreviewUri,
     remoteUrl,
+    message.mediaUrl,
   )
   if (sync && !sync.startsWith('http')) return sync
 

@@ -157,9 +157,10 @@ function ChatMessagesListBase({
 
       // Defer media bookkeeping (presign batching, download sync) off the scroll
       // frame so fast flings stay at 60fps; the sticky-date update stays sync.
+      const viewport = buildChatMediaViewport(dataRef.current, viewableItems)
+      setVisibleMessageIds(viewport.loadMessageIds)
+
       InteractionManager.runAfterInteractions(() => {
-        const viewport = buildChatMediaViewport(dataRef.current, viewableItems)
-        setVisibleMessageIds(viewport.loadMessageIds)
         if (viewport.presignCandidates.length) {
           void queueMediaPresignForMessages(queryClient, viewport.presignCandidates)
         }
@@ -241,8 +242,13 @@ function ChatMessagesListBase({
       windowSize={7}
       // Android inverted lists with media bubbles blank out / flicker with this
       // enabled (known RN issue); keep the memory win only on iOS.
-      removeClippedSubviews={Platform.OS === 'ios'}
+      removeClippedSubviews={false}
       keyExtractor={(row) => row.id}
+      showsVerticalScrollIndicator
+      persistentScrollbar={Platform.OS === 'android'}
+      overScrollMode={Platform.OS === 'android' ? 'never' : undefined}
+      decelerationRate="fast"
+      disableIntervalMomentum
       viewabilityConfigCallbackPairs={viewabilityPairs}
       maintainVisibleContentPosition={{
         minIndexForVisible: 0,

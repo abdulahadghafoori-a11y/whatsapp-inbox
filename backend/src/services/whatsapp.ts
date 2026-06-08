@@ -130,6 +130,10 @@ export interface WhatsAppService {
     filename?: string,
   ): Promise<{ id: string }>
   getMediaUrl(log: FastifyBaseLogger, mediaId: string): Promise<string>
+  getMediaInfo(
+    log: FastifyBaseLogger,
+    mediaId: string,
+  ): Promise<{ url: string; sha256?: string; fileSize?: number; mimeType?: string }>
   downloadMedia(log: FastifyBaseLogger, url: string): Promise<Buffer>
   markAsRead(log: FastifyBaseLogger, messageId: string): Promise<void>
   listTemplates(log: FastifyBaseLogger): Promise<unknown[]>
@@ -264,6 +268,31 @@ export const whatsapp: WhatsAppService = {
     ).catch((err) => {
       throw errors.whatsappApi((err as Error).message)
     })
+  },
+
+  async getMediaInfo(log, mediaId) {
+    const res = await call<{
+      url: string
+      sha256?: string
+      file_size?: number | string
+      mime_type?: string
+    }>(log, 'GET', `/${mediaId}`)
+    const fileSizeRaw = res.file_size
+    const fileSize =
+      typeof fileSizeRaw === 'number'
+        ? fileSizeRaw
+        : typeof fileSizeRaw === 'string'
+          ? Number(fileSizeRaw)
+          : undefined
+    return {
+      url: res.url,
+      sha256:
+        typeof res.sha256 === 'string' && /^[0-9a-f]{64}$/i.test(res.sha256)
+          ? res.sha256.toLowerCase()
+          : undefined,
+      fileSize: fileSize && Number.isFinite(fileSize) ? fileSize : undefined,
+      mimeType: res.mime_type,
+    }
   },
 
   async getMediaUrl(log, mediaId) {

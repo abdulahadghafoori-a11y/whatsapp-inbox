@@ -19,15 +19,19 @@ export function readClientSendMeta(message: Message): ClientMediaSendMeta | unde
   return cs as ClientMediaSendMeta
 }
 
-export function clientSendMetadata(media: {
-  uri: string
-  videoTrim?: { startMs: number; endMs: number }
-  sendAsDocument?: boolean
-  imageQuality?: MediaQualityTier
-  videoQuality?: MediaQualityTier
-  preparedUri?: string
-}): Record<string, unknown> {
+export function clientSendMetadata(
+  media: {
+    uri: string
+    videoTrim?: { startMs: number; endMs: number }
+    sendAsDocument?: boolean
+    imageQuality?: MediaQualityTier
+    videoQuality?: MediaQualityTier
+    preparedUri?: string
+  },
+  clientMessageId?: string,
+): Record<string, unknown> {
   return {
+    ...(clientMessageId ? { clientMessageId } : {}),
     clientSend: {
       sourceUri: media.uri,
       videoTrim: media.videoTrim,

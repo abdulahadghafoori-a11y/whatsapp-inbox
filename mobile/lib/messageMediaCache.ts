@@ -331,6 +331,35 @@ export function getCachedMediaUriSync(messageId: string): string | null {
   return indexMem.blobs[blobId]?.localUri ?? null
 }
 
+/**
+ * Message id first, then content-addressed S3 key — shows media already on disk
+ * even when auto-download is off and this message was never aliased yet.
+ */
+export function resolveCachedMediaUriSync(
+  messageId: string,
+  s3Key?: string | null,
+): string | null {
+  const byMessage = getCachedMediaUriSync(messageId)
+  if (byMessage) return byMessage
+  if (s3Key?.startsWith('media/')) {
+    const byKey = getCachedUriForS3KeySync(s3Key)
+    if (byKey) return byKey
+  }
+  return null
+}
+
+export function resolveCachedMediaThumbUriSync(
+  messageId: string,
+  s3Key?: string | null,
+): string | null {
+  if (!indexMem) return null
+  const blobId =
+    indexMem.messageToBlob[messageId] ??
+    (s3Key?.startsWith('media/') ? s3Key : null)
+  if (!blobId || !validatedBlobs.has(blobId)) return null
+  return indexMem.blobs[blobId]?.thumbUri ?? null
+}
+
 export function getCachedMediaThumbUriSync(messageId: string): string | null {
   if (!indexMem) return null
   const blobId = indexMem.messageToBlob[messageId]
@@ -464,6 +493,21 @@ export async function updateCachedMediaDimensions(
   if (!blobId || !index.blobs[blobId]) return
   index.blobs[blobId] = { ...index.blobs[blobId], width, height }
   await saveIndex(index)
+}
+
+/** Keep the same on-device blob when an optimistic message id is replaced by the server id. */
+export async function transferMessageMediaCache(
+  fromMessageId: string,
+  toMessageId: string,
+): Promise<void> {
+  if (!fromMessageId || !toMessageId || fromMessageId === toMessageId) return
+  const index = await loadIndex()
+  const blobId = index.messageToBlob[fromMessageId]
+  if (!blobId || !index.blobs[blobId]) return
+  index.messageToBlob[toMessageId] = blobId
+  delete index.messageToBlob[fromMessageId]
+  await saveIndex(index)
+  notifyMessageCacheListeners([fromMessageId, toMessageId])
 }
 
 /** Point message at an existing blob (same S3 key / same file hash). */

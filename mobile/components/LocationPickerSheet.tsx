@@ -44,6 +44,11 @@ export function LocationPickerSheet({
   const [address, setAddress] = useState<string | null>(null)
   const [geocoding, setGeocoding] = useState(false)
   const geocodeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const sendingCurrentRef = useRef(false)
+
+  useEffect(() => {
+    if (!sending) sendingCurrentRef.current = false
+  }, [sending])
 
   const refreshAddress = useCallback(async (latitude: number, longitude: number) => {
     setGeocoding(true)
@@ -83,6 +88,18 @@ export function LocationPickerSheet({
           onCancel()
           return
         }
+
+        const lastKnown = await ExpoLocation.getLastKnownPositionAsync()
+        if (!cancelled && lastKnown) {
+          const { latitude, longitude } = lastKnown.coords
+          const region = regionFor(latitude, longitude)
+          setGps({ latitude, longitude })
+          setInitialRegion(region)
+          setCenter({ latitude, longitude })
+          setBooting(false)
+          void refreshAddress(latitude, longitude)
+        }
+
         const pos = await ExpoLocation.getCurrentPositionAsync({
           accuracy: ExpoLocation.Accuracy.Balanced,
         })
@@ -115,12 +132,15 @@ export function LocationPickerSheet({
   )
 
   async function handleSendCurrent() {
-    if (booting || sending) return
+    if (booting || sending || sendingCurrentRef.current) return
+    sendingCurrentRef.current = true
     try {
-      const pos = await ExpoLocation.getCurrentPositionAsync({
-        accuracy: ExpoLocation.Accuracy.Balanced,
-      })
-      const { latitude, longitude } = pos.coords
+      const coords = gps
+        ? gps
+        : (await ExpoLocation.getCurrentPositionAsync({
+            accuracy: ExpoLocation.Accuracy.High,
+          })).coords
+      const { latitude, longitude } = coords
       const label = await reverseGeocodeLabel(latitude, longitude)
       onSend({
         latitude,
@@ -129,12 +149,12 @@ export function LocationPickerSheet({
         ...(!label ? { name: 'Current location' } : {}),
       })
     } catch {
-      // GPS unavailable
+      sendingCurrentRef.current = false
     }
   }
 
   function handleSendPinned() {
-    if (!center) return
+    if (!center || sending) return
     onSend({
       latitude: center.latitude,
       longitude: center.longitude,
@@ -163,6 +183,8 @@ export function LocationPickerSheet({
               fill
               showMarker={false}
               showUserLocation
+              userLatitude={gps?.latitude ?? null}
+              userLongitude={gps?.longitude ?? null}
               interactive
               initialRegion={initialRegion}
               onRegionChangeComplete={onRegionChangeComplete}

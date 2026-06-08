@@ -36,7 +36,10 @@ export function useMessageMedia(
   const loadRemote = opts?.loadRemote !== false
   const pending = message.mediaStatus === 'pending'
   const hasRemoteKey = !!message.mediaUrl && !pending
-  const { uri: cachedUri, thumbUri: cachedThumbUri } = useCachedMedia(message.id)
+  const { uri: cachedUri, thumbUri: cachedThumbUri } = useCachedMedia(
+    message.id,
+    message.mediaUrl,
+  )
 
   const thumbKey =
     hasRemoteKey && message.mediaThumbUrl && message.type !== 'video'

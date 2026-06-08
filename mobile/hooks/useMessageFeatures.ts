@@ -1,8 +1,9 @@
 import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/services/api'
 import { normalizeMessage } from '@/lib/normalizeMessage'
-import { patchLocalMessage } from '@/lib/db/repo'
+import { getMessageById, patchLocalMessage } from '@/lib/db/repo'
 import { scheduleSync } from '@/lib/sync/syncEngine'
+import { useAuthStore } from '@/stores/authStore'
 import type { Message, MessageReaction } from '@/types'
 
 export const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'] as const
@@ -39,8 +40,25 @@ export function useToggleMessageReaction(_conversationId: string) {
       )
       return res.data
     },
+    onMutate: async ({ messageId, emoji }) => {
+      const existing = await getMessageById(messageId)
+      const agent = useAuthStore.getState().agent
+      if (!agent) return { messageId, previous: existing?.reactions }
+      const reactions = [...(existing?.reactions ?? [])]
+      const idx = reactions.findIndex((r) => r.agentId === agent.id && r.emoji === emoji)
+      if (idx >= 0) reactions.splice(idx, 1)
+      else reactions.push({ emoji, agentId: agent.id, agentName: agent.name ?? null })
+      await patchLocalMessage(messageId, { reactions })
+      return { messageId, previous: existing?.reactions }
+    },
     onSuccess: (data) => {
       void patchLocalMessage(data.messageId, { reactions: data.reactions })
+      scheduleSync()
+    },
+    onError: async (_err, { messageId }, ctx) => {
+      if (ctx?.previous !== undefined) {
+        await patchLocalMessage(messageId, { reactions: ctx.previous })
+      }
       scheduleSync()
     },
   })

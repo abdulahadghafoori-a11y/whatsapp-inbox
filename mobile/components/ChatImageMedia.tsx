@@ -10,6 +10,8 @@ import {
 
 type ChatImageMediaProps = {
   uri: string
+  /** Stable expo-image recycling key (message id) — avoids reload when local uri changes. */
+  cacheKey?: string
   sticker?: boolean
   uploading?: boolean
   uploadLabel?: string
@@ -23,6 +25,7 @@ type ChatImageMediaProps = {
 
 export function ChatImageMedia({
   uri,
+  cacheKey,
   sticker = false,
   uploading = false,
   uploadLabel,
@@ -61,14 +64,14 @@ export function ChatImageMedia({
           {
             width: layout.width,
             height: layout.height,
-            opacity: uploading ? 0.72 : 1,
+            opacity: 1,
           },
         ]}
         contentFit="cover"
         placeholder={placeholder}
         placeholderContentFit="cover"
-        transition={150}
-        recyclingKey={uri}
+        transition={cacheKey ? 0 : 150}
+        recyclingKey={cacheKey ?? uri}
         onLoad={(e) => {
           const { width, height } = e.source
           if (width > 0 && height > 0) {

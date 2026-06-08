@@ -22,6 +22,7 @@ export function getDefaultTabBarStyle(bottomInset: number): ViewStyle {
 /** Native stack transitions for inbox chat and other pushes. */
 export const stackTransitionOptions = {
   animation: 'slide_from_right' as const,
+  animationDuration: 180,
   gestureEnabled: true,
   /** Edge-only back swipe — full-screen swipe fights vertical message scrolling. */
   fullScreenGestureEnabled: false,

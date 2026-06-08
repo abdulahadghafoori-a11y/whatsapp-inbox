@@ -138,8 +138,40 @@ export async function sendOutboundMediaBuffer(
     sentBy: string
     replyToMessageId?: string
     replyToWaMessageId?: string
+    /** Send as a file attachment (document bubble), not inline photo/video. */
+    forceDocument?: boolean
   },
 ) {
+  if (opts.forceDocument) {
+    const doc = await prepareDocumentForWhatsApp(
+      opts.buffer,
+      opts.filename,
+      opts.mimeHint || 'application/octet-stream',
+    )
+    const persisted = await persistAndMaybeUploadWa(app, {
+      buffer: doc.buffer,
+      mime: doc.mime,
+      filename: doc.filename,
+      type: 'document',
+      sourceBytes: opts.buffer.length,
+    })
+    return createOutboundMedia(app.io, {
+      conversationId: opts.conversationId,
+      to: opts.contactWaId,
+      type: 'document',
+      ...(persisted.mediaId ? { mediaId: persisted.mediaId } : { s3Key: persisted.s3Key }),
+      s3Key: persisted.s3Key,
+      mimeType: doc.mime,
+      filename: doc.filename,
+      caption: opts.caption,
+      sentBy: opts.sentBy,
+      voiceNote: false,
+      replyToMessageId: opts.replyToMessageId,
+      replyToWaMessageId: opts.replyToWaMessageId,
+      ...storedMediaExtras(persisted),
+    })
+  }
+
   const prepared = await prepareOutboundMedia(opts.buffer, opts.filename, opts.mimeHint, {
     log: app.log,
   })
@@ -185,6 +217,7 @@ export async function sendOutboundMediaFromS3Key(
     replyToWaMessageId?: string
     /** Re-upload stored S3 bytes without re-processing (forward / resend / reuse). */
     passthrough?: boolean
+    forceDocument?: boolean
   },
 ) {
   if (!opts.s3Key.startsWith('media/')) {
@@ -192,6 +225,36 @@ export async function sendOutboundMediaFromS3Key(
   }
 
   const buffer = await app.s3.downloadFromS3(opts.s3Key)
+
+  if (opts.passthrough && opts.forceDocument) {
+    const doc = await prepareDocumentForWhatsApp(
+      buffer,
+      opts.filename,
+      opts.mimeType || 'application/octet-stream',
+    )
+    const persisted = await persistAndMaybeUploadWa(app, {
+      buffer: doc.buffer,
+      mime: doc.mime,
+      filename: doc.filename,
+      type: 'document',
+      sourceBytes: buffer.length,
+    })
+    return createOutboundMedia(app.io, {
+      conversationId: opts.conversationId,
+      to: opts.contactWaId,
+      type: 'document',
+      ...(persisted.mediaId ? { mediaId: persisted.mediaId } : { s3Key: persisted.s3Key }),
+      s3Key: persisted.s3Key,
+      mimeType: doc.mime,
+      filename: doc.filename,
+      caption: opts.caption,
+      sentBy: opts.sentBy,
+      voiceNote: false,
+      replyToMessageId: opts.replyToMessageId,
+      replyToWaMessageId: opts.replyToWaMessageId,
+      ...storedMediaExtras(persisted),
+    })
+  }
 
   if (opts.passthrough) {
     if (opts.mimeType.startsWith('image/')) {

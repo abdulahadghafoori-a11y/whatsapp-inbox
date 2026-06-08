@@ -18,6 +18,9 @@ export type LocationMapViewProps = {
   fill?: boolean
   interactive?: boolean
   showUserLocation?: boolean
+  /** GPS fix for the blue "you are here" dot (Android WebView map). */
+  userLatitude?: number | null
+  userLongitude?: number | null
   showMarker?: boolean
   onRegionChangeComplete?: (region: MapRegion) => void
   initialRegion?: MapRegion
