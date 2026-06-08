@@ -2,6 +2,8 @@ import { eq } from 'drizzle-orm'
 import { db } from '../db/index.js'
 import { mediaBlobs, type MediaBlob } from '../db/schema.js'
 
+export type { MediaBlob }
+
 /**
  * WhatsApp media handles stay valid ~30 days; reuse well inside that window so a
  * stale handle never causes a permanent send failure.
