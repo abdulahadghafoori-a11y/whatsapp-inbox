@@ -99,12 +99,18 @@ Chakra does **not** send Meta’s `x-hub-signature-256` header. It signs with
 `X-Chakra-Signature-256` (HMAC-SHA256 of the raw body, hex digest **without**
 `sha256=` prefix) using a team secret from Chakra Admin → Team → Secrets.
 
-**Production / stable tunnel:** set in `backend/.env` (and Render env):
+**Production (Render):** Meta → Chakra passthrough → `https://<render-host>/api/webhook/whatsapp`
+
+Set on **Render** (not only local `.env`):
 
 ```env
 WEBHOOK_SKIP_SIGNATURE=false
 CHAKRA_WEBHOOK_HMAC_SECRET=<your-chakra-team-hmac-secret>
 ```
+
+`WHATSAPP_APP_SECRET` is still required for other Meta API calls but webhook POSTs
+from Chakra are verified with `X-Chakra-Signature-256` + this secret.
+Redeploy Render after changing env vars.
 
 **Local dev only** (unsigned pass-through):
 

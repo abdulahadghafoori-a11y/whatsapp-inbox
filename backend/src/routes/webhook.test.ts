@@ -1,5 +1,20 @@
 import { createHmac } from 'node:crypto'
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
+
+vi.mock('../config.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../config.js')>()
+  return {
+    ...actual,
+    config: {
+      ...actual.config,
+      WHATSAPP_APP_SECRET: 'test_app_secret',
+      CHAKRA_WEBHOOK_HMAC_SECRET: 'chakra_team_hmac_secret',
+      WEBHOOK_SKIP_SIGNATURE: false,
+    },
+    isProd: false,
+  }
+})
+
 import {
   isWebhookSignatureValid,
   verifyChakraSignature,
@@ -73,17 +88,19 @@ describe('isWebhookSignatureValid', () => {
     expect(isWebhookSignatureValid(raw, signMeta(body), undefined)).toBe(true)
   })
 
-  it('prefers Meta over Chakra when both headers are present', () => {
+  it('prefers Chakra over Meta when both headers are present (relay passthrough)', () => {
     const chakraSig = signChakra(body)
     expect(isWebhookSignatureValid(raw, signMeta(body), chakraSig)).toBe(true)
-    expect(isWebhookSignatureValid(raw, 'sha256=' + '00'.repeat(32), chakraSig)).toBe(false)
+    // Stale Meta header from passthrough must not block a valid Chakra signature.
+    expect(isWebhookSignatureValid(raw, 'sha256=' + '00'.repeat(32), chakraSig)).toBe(true)
+    expect(isWebhookSignatureValid(raw, 'sha256=' + '00'.repeat(32), 'ff'.repeat(32))).toBe(false)
+  })
+
+  it('falls back to Meta when Chakra header is absent', () => {
+    expect(isWebhookSignatureValid(raw, signMeta(body), undefined)).toBe(true)
   })
 
   it('rejects when no signature headers and skip is off', () => {
     expect(isWebhookSignatureValid(raw, undefined, undefined)).toBe(false)
-  })
-
-  it('rejects Chakra signature when secret is not configured', () => {
-    expect(isWebhookSignatureValid(raw, undefined, signChakra(body))).toBe(false)
   })
 })

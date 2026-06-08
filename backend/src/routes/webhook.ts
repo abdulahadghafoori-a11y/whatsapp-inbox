@@ -88,17 +88,21 @@ export async function webhookRoutes(app: FastifyInstance) {
   })
 }
 
-/** Meta x-hub-signature-256, or Chakra X-Chakra-Signature-256 when configured. */
+/**
+ * Meta x-hub-signature-256, or Chakra X-Chakra-Signature-256 when configured.
+ * Chakra relay is checked first when both header + secret are present — passthrough
+ * may forward Meta's header while re-signing the (possibly re-serialized) body.
+ */
 export function isWebhookSignatureValid(
   raw: Buffer | undefined,
   metaSignature: string | undefined,
   chakraSignature?: string | undefined,
 ): boolean {
   if (!raw) return false
-  if (metaSignature) return verifyMetaSignature(raw, metaSignature)
   if (chakraSignature && config.CHAKRA_WEBHOOK_HMAC_SECRET) {
     return verifyChakraSignature(raw, chakraSignature, config.CHAKRA_WEBHOOK_HMAC_SECRET)
   }
+  if (metaSignature) return verifyMetaSignature(raw, metaSignature)
   return !!config.WEBHOOK_SKIP_SIGNATURE && !isProd
 }
 

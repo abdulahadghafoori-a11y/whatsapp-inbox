@@ -76,6 +76,22 @@ describe('webhook POST (Fastify)', () => {
     expect(res.json()).toEqual({ received: true })
   })
 
+  it('accepts Chakra signature when Meta passthrough header is stale', async () => {
+    const body = JSON.stringify({ object: 'whatsapp_business_account', entry: [] })
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/webhook/whatsapp',
+      headers: {
+        'content-type': 'application/json',
+        'x-hub-signature-256': 'sha256=' + '00'.repeat(32),
+        'x-chakra-signature-256': signChakra(body),
+      },
+      payload: body,
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ received: true })
+  })
+
   it('rejects unsigned body when WEBHOOK_SKIP_SIGNATURE is off', async () => {
     const body = JSON.stringify({ object: 'whatsapp_business_account', entry: [] })
     const res = await app.inject({
