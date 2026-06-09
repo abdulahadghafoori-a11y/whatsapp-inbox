@@ -6,6 +6,7 @@ import {
   BUBBLE_MEDIA_MAX_WIDTH,
   bubbleSizeFromPixelSize,
 } from '@/lib/chatMediaLayout'
+import { MESSAGE_LONG_PRESS_MS } from '@/lib/chatLongPress'
 
 type ChatVideoMediaProps = {
   uri: string
@@ -15,6 +16,7 @@ type ChatVideoMediaProps = {
   uploading?: boolean
   uploadLabel?: string
   onPress?: () => void
+  onLongPress?: () => void
 }
 
 export function ChatVideoMedia({
@@ -25,6 +27,7 @@ export function ChatVideoMedia({
   uploading = false,
   uploadLabel,
   onPress,
+  onLongPress,
 }: ChatVideoMediaProps) {
   const videoMeta = useVideoDimensions(uri, messageId, active)
   const layout = useMemo(() => {
@@ -40,7 +43,9 @@ export function ChatVideoMedia({
   return (
     <Pressable
       onPress={onPress}
-      disabled={!onPress}
+      onLongPress={onLongPress}
+      delayLongPress={MESSAGE_LONG_PRESS_MS}
+      disabled={!onPress && !onLongPress}
       style={[styles.wrap, { width: layout.width, height: layout.height }]}
     >
       <VideoBubblePreview

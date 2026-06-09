@@ -754,6 +754,10 @@ export default function ChatScreen() {
     setActionsOpen(true)
   }, [])
 
+  const onMessageForward = useCallback((m: Message) => {
+    setForwardMessage(m)
+  }, [])
+
   const dismissChatSearchStable = useCallback(() => {
     dismissChatSearch()
   }, [])
@@ -1099,6 +1103,7 @@ export default function ChatScreen() {
               onSwipeOpen={onMessageSwipeOpen}
               onRetry={onRetryMessage}
               onLongPress={onMessageLongPress}
+              onForward={onMessageForward}
             />
             <ScrollToLatestButton
               visible={showScrollFab && !recordingOpen}

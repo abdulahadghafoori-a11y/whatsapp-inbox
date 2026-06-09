@@ -32,6 +32,7 @@ import { ChatImageMedia } from './ChatImageMedia'
 import { MediaFullscreenViewer } from './MediaFullscreenViewer'
 import { VideoFullscreenViewer } from './VideoFullscreenViewer'
 import { mediaSendOverlayLabel } from '@/lib/mediaSendPhase'
+import { MESSAGE_LONG_PRESS_MS } from '@/lib/chatLongPress'
 import { isStickerType } from '@/lib/messageMediaKind'
 import { messageRenderEqual } from '@/lib/messageRenderEqual'
 import { computeThumbhashFromUri } from '@/lib/thumbhashGen'
@@ -73,12 +74,14 @@ function DocumentBubble({
   message,
   openingDoc,
   onOpen,
+  onLongPress,
   outbound,
   sizeBytes,
 }: {
   message: Message
   openingDoc: boolean
   onOpen: () => void
+  onLongPress?: () => void
   outbound: boolean
   sizeBytes?: number | null
 }) {
@@ -88,7 +91,13 @@ function DocumentBubble({
   const sizeLabel = formatMediaSize(sizeBytes ?? null)
 
   return (
-    <Pressable onPress={onOpen} disabled={openingDoc} style={styles.docRow}>
+    <Pressable
+      onPress={onOpen}
+      onLongPress={onLongPress}
+      delayLongPress={MESSAGE_LONG_PRESS_MS}
+      disabled={openingDoc}
+      style={styles.docRow}
+    >
       <View style={[styles.docIconWrap, { backgroundColor: `${iconColor}18` }]}>
         {openingDoc ? (
           <ActivityIndicator color={iconColor} size="small" />
@@ -122,12 +131,14 @@ function MediaMessageBase({
   contactName,
   contactAvatarUrl,
   onReplyQuotePress,
+  onLongPress,
 }: {
   message: Message
   variant?: 'inbound' | 'outbound'
   contactName?: string
   contactAvatarUrl?: string | null
   onReplyQuotePress?: (messageId: string) => void
+  onLongPress?: () => void
 }) {
   const queryClient = useQueryClient()
   const agent = useAuthStore((s) => s.agent)
@@ -352,6 +363,7 @@ function MediaMessageBase({
           uploading={uploading}
           uploadLabel={sendOverlay ?? undefined}
           onPress={() => setImageFullScreen(true)}
+          onLongPress={onLongPress}
         />
         <MediaFullscreenViewer
           visible={imageFullScreen}
@@ -389,6 +401,7 @@ function MediaMessageBase({
           uploading={uploading}
           uploadLabel={sendOverlay ?? undefined}
           onPress={() => void openVideo()}
+          onLongPress={onLongPress}
         />
         <VideoFullscreenViewer
           visible={videoFullScreen}
@@ -508,6 +521,7 @@ function MediaMessageBase({
       outbound={outbound}
       sizeBytes={fileSize}
       onOpen={() => void openDocument()}
+      onLongPress={onLongPress}
     />
   )
 }
@@ -565,5 +579,6 @@ export const MediaMessage = memo(MediaMessageBase, (prev, next) =>
   prev.contactName === next.contactName &&
   prev.contactAvatarUrl === next.contactAvatarUrl &&
   prev.onReplyQuotePress === next.onReplyQuotePress &&
+  prev.onLongPress === next.onLongPress &&
   messageRenderEqual(prev.message, next.message),
 )

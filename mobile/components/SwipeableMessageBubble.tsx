@@ -17,6 +17,7 @@ type SwipeableMessageBubbleProps = {
   onReply: (m: Message) => void
   onRetry?: (m: Message) => void
   onLongPress?: (m: Message, anchor: MessageAnchor) => void
+  onForward?: (m: Message) => void
   onReplyQuotePress?: (messageId: string) => void
   onSwipeOpen?: (id: string, ref: Swipeable | null) => void
   highlight?: boolean
@@ -29,6 +30,7 @@ function SwipeableMessageBubbleBase({
   onReply,
   onRetry,
   onLongPress,
+  onForward,
   onReplyQuotePress,
   onSwipeOpen,
   highlight,
@@ -107,6 +109,7 @@ function SwipeableMessageBubbleBase({
       contactAvatarUrl={contactAvatarUrl}
       onRetry={onRetry}
       onLongPress={onLongPress ? handleLongPress : undefined}
+      onForward={onForward}
       onReplyQuotePress={onReplyQuotePress}
       highlight={highlight}
     />
@@ -148,6 +151,7 @@ export const SwipeableMessageBubble = memo(SwipeableMessageBubbleBase, (prev, ne
   prev.onReply === next.onReply &&
   prev.onRetry === next.onRetry &&
   prev.onLongPress === next.onLongPress &&
+  prev.onForward === next.onForward &&
   prev.onReplyQuotePress === next.onReplyQuotePress &&
   prev.onSwipeOpen === next.onSwipeOpen,
 )

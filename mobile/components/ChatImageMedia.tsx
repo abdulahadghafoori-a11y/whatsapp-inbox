@@ -7,6 +7,7 @@ import {
   BUBBLE_MEDIA_MAX_WIDTH,
   bubbleSizeFromPixelSize,
 } from '@/lib/chatMediaLayout'
+import { MESSAGE_LONG_PRESS_MS } from '@/lib/chatLongPress'
 
 type ChatImageMediaProps = {
   uri: string
@@ -21,6 +22,7 @@ type ChatImageMediaProps = {
   intrinsicWidth?: number | null
   intrinsicHeight?: number | null
   onPress?: () => void
+  onLongPress?: () => void
 }
 
 export function ChatImageMedia({
@@ -33,6 +35,7 @@ export function ChatImageMedia({
   intrinsicWidth,
   intrinsicHeight,
   onPress,
+  onLongPress,
 }: ChatImageMediaProps) {
   const [pixelSize, setPixelSize] = useState<PixelSize | null>(null)
 
@@ -54,7 +57,9 @@ export function ChatImageMedia({
   return (
     <Pressable
       onPress={onPress}
-      disabled={!onPress}
+      onLongPress={onLongPress}
+      delayLongPress={MESSAGE_LONG_PRESS_MS}
+      disabled={!onPress && !onLongPress}
       style={[styles.wrap, { width: layout.width, height: layout.height }]}
     >
       <Image

@@ -1,5 +1,6 @@
 import { memo } from 'react'
 import { View, Text, Pressable, StyleSheet, Dimensions } from 'react-native'
+import { Ionicons } from '@expo/vector-icons'
 import { MediaMessage } from './MediaMessage'
 import { LocationMessage } from './LocationMessage'
 import { ContactCardMessage } from './ContactCardMessage'
@@ -11,11 +12,33 @@ import { ReplyQuoteBlock } from './ReplyQuoteBlock'
 import { isStalePendingMessage } from '@/lib/messageStalePending'
 import { outboundFailureLabel } from '@/lib/mediaSendErrors'
 import { messageRenderEqual } from '@/lib/messageRenderEqual'
+import { canForwardMediaMessage } from '@/lib/messageForward'
+import { MESSAGE_LONG_PRESS_MS } from '@/lib/chatLongPress'
 import type { Message } from '@/types'
 
 // App is portrait-locked, so the bubble max width is constant — avoid a
 // per-bubble useWindowDimensions subscription (one fewer re-render source each).
 const BUBBLE_MAX_WIDTH = Math.round(Dimensions.get('window').width * 0.82)
+
+function showMediaForwardArrow(message: Message): boolean {
+  return (
+    (message.type === 'image' || message.type === 'video') && canForwardMediaMessage(message)
+  )
+}
+
+function MessageForwardButton({ onPress }: { onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      hitSlop={10}
+      className="mx-0.5 self-center items-center justify-center"
+      accessibilityLabel="Forward"
+      accessibilityRole="button"
+    >
+      <Ionicons name="arrow-redo" size={22} color="#8696a0" />
+    </Pressable>
+  )
+}
 
 function MessageBubbleBase({
   message,
@@ -23,6 +46,7 @@ function MessageBubbleBase({
   contactAvatarUrl,
   onRetry,
   onLongPress,
+  onForward,
   onReplyQuotePress,
   highlight,
 }: {
@@ -31,6 +55,7 @@ function MessageBubbleBase({
   contactAvatarUrl?: string | null
   onRetry?: (m: Message) => void
   onLongPress?: (m: Message) => void
+  onForward?: (m: Message) => void
   onReplyQuotePress?: (messageId: string) => void
   highlight?: boolean
 }) {
@@ -63,6 +88,8 @@ function MessageBubbleBase({
         : message.status
   const mediaBordered =
     outbound && (isLocation || isVisualMedia || message.type === 'video')
+  const showForward = !!onForward && showMediaForwardArrow(message)
+  const triggerLongPress = onLongPress ? () => onLongPress(message) : undefined
 
   const bubbleClass = failed || stalePending
     ? 'rounded-2xl rounded-br-sm border border-[#e8b4b4] bg-[#f5d5d5] dark:border-[#7a3a3a] dark:bg-[#5a2a2a]'
@@ -106,6 +133,9 @@ function MessageBubbleBase({
     return (
       <View className={`my-0.5 px-1.5 ${outbound ? 'items-end' : 'items-start'}`}>
         <View className={`flex-row ${outbound ? 'justify-end' : 'justify-start'}`}>
+          {outbound && showForward ? (
+            <MessageForwardButton onPress={() => onForward!(message)} />
+          ) : null}
           {showRetry && onRetry ? (
             <Pressable
               onPress={() => onRetry(message)}
@@ -117,8 +147,8 @@ function MessageBubbleBase({
             </Pressable>
           ) : null}
           <Pressable
-            onLongPress={() => onLongPress?.(message)}
-            delayLongPress={280}
+            onLongPress={triggerLongPress}
+            delayLongPress={MESSAGE_LONG_PRESS_MS}
             style={{ maxWidth: bubbleMaxW }}
             className={highlight ? 'border-2 border-wa-teal/50 rounded-2xl' : undefined}
           >
@@ -136,9 +166,13 @@ function MessageBubbleBase({
               contactName={contactName}
               contactAvatarUrl={contactAvatarUrl}
               onReplyQuotePress={onReplyQuotePress}
+              onLongPress={triggerLongPress}
             />
             <View className="mt-0.5 flex-row justify-end">{meta}</View>
           </Pressable>
+          {!outbound && showForward ? (
+            <MessageForwardButton onPress={() => onForward!(message)} />
+          ) : null}
         </View>
         {message.reactions?.length ? (
           <MessageReactionsBar reactions={message.reactions} outbound={outbound} />
@@ -155,6 +189,9 @@ function MessageBubbleBase({
   return (
     <View className={`my-0.5 px-1.5 ${outbound ? 'items-end' : 'items-start'}`}>
       <View className={`flex-row ${outbound ? 'justify-end' : 'justify-start'}`}>
+      {outbound && showForward ? (
+        <MessageForwardButton onPress={() => onForward!(message)} />
+      ) : null}
       {showRetry && onRetry ? (
         <Pressable
           onPress={() => onRetry(message)}
@@ -167,8 +204,8 @@ function MessageBubbleBase({
       ) : null}
 
       <Pressable
-        onLongPress={() => onLongPress?.(message)}
-        delayLongPress={280}
+        onLongPress={triggerLongPress}
+        delayLongPress={MESSAGE_LONG_PRESS_MS}
         style={[
           { maxWidth: bubbleMaxW },
           highlight ? { opacity: 1 } : undefined,
@@ -206,6 +243,7 @@ function MessageBubbleBase({
               contactName={contactName}
               contactAvatarUrl={contactAvatarUrl}
               onReplyQuotePress={onReplyQuotePress}
+              onLongPress={triggerLongPress}
             />
             {mediaOnly ? <View style={styles.mediaMeta}>{meta}</View> : null}
           </View>
@@ -223,6 +261,9 @@ function MessageBubbleBase({
           </View>
         ) : null}
       </Pressable>
+      {!outbound && showForward ? (
+        <MessageForwardButton onPress={() => onForward!(message)} />
+      ) : null}
       </View>
       {echoFromWaApp ? (
         <Text className="mt-0.5 text-[11px] text-neutral-400 dark:text-wa-subDark">
@@ -266,5 +307,6 @@ export const MessageBubble = memo(MessageBubbleBase, (prev, next) =>
   messageRenderEqual(prev.message, next.message) &&
   prev.onRetry === next.onRetry &&
   prev.onLongPress === next.onLongPress &&
+  prev.onForward === next.onForward &&
   prev.onReplyQuotePress === next.onReplyQuotePress,
 )

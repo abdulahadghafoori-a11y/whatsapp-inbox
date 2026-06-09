@@ -29,6 +29,7 @@ type ChatListRowProps = {
   onSwipeOpen: (messageId: string, ref: Swipeable | null) => void
   onRetry: (m: Message) => void
   onLongPress: (m: Message, anchor: MessageAnchor) => void
+  onForward: (m: Message) => void
 }
 
 function ChatListRowBase({
@@ -41,6 +42,7 @@ function ChatListRowBase({
   onSwipeOpen,
   onRetry,
   onLongPress,
+  onForward,
 }: ChatListRowProps) {
   if (item.kind === 'date') {
     return <ChatDatePill label={item.label} />
@@ -57,6 +59,7 @@ function ChatListRowBase({
       onSwipeOpen={onSwipeOpen}
       onRetry={onRetry}
       onLongPress={onLongPress}
+      onForward={onForward}
     />
   )
 }
@@ -95,7 +98,8 @@ function chatListRowEqual(prev: ChatListRowProps, next: ChatListRowProps): boole
     prev.onReplyQuotePress === next.onReplyQuotePress &&
     prev.onSwipeOpen === next.onSwipeOpen &&
     prev.onRetry === next.onRetry &&
-    prev.onLongPress === next.onLongPress
+    prev.onLongPress === next.onLongPress &&
+    prev.onForward === next.onForward
   )
 }
 
@@ -120,6 +124,7 @@ export type ChatMessagesListProps = {
   onSwipeOpen: (messageId: string, ref: Swipeable | null) => void
   onRetry: (m: Message) => void
   onLongPress: (m: Message, anchor: MessageAnchor) => void
+  onForward: (m: Message) => void
 }
 
 function ChatMessagesListBase({
@@ -141,6 +146,7 @@ function ChatMessagesListBase({
   onSwipeOpen,
   onRetry,
   onLongPress,
+  onForward,
 }: ChatMessagesListProps) {
   const stickyDateRef = useRef('')
   const queryClient = useQueryClient()
@@ -217,11 +223,13 @@ function ChatMessagesListBase({
         onSwipeOpen={onSwipeOpen}
         onRetry={onRetry}
         onLongPress={onLongPress}
+        onForward={onForward}
       />
     ),
     [
       contactAvatarUrl,
       contactName,
+      onForward,
       onLongPress,
       onReply,
       onReplyQuotePress,
@@ -309,6 +317,7 @@ function chatMessagesListEqual(prev: ChatMessagesListProps, next: ChatMessagesLi
     prev.onSwipeOpen === next.onSwipeOpen &&
     prev.onRetry === next.onRetry &&
     prev.onLongPress === next.onLongPress &&
+    prev.onForward === next.onForward &&
     prev.listRef === next.listRef &&
     prev.canLoadOlderRef === next.canLoadOlderRef
   )
