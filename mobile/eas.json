@@ -8,6 +8,7 @@
       "developmentClient": true,
       "distribution": "internal",
       "env": {
+        "SENTRY_DISABLE_AUTO_UPLOAD": "true",
         "EXPO_PUBLIC_API_URL": "http://192.168.100.25:3001",
         "EXPO_PUBLIC_SOCKET_URL": "http://192.168.100.25:3001"
       }
@@ -16,6 +17,7 @@
       "distribution": "internal",
       "ios": { "simulator": false },
       "env": {
+        "SENTRY_DISABLE_AUTO_UPLOAD": "true",
         "EXPO_PUBLIC_API_URL": "https://whatsapp-inbox-4wqd.onrender.com",
         "EXPO_PUBLIC_SOCKET_URL": "https://whatsapp-inbox-4wqd.onrender.com"
       }
@@ -27,6 +29,7 @@
       },
       "env": {
         "APP_VARIANT": "production",
+        "SENTRY_DISABLE_AUTO_UPLOAD": "true",
         "EXPO_PUBLIC_API_URL": "https://whatsapp-inbox-4wqd.onrender.com",
         "EXPO_PUBLIC_SOCKET_URL": "https://whatsapp-inbox-4wqd.onrender.com"
       }
