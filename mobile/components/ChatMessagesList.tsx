@@ -244,10 +244,10 @@ function ChatMessagesListBase({
       data={data}
       extraData={highlightMessageId}
       inverted
-      initialNumToRender={8}
-      maxToRenderPerBatch={4}
-      updateCellsBatchingPeriod={50}
-      windowSize={7}
+      initialNumToRender={40}
+      maxToRenderPerBatch={20}
+      updateCellsBatchingPeriod={16}
+      windowSize={25}
       // Android inverted lists with media bubbles blank out / flicker with this
       // enabled (known RN issue); keep the memory win only on iOS.
       removeClippedSubviews={false}

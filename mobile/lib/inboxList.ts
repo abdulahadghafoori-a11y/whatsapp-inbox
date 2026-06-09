@@ -30,18 +30,23 @@ export function stabilizeConversationList(
   next: ConversationListItem[],
 ): ConversationListItem[] {
   if (prev === next) return prev
-  if (prev.length !== next.length) return next
-  let stable = true
+  if (next.length === 0) return next
+
+  const prevById = new Map(prev.map((row) => [row.id, row]))
+  let allSameAsPrev = prev.length === next.length
   const merged: ConversationListItem[] = new Array(next.length)
+
   for (let i = 0; i < next.length; i++) {
-    const old = prev[i]
     const row = next[i]
-    if (old && old.id === row.id && conversationInboxEqual(old, row)) {
+    const old = prevById.get(row.id)
+    if (old && conversationInboxEqual(old, row)) {
       merged[i] = old
+      if (allSameAsPrev && old !== prev[i]) allSameAsPrev = false
     } else {
       merged[i] = row
-      stable = false
+      allSameAsPrev = false
     }
   }
-  return stable ? prev : merged
+
+  return allSameAsPrev ? prev : merged
 }

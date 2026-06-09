@@ -1,3 +1,4 @@
+import { getCachedMediaUriSync } from '@/lib/messageMediaCache'
 import type { Message, MessageType } from '@/types'
 
 const FORWARDABLE_MEDIA_TYPES = new Set<MessageType>([
@@ -7,6 +8,22 @@ const FORWARDABLE_MEDIA_TYPES = new Set<MessageType>([
   'audio',
   'document',
 ])
+
+/** True when media bytes are on-device (or outbound was sent with a stored key). */
+export function isMessageMediaLocallyPresent(message: Message): boolean {
+  if (message.localPreviewUri) return true
+  if (getCachedMediaUriSync(message.id)) return true
+  if (
+    message.direction === 'outbound' &&
+    message.mediaUrl &&
+    message.status !== 'pending' &&
+    !message.id.startsWith('pending-media-') &&
+    !message.sendPhase
+  ) {
+    return true
+  }
+  return false
+}
 
 /** True when a media message can be forwarded (sent/received, not pending). */
 export function canForwardMediaMessage(message: Message): boolean {
@@ -21,7 +38,8 @@ export function canForwardMediaMessage(message: Message): boolean {
   ) {
     return false
   }
-  return !!(message.mediaUrl || message.localPreviewUri)
+  if (message.direction === 'inbound' && message.mediaStatus === 'failed') return false
+  return isMessageMediaLocallyPresent(message)
 }
 
 export function isVisualForwardableMedia(message: Message): boolean {

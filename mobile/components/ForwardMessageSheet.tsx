@@ -22,7 +22,7 @@ export function ForwardMessageSheet({
   open,
   message,
   contactName,
-  currentConversationId,
+  currentConversationId: _currentConversationId,
   onClose,
   onForward,
   forwarding,
@@ -48,10 +48,7 @@ export function ForwardMessageSheet({
     }
   }, [open])
 
-  const list = useMemo(
-    () => forwardTargets.filter((c) => c.id !== currentConversationId),
-    [currentConversationId, forwardTargets],
-  )
+  const list = useMemo(() => forwardTargets, [forwardTargets])
 
   const selectedList = useMemo(
     () => list.filter((c) => selected.has(c.id)),

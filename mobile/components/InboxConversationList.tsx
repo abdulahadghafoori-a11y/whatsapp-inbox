@@ -1,4 +1,4 @@
-import { memo, useCallback, useRef, type ReactElement, type RefObject } from 'react'
+import { memo, useCallback, useMemo, useRef, type ReactElement, type RefObject } from 'react'
 import { View, ActivityIndicator, Platform, RefreshControl } from 'react-native'
 import { FlashList, type FlashListRef } from '@shopify/flash-list'
 import { ScrollView } from 'react-native-gesture-handler'
@@ -87,6 +87,11 @@ export const InboxConversationList = memo(function InboxConversationList({
     openRef.current = null
   }, [])
 
+  const listFooter = useMemo(
+    () => <ListFooter loading={loadingMore} />,
+    [loadingMore],
+  )
+
   return (
     <FlashList
       ref={listRef}
@@ -100,7 +105,9 @@ export const InboxConversationList = memo(function InboxConversationList({
       persistentScrollbar={Platform.OS === 'android'}
       nestedScrollEnabled={Platform.OS === 'android'}
       ListHeaderComponent={header ?? undefined}
-      ListFooterComponent={<ListFooter loading={loadingMore} />}
+      ListFooterComponent={listFooter}
+      drawDistance={2500}
+      maxItemsInRecyclePool={0}
       ListEmptyComponent={empty}
       refreshControl={
         <RefreshControl

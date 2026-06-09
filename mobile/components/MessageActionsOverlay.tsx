@@ -4,6 +4,7 @@ import { Ionicons } from '@expo/vector-icons'
 import { PresentationModal } from '@/components/PresentationModal'
 import { MessageBubble } from '@/components/MessageBubble'
 import { REACTION_EMOJIS } from '@/hooks/useMessageFeatures'
+import { canForwardMediaMessage } from '@/lib/messageForward'
 import type { Message } from '@/types'
 
 const SCREEN_H = Dimensions.get('window').height
@@ -66,6 +67,10 @@ export function MessageActionsOverlay({
   const msg: Message = message
   const canCopy = !!onCopy && !!msg.body?.trim()
   const starred = !!msg.starredAt
+  const canForward =
+    msg.type === 'text'
+      ? !msg.deletedAt && !!msg.body?.trim()
+      : canForwardMediaMessage(msg)
 
   const menuTop = Math.min(anchor.y + anchor.height + 10, SCREEN_H - 120)
   const popTop = Math.max(72, anchor.y - 6)
@@ -110,14 +115,16 @@ export function MessageActionsOverlay({
               onClose()
             }}
           />
-          <ActionChip
-            label="Forward"
-            icon={<Ionicons name="arrow-redo" size={22} color="#008069" />}
-            onPress={() => {
-              onForward(msg)
-              onClose()
-            }}
-          />
+          {canForward ? (
+            <ActionChip
+              label="Forward"
+              icon={<Ionicons name="arrow-redo" size={22} color="#008069" />}
+              onPress={() => {
+                onForward(msg)
+                onClose()
+              }}
+            />
+          ) : null}
           {onStar ? (
             <ActionChip
               label={starred ? 'Unstar' : 'Star'}

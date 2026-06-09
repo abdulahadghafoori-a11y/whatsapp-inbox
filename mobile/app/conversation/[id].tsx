@@ -104,7 +104,8 @@ import {
 } from '@/lib/db/repo'
 import { formatDuration } from '@/lib/format'
 import { prepareMediaFileForUpload } from '@/lib/prepareUpload'
-import { cacheMediaFromLocalFile } from '@/lib/messageMediaCache'
+import { cacheMediaFromLocalFile, ensureMediaIndexLoaded } from '@/lib/messageMediaCache'
+import { chatStateCache } from '@/lib/chatStateCache'
 import { resolveUploadUri } from '@/lib/uploadUri'
 import { buildVoiceNoteRuns } from '@/lib/voiceNoteQueue'
 import {
@@ -144,6 +145,7 @@ export default function ChatScreen() {
     fetchOlderMessages,
     hasOlderMessages,
     isFetchingOlder,
+    threadLimit,
   } = useMessages(conversationId)
   const sendText = useSendText(conversationId)
   const sendLocation = useSendLocation(conversationId)
@@ -211,6 +213,8 @@ export default function ChatScreen() {
   const [voiceRecorderLive, setVoiceRecorderLive] = useState<VoiceRecording | null>(null)
   const voiceStartInFlight = useRef(false)
   const messagesListRef = useRef<FlatList<ChatListItem>>(null)
+  const scrollOffsetRef = useRef(0)
+  const scrollRestoredRef = useRef(false)
   const [stickyDateLabel, setStickyDateLabel] = useState('')
   const [showScrollFab, setShowScrollFab] = useState(false)
   const canLoadOlderRef = useRef(true)
@@ -428,6 +432,31 @@ export default function ChatScreen() {
     setStickyDateLabel('')
   }, [conversationId])
 
+  useEffect(() => {
+    void ensureMediaIndexLoaded()
+  }, [conversationId])
+
+  useEffect(() => {
+    scrollRestoredRef.current = false
+    return () => {
+      chatStateCache.save(conversationId, {
+        scrollOffset: scrollOffsetRef.current,
+        messageLimit: threadLimit,
+      })
+    }
+  }, [conversationId, threadLimit])
+
+  useEffect(() => {
+    if (scrollRestoredRef.current || messagesPending) return
+    const saved = chatStateCache.restore(conversationId)
+    if (!saved?.scrollOffset) return
+    scrollRestoredRef.current = true
+    const offset = saved.scrollOffset
+    requestAnimationFrame(() => {
+      messagesListRef.current?.scrollToOffset({ offset, animated: false })
+    })
+  }, [conversationId, messagesPending, chatListItems.length])
+
   const onStickyDateChange = useCallback((label: string) => {
     if (label === stickyDateRef.current) return
     stickyDateRef.current = label
@@ -437,6 +466,7 @@ export default function ChatScreen() {
   const showScrollFabRef = useRef(false)
 
   const onMessagesScroll = useCallback((offsetY: number) => {
+    scrollOffsetRef.current = offsetY
     const show = showScrollFabRef.current
     if (!show && offsetY > 96) {
       showScrollFabRef.current = true

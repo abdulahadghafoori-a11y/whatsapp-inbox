@@ -23,6 +23,7 @@ type ChatImageMediaProps = {
   intrinsicHeight?: number | null
   onPress?: () => void
   onLongPress?: () => void
+  onMeasured?: (width: number, height: number) => void
 }
 
 export function ChatImageMedia({
@@ -36,6 +37,7 @@ export function ChatImageMedia({
   intrinsicHeight,
   onPress,
   onLongPress,
+  onMeasured,
 }: ChatImageMediaProps) {
   const [pixelSize, setPixelSize] = useState<PixelSize | null>(null)
 
@@ -83,11 +85,12 @@ export function ChatImageMedia({
             setPixelSize((prev) =>
               prev?.width === width && prev?.height === height ? prev : { width, height },
             )
+            onMeasured?.(width, height)
           }
         }}
       />
       {/* Spinner only when we have neither a ThumbHash placeholder nor a decoded size. */}
-      {!pixelSize && !placeholder ? (
+      {!pixelSize && !placeholder && !(intrinsicWidth && intrinsicHeight) ? (
         <View style={styles.loading} pointerEvents="none">
           <ActivityIndicator color="#00A884" size="small" />
         </View>

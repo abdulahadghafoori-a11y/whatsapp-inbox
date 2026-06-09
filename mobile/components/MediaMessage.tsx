@@ -33,7 +33,11 @@ import { MediaFullscreenViewer } from './MediaFullscreenViewer'
 import { VideoFullscreenViewer } from './VideoFullscreenViewer'
 import { mediaSendOverlayLabel } from '@/lib/mediaSendPhase'
 import { MESSAGE_LONG_PRESS_MS } from '@/lib/chatLongPress'
+import { getCachedMediaUriSync } from '@/lib/messageMediaCache'
+import { mediaDisplayCache } from '@/lib/mediaDisplayCache'
 import { isStickerType } from '@/lib/messageMediaKind'
+import { hasMessageMediaBeenActivated } from '@/lib/visibleMessageMedia'
+import { resolveUploadUri } from '@/lib/uploadUri'
 import { messageRenderEqual } from '@/lib/messageRenderEqual'
 import { computeThumbhashFromUri } from '@/lib/thumbhashGen'
 import { sha256FromStorageKey, uploadThumbhash } from '@/lib/thumbhashUpload'
@@ -153,10 +157,19 @@ function MediaMessageBase({
   const mediaLabel = MEDIA_LABEL[message.type] ?? 'Media'
 
   const mediaActive = useMessageMediaActive(message.id)
+  const sessionDisplay = mediaDisplayCache.get(message.id)
   const cachedUri = useResolvedCachedMediaUri(message.id, message.mediaUrl)
-  const hasLocalSource = !!(cachedUri || message.localPreviewUri)
-  const mediaReady = hasLocalSource || outbound
-  const showMedia = mediaActive || mediaReady
+  const diskUri = cachedUri ?? getCachedMediaUriSync(message.id) ?? null
+  const seededLocalUri = message.localPreviewUri
+    ? resolveUploadUri(message.localPreviewUri)
+    : null
+  const cachedOnDisk = !!(diskUri || message.localPreviewUri)
+  const hasLocalSource = !!(cachedOnDisk || message.localPreviewUri)
+  const showMedia =
+    cachedOnDisk ||
+    !!message.localPreviewUri ||
+    (outbound && !pending && !uploading) ||
+    hasMessageMediaBeenActivated(message.id)
   const [manualDownload, setManualDownload] = useState(false)
   const { allowed: autoAllowed, blockReason } = useMediaAutoDownload({
     type: message.type,
@@ -192,9 +205,55 @@ function MediaMessageBase({
     showMedia &&
     (hasLocalSource || outbound || manualDownload || autoAllowed === true || isSticker)
 
-  const { displayUrl, playbackUrl, remoteUrl, isLoading, isError } = useMessageMedia(message, {
-    loadRemote: shouldLoadRemote,
-  })
+  const { displayUrl: hookDisplayUrl, playbackUrl, remoteUrl, isLoading, isError } =
+    useMessageMedia(message, {
+      loadRemote: shouldLoadRemote,
+    })
+
+  const effectiveDisplayUrl =
+    hookDisplayUrl ??
+    sessionDisplay?.uri ??
+    diskUri ??
+    seededLocalUri ??
+    null
+
+  const effectivePlaybackUrl = playbackUrl ?? effectiveDisplayUrl
+
+  useEffect(() => {
+    if (!hookDisplayUrl) return
+    if (message.type !== 'image' && message.type !== 'sticker' && message.type !== 'video') {
+      return
+    }
+    mediaDisplayCache.set(message.id, {
+      uri: hookDisplayUrl,
+      width: message.mediaWidth ?? sessionDisplay?.width ?? 0,
+      height: message.mediaHeight ?? sessionDisplay?.height ?? 0,
+      type: message.type === 'video' ? 'video' : 'image',
+      thumbnailUri: sessionDisplay?.thumbnailUri,
+    })
+  }, [
+    hookDisplayUrl,
+    message.id,
+    message.type,
+    message.mediaWidth,
+    message.mediaHeight,
+    sessionDisplay?.width,
+    sessionDisplay?.height,
+    sessionDisplay?.thumbnailUri,
+  ])
+
+  const persistImageDimensions = useCallback(
+    (width: number, height: number) => {
+      if (!effectiveDisplayUrl) return
+      mediaDisplayCache.set(message.id, {
+        uri: effectiveDisplayUrl,
+        width,
+        height,
+        type: 'image',
+      })
+    },
+    [effectiveDisplayUrl, message.id],
+  )
 
   const resolveUri = useCallback(
     () => resolvePlaybackUri(message, remoteUrl),
@@ -232,9 +291,9 @@ function MediaMessageBase({
 
   if (
     !showMedia &&
-    !displayUrl &&
+    !effectiveDisplayUrl &&
     !localPreview &&
-    !cachedUri &&
+    !diskUri &&
     message.mediaUrl &&
     message.mediaStatus !== 'pending' &&
     message.type !== 'text' &&
@@ -246,7 +305,7 @@ function MediaMessageBase({
   if (
     mediaActive &&
     autoAllowed === null &&
-    !displayUrl &&
+    !effectiveDisplayUrl &&
     !localPreview &&
     !outbound &&
     message.mediaUrl
@@ -263,9 +322,9 @@ function MediaMessageBase({
     !outbound &&
     autoAllowed === false &&
     !manualDownload &&
-    !displayUrl &&
+    !effectiveDisplayUrl &&
     !localPreview &&
-    !cachedUri &&
+    !diskUri &&
     message.mediaUrl
   ) {
     return (
@@ -281,7 +340,7 @@ function MediaMessageBase({
     )
   }
 
-  if (pending && !localPreview && !displayUrl) {
+  if (pending && !localPreview && !effectiveDisplayUrl) {
     return (
       <MediaPlaceholder minHeight={message.type === 'audio' ? 40 : 140}>
         <ActivityIndicator color="#00A884" />
@@ -295,7 +354,7 @@ function MediaMessageBase({
     )
   }
 
-  if (mediaDownloadFailed && !localPreview && !displayUrl) {
+  if (mediaDownloadFailed && !localPreview && !effectiveDisplayUrl) {
     return (
       <MediaPlaceholder minHeight={message.type === 'audio' ? 40 : 140}>
         <Text className="text-sm font-medium text-red-600">Media unavailable</Text>
@@ -314,7 +373,7 @@ function MediaMessageBase({
     )
   }
 
-  if (!displayUrl && !localPreview && !cachedUri && (isLoading || isDownloading)) {
+  if (!effectiveDisplayUrl && !localPreview && !diskUri && (isLoading || isDownloading)) {
     return (
       <MediaPlaceholder minHeight={message.type === 'audio' ? 40 : FALLBACK_MEDIA_HEIGHT}>
         <ActivityIndicator color="#00A884" />
@@ -323,7 +382,7 @@ function MediaMessageBase({
     )
   }
 
-  if (!displayUrl && isError) {
+  if (!effectiveDisplayUrl && isError) {
     return (
       <MediaPlaceholder minHeight={FALLBACK_MEDIA_HEIGHT}>
         <Text className="text-sm text-red-600">Could not load media</Text>
@@ -343,7 +402,14 @@ function MediaMessageBase({
   }
 
   if (message.type === 'image' || message.type === 'sticker') {
-    if (!displayUrl) {
+    if (!effectiveDisplayUrl) {
+      if (showMedia || sessionDisplay || isLoading || isDownloading) {
+        return (
+          <MediaPlaceholder minHeight={FALLBACK_MEDIA_HEIGHT}>
+            <ActivityIndicator color="#00A884" size="small" />
+          </MediaPlaceholder>
+        )
+      }
       return (
         <MediaPlaceholder minHeight={FALLBACK_MEDIA_HEIGHT}>
           <Text className="text-sm text-neutral-500 dark:text-neutral-400">Photo unavailable</Text>
@@ -354,20 +420,21 @@ function MediaMessageBase({
     return (
       <>
         <ChatImageMedia
-          uri={displayUrl}
+          uri={effectiveDisplayUrl}
           cacheKey={message.id}
           sticker={sticker}
           thumbhash={message.thumbhash}
-          intrinsicWidth={message.mediaWidth}
-          intrinsicHeight={message.mediaHeight}
+          intrinsicWidth={message.mediaWidth ?? sessionDisplay?.width}
+          intrinsicHeight={message.mediaHeight ?? sessionDisplay?.height}
           uploading={uploading}
           uploadLabel={sendOverlay ?? undefined}
           onPress={() => setImageFullScreen(true)}
           onLongPress={onLongPress}
+          onMeasured={persistImageDimensions}
         />
         <MediaFullscreenViewer
           visible={imageFullScreen}
-          uri={displayUrl}
+          uri={effectiveDisplayUrl}
           onClose={() => setImageFullScreen(false)}
           replyTo={message.replyTo}
           contactName={contactName}
@@ -378,7 +445,14 @@ function MediaMessageBase({
   }
 
   if (message.type === 'video') {
-    if (!displayUrl) {
+    if (!effectiveDisplayUrl) {
+      if (showMedia || sessionDisplay || isLoading || isDownloading) {
+        return (
+          <MediaPlaceholder minHeight={140}>
+            <ActivityIndicator color="#00A884" size="small" />
+          </MediaPlaceholder>
+        )
+      }
       return (
         <MediaPlaceholder minHeight={140}>
           <Text className="text-sm text-neutral-500 dark:text-neutral-400">Video unavailable</Text>
@@ -387,14 +461,14 @@ function MediaMessageBase({
     }
     const openVideo = async () => {
       const local = await resolvePlaybackUri(message, remoteUrl)
-      setVideoPlaybackUrl(local ?? displayUrl)
+      setVideoPlaybackUrl(local ?? effectiveDisplayUrl)
       setVideoFullScreen(true)
     }
 
     return (
       <>
         <ChatVideoMedia
-          uri={displayUrl}
+          uri={effectiveDisplayUrl}
           messageId={message.id}
           active={showMedia}
           sizeBytes={fileSize}
@@ -405,7 +479,7 @@ function MediaMessageBase({
         />
         <VideoFullscreenViewer
           visible={videoFullScreen}
-          url={videoPlaybackUrl ?? displayUrl}
+          url={videoPlaybackUrl ?? effectiveDisplayUrl}
           onClose={() => {
             setVideoFullScreen(false)
             setVideoPlaybackUrl(null)
@@ -419,7 +493,7 @@ function MediaMessageBase({
   }
 
   if (message.type === 'audio') {
-    const audioUri = playbackUrl ?? displayUrl
+    const audioUri = effectivePlaybackUrl
     if (!audioUri) {
       const sending =
         outbound &&
@@ -467,23 +541,26 @@ function MediaMessageBase({
 
   async function openDocument() {
     if (openingDoc) return
-    if (!displayUrl && !remoteUrl && message.mediaUrl) {
+    if (!effectiveDisplayUrl && !remoteUrl && message.mediaUrl) {
       startManualDownload()
       return
     }
     setOpeningDoc(true)
     try {
-      if (displayUrl && (displayUrl.startsWith('file://') || displayUrl.startsWith('/'))) {
+      if (
+        effectiveDisplayUrl &&
+        (effectiveDisplayUrl.startsWith('file://') || effectiveDisplayUrl.startsWith('/'))
+      ) {
         const { openLocalDocument } = await import('@/lib/openDocument')
         await openLocalDocument(
-          displayUrl,
+          effectiveDisplayUrl,
           message.mediaMimeType ?? 'application/octet-stream',
         )
         return
       }
-      if (!remoteUrl && !displayUrl) return
+      if (!remoteUrl && !effectiveDisplayUrl) return
       await openDocumentFromUrl(
-        displayUrl ?? remoteUrl!,
+        effectiveDisplayUrl ?? remoteUrl!,
         message.mediaFilename ?? 'document',
         message.mediaMimeType,
       )
@@ -496,7 +573,7 @@ function MediaMessageBase({
 
   if (
     message.type === 'document' &&
-    !displayUrl &&
+    !effectiveDisplayUrl &&
     !localPreview &&
     message.mediaUrl &&
     !manualDownload &&

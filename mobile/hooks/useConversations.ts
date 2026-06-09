@@ -35,6 +35,7 @@ import {
 import { loadInboxPage, loadThreadPage } from '@/lib/sync/seedCoordinator'
 import { scheduleSync } from '@/lib/sync/syncEngine'
 import type { InboxFilter } from '@/lib/inboxFilters'
+import { chatStateCache } from '@/lib/chatStateCache'
 import { useAuthStore } from '@/stores/authStore'
 import type {
   ConversationDetail,
@@ -169,9 +170,10 @@ export function useMessages(conversationId: string) {
   const [isFetchingOlder, setIsFetchingOlder] = useState(false)
   const [error, setError] = useState<unknown>(null)
 
-  // Reset the window when switching conversations.
+  // Reset or restore the window when switching conversations.
   useEffect(() => {
-    setLimit(THREAD_PAGE_SIZE)
+    const saved = chatStateCache.restore(conversationId)
+    setLimit(saved?.messageLimit ?? THREAD_PAGE_SIZE)
     setOlderCursor(null)
     setSeeded(false)
   }, [conversationId])
@@ -238,6 +240,7 @@ export function useMessages(conversationId: string) {
     fetchOlderMessages,
     hasOlderMessages: !!olderCursor || messages.length >= limit,
     isFetchingOlder,
+    threadLimit: limit,
   }
 }
 

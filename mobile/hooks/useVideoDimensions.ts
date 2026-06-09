@@ -5,6 +5,8 @@ import {
   getCachedMediaDimensions,
   updateCachedMediaDimensions,
 } from '@/lib/messageMediaCache'
+import { mediaDisplayCache } from '@/lib/mediaDisplayCache'
+import { getVideoThumbnailSync } from '@/lib/videoThumbnailCache'
 import { resolveUploadUri } from '@/lib/uploadUri'
 import type { PixelSize } from '@/hooks/useImageDimensions'
 
@@ -18,6 +20,33 @@ function isLocalUri(uri: string) {
   )
 }
 
+function readCachedMeta(uri: string, messageId?: string): VideoPreviewMeta | null {
+  if (messageId) {
+    const display = mediaDisplayCache.get(messageId)
+    if (display?.type === 'video' && display.width > 0 && display.height > 0) {
+      const thumbUri =
+        display.thumbnailUri ??
+        (isLocalUri(uri) ? getVideoThumbnailSync(uri) ?? '' : '')
+      return { width: display.width, height: display.height, thumbUri }
+    }
+  }
+  if (isLocalUri(uri)) {
+    const thumbUri = getVideoThumbnailSync(uri)
+    if (thumbUri) return { width: 16, height: 9, thumbUri }
+  }
+  return null
+}
+
+function persistVideoMeta(messageId: string, uri: string, meta: VideoPreviewMeta) {
+  mediaDisplayCache.set(messageId, {
+    uri,
+    width: meta.width,
+    height: meta.height,
+    type: 'video',
+    thumbnailUri: meta.thumbUri || undefined,
+  })
+}
+
 /**
  * Video aspect ratio + still frame for bubble layout.
  * Deferred until after scroll settles; skipped for off-screen rows.
@@ -27,29 +56,36 @@ export function useVideoDimensions(
   messageId?: string,
   active = true,
 ): VideoPreviewMeta | null {
-  const [meta, setMeta] = useState<VideoPreviewMeta | null>(null)
+  const [meta, setMeta] = useState<VideoPreviewMeta | null>(() =>
+    uri ? readCachedMeta(uri, messageId) : null,
+  )
 
   useEffect(() => {
-    if (!uri || !active) {
-      setMeta(null)
+    if (!uri || !active) return
+
+    const cached = readCachedMeta(uri, messageId)
+    if (cached) {
+      setMeta(cached)
       return
     }
 
     let cancelled = false
-    setMeta(null)
 
     const task = InteractionManager.runAfterInteractions(() => {
       void (async () => {
         if (messageId) {
-          const cached = await getCachedMediaDimensions(messageId)
-          if (cached && !cancelled) {
-            setMeta({ ...cached, thumbUri: '' })
+          const dims = await getCachedMediaDimensions(messageId)
+          if (dims && !cancelled) {
+            const thumbUri = isLocalUri(uri) ? getVideoThumbnailSync(uri) ?? '' : ''
+            const next = { ...dims, thumbUri }
+            setMeta(next)
+            if (messageId) persistVideoMeta(messageId, uri, next)
+            return
           }
         }
 
         if (cancelled) return
 
-        // Remote video decode is very expensive — only thumb local/cached files here.
         if (!isLocalUri(uri)) return
 
         try {
@@ -66,6 +102,7 @@ export function useVideoDimensions(
           setMeta(next)
           if (messageId && result.width > 0 && result.height > 0) {
             void updateCachedMediaDimensions(messageId, result.width, result.height)
+            persistVideoMeta(messageId, uri, next)
           }
         } catch {
           if (!cancelled) {

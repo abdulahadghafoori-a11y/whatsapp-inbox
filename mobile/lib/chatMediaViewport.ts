@@ -3,7 +3,7 @@ import type { ChatListItem } from '@/lib/chatListItems'
 import type { Message } from '@/types'
 import type { ViewToken } from 'react-native'
 
-export const MEDIA_PREFETCH_ROWS = 2
+export const MEDIA_PREFETCH_ROWS = 5
 
 export type ChatMediaViewport = {
   loadMessageIds: string[]

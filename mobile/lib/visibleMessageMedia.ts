@@ -1,6 +1,9 @@
 /** Which chat rows are on screen — media fetches/decodes only run for these ids. */
 
 const visibleIds = new Set<string>()
+/** Messages that were once visible keep showing media after scroll-away (WA-like). */
+const activatedIds = new Set<string>()
+const MAX_ACTIVATED_IDS = 10_000
 const listeners = new Map<string, Set<() => void>>()
 let globalListeners = new Set<() => void>()
 
@@ -15,6 +18,18 @@ function notifyAll() {
 export function isMessageMediaActive(messageId: string | undefined): boolean {
   if (!messageId) return false
   return visibleIds.has(messageId)
+}
+
+export function hasMessageMediaBeenActivated(messageId: string | undefined): boolean {
+  if (!messageId) return false
+  return activatedIds.has(messageId)
+}
+
+function markMessageMediaActivated(messageId: string) {
+  activatedIds.add(messageId)
+  if (activatedIds.size <= MAX_ACTIVATED_IDS) return
+  const oldest = activatedIds.values().next().value
+  if (oldest) activatedIds.delete(oldest)
 }
 
 export function getVisibleMessageIds(): ReadonlySet<string> {
@@ -35,7 +50,10 @@ export function setVisibleMessageIds(ids: Iterable<string>) {
   if (changed.length === 0) return
 
   visibleIds.clear()
-  for (const id of next) visibleIds.add(id)
+  for (const id of next) {
+    visibleIds.add(id)
+    markMessageMediaActivated(id)
+  }
 
   for (const id of changed) notify(id)
   notifyAll()

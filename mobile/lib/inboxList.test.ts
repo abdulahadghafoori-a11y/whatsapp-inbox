@@ -49,9 +49,21 @@ describe('stabilizeConversationList', () => {
     expect(out[1]).toBe(next[1]) // changed row replaced
   })
 
-  it('returns next when length differs', () => {
-    const prev = [conv({ id: 'a' })]
-    const next = [conv({ id: 'a' }), conv({ id: 'b' })]
-    expect(stabilizeConversationList(prev, next)).toBe(next)
+  it('reuses unchanged row refs when length grows (pagination)', () => {
+    const prev = [conv({ id: 'a' }), conv({ id: 'b' })]
+    const next = [conv({ id: 'a' }), conv({ id: 'b' }), conv({ id: 'c' })]
+    const out = stabilizeConversationList(prev, next)
+    expect(out).not.toBe(prev)
+    expect(out[0]).toBe(prev[0])
+    expect(out[1]).toBe(prev[1])
+    expect(out[2]).toBe(next[2])
+  })
+
+  it('reuses unchanged row refs when length shrinks', () => {
+    const prev = [conv({ id: 'a' }), conv({ id: 'b' }), conv({ id: 'c' })]
+    const next = [conv({ id: 'a' }), conv({ id: 'c' })]
+    const out = stabilizeConversationList(prev, next)
+    expect(out[0]).toBe(prev[0])
+    expect(out[1]).toBe(prev[2])
   })
 })
