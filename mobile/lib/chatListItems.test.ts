@@ -3,7 +3,12 @@ import {
   CHAT_DATE_ROW_HEIGHT,
   estimateChatMessageRowHeight,
 } from '@/lib/chatListItemLayout'
-import { stabilizeChatListItems, type ChatListItem } from '@/lib/chatListItems'
+import {
+  chatListStructureKey,
+  hydrateChatListItems,
+  stabilizeChatListItems,
+  type ChatListItem,
+} from '@/lib/chatListItems'
 import type { Message } from '@/types'
 
 function msg(id: string, overrides: Partial<Message> = {}): Message {
@@ -40,6 +45,35 @@ const dateRow = (id: string, label: string): ChatListItem => ({
   dateIso: '2026-01-01T12:00:00.000Z',
   label,
   layoutHeight: CHAT_DATE_ROW_HEIGHT,
+})
+
+describe('chatListStructureKey', () => {
+  it('is stable when only status changes', () => {
+    const a = msg('a', { status: 'sent' })
+    const b = msg('a', { status: 'delivered' })
+    expect(chatListStructureKey([a])).toBe(chatListStructureKey([b]))
+  })
+
+  it('changes when media dimensions arrive', () => {
+    const before = msg('a', { type: 'image' })
+    const after = msg('a', { type: 'image', mediaWidth: 800, mediaHeight: 600 })
+    expect(chatListStructureKey([before])).not.toBe(chatListStructureKey([after]))
+  })
+})
+
+describe('hydrateChatListItems', () => {
+  it('updates message refs without changing row ids or order', () => {
+    const original = msg('a', { status: 'sent' })
+    const items: ChatListItem[] = [messageRow(original)]
+    const updated = msg('a', { status: 'delivered' })
+    const out = hydrateChatListItems(items, [updated])
+    expect(out).toHaveLength(1)
+    expect(out[0]!.id).toBe(items[0]!.id)
+    expect(out[0]!.kind).toBe('message')
+    if (out[0]!.kind === 'message') {
+      expect(out[0]!.message.status).toBe('delivered')
+    }
+  })
 })
 
 describe('stabilizeChatListItems', () => {

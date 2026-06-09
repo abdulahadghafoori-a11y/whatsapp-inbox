@@ -61,6 +61,51 @@ export function buildChatListItems(messages: Message[]): ChatListItem[] {
   return ENABLE_MESSAGE_GROUPING ? enrichChatListWithGroups(items) : items
 }
 
+/** Layout/order fingerprint — excludes status ticks and media URL/cache updates. */
+export function chatListStructureKey(messages: Message[]): string {
+  return messages
+    .map((m) =>
+      [
+        m.id,
+        m.sentAt,
+        m.type,
+        m.deletedAt ?? '',
+        m.body?.length ?? 0,
+        m.mediaWidth ?? 0,
+        m.mediaHeight ?? 0,
+        m.replyTo?.id ?? '',
+        m.reactions?.length ?? 0,
+      ].join('|'),
+    )
+    .join('\n')
+}
+
+/** Swap in latest message objects without rebuilding date pills or row order. */
+export function hydrateChatListItems(
+  items: ChatListItem[],
+  messages: Message[],
+): ChatListItem[] {
+  if (items.length === 0) return items
+  const byId = new Map(messages.map((m) => [m.id, m]))
+  let changed = false
+  const out: ChatListItem[] = new Array(items.length)
+  for (let i = 0; i < items.length; i++) {
+    const row = items[i]
+    if (row.kind === 'date') {
+      out[i] = row
+      continue
+    }
+    const fresh = byId.get(row.message.id)
+    if (!fresh || fresh === row.message) {
+      out[i] = row
+    } else {
+      out[i] = { ...row, message: fresh }
+      changed = true
+    }
+  }
+  return changed ? out : items
+}
+
 function chatListItemStable(old: ChatListItem, row: ChatListItem): boolean {
   if (old.id !== row.id || old.kind !== row.kind) return false
   if (row.kind === 'date') {

@@ -1,6 +1,7 @@
 import type { RefObject } from 'react'
 import type { FlatList } from 'react-native-gesture-handler'
 import type { ChatListItem } from '@/lib/chatListItems'
+import { chatListOffsetToIndex } from '@/lib/chatListRef'
 
 const MAX_SCROLL_INDEX_RETRIES = 1
 const SCROLL_RETRY_DELAY_MS = 0
@@ -14,6 +15,8 @@ export type ScrollToIndexRetryOptions = {
   viewPosition?: number
   maxRetries?: number
   delayMs?: number
+  /** Used for pixel-offset fallback when scrollToIndex fails. */
+  items?: ChatListItem[]
 }
 
 /** Retry scrollToIndex after layout settles (Stream MessageList pattern). */
@@ -27,6 +30,7 @@ export function scrollToChatIndexWithRetry(
     viewPosition = 0.5,
     maxRetries = MAX_SCROLL_INDEX_RETRIES,
     delayMs = SCROLL_RETRY_DELAY_MS,
+    items,
   } = opts
 
   let attempts = 0
@@ -36,6 +40,13 @@ export function scrollToChatIndexWithRetry(
     try {
       listRef.current.scrollToIndex({ index, animated, viewPosition })
     } catch {
+      if (items?.length) {
+        listRef.current?.scrollToOffset({
+          offset: Math.max(0, chatListOffsetToIndex(items, index)),
+          animated,
+        })
+        return
+      }
       if (attempts >= maxRetries) return
       attempts += 1
       setTimeout(tryScroll, delayMs)
@@ -58,6 +69,7 @@ export function scrollToChatMessage(
     animated: true,
     viewPosition: 0.5,
     maxRetries: 1,
+    items,
   })
   onHighlight(messageId)
   if (highlightMs > 0) {

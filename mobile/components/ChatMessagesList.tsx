@@ -9,7 +9,7 @@ import {
   type ReactElement,
   type RefObject,
 } from 'react'
-import { View, ActivityIndicator, InteractionManager, Platform } from 'react-native'
+import { View, ActivityIndicator, Platform } from 'react-native'
 import { useQueryClient } from '@tanstack/react-query'
 import { FlatList } from 'react-native-gesture-handler'
 import type Swipeable from 'react-native-gesture-handler/Swipeable'
@@ -40,7 +40,8 @@ import type { Message } from '@/types'
 
 const AT_BOTTOM_THRESHOLD = 48
 const PREFILL_DEBOUNCE_MS = 500
-const MAX_PREFILL_ATTEMPTS = 3
+const MAX_PREFILL_ATTEMPTS = 1
+const MEDIA_VIEWPORT_THROTTLE_MS = 800
 
 type ChatListRowProps = {
   item: ChatListItem
@@ -192,16 +193,30 @@ function ChatMessagesListBase({
   const atBottomRef = useRef(true)
   const prefillTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const prefillAttemptsRef = useRef(0)
+  const mediaViewportTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const latestViewableItemsRef = useRef<ViewToken[]>([])
   const endReachedTrackerRef = useRef<PaginationLengthTracker>({})
   const fetchInFlightRef = useRef(false)
   const onFetchOlderRef = useRef(onFetchOlder)
   onFetchOlderRef.current = onFetchOlder
 
-  useEffect(() => () => clearVisibleMessageMedia(), [])
+  useEffect(
+    () => () => {
+      if (mediaViewportTimerRef.current) clearTimeout(mediaViewportTimerRef.current)
+      if (prefillTimerRef.current) clearTimeout(prefillTimerRef.current)
+      clearVisibleMessageMedia()
+    },
+    [],
+  )
 
   useEffect(() => {
     resetPaginationTracker(endReachedTrackerRef.current)
     prefillAttemptsRef.current = 0
+    if (mediaViewportTimerRef.current) {
+      clearTimeout(mediaViewportTimerRef.current)
+      mediaViewportTimerRef.current = null
+    }
+    latestViewableItemsRef.current = []
     stickyDateRef.current = ''
     setStickyDateLabel('')
   }, [conversationId])
@@ -244,23 +259,29 @@ function ChatMessagesListBase({
       })
   }, [hasOlderMessages, isFetchingOlder, onFetchOlderFailed])
 
+  const flushMediaViewport = useCallback(() => {
+    const viewableItems = latestViewableItemsRef.current
+    const viewport = buildChatMediaViewport(dataRef.current, viewableItems)
+    setVisibleMessageIds(viewport.loadMessageIds)
+    if (isBurstMode()) return
+    if (viewport.presignCandidates.length) {
+      void queueMediaPresignForMessages(queryClient, viewport.presignCandidates)
+    }
+    if (viewport.orderedMedia.length) syncVisibleMessageMedia(viewport.orderedMedia)
+  }, [queryClient])
+
   const onViewableItemsChanged = useCallback(
     ({ viewableItems }: { viewableItems: ViewToken[] }) => {
       let topIndex = -1
       let topDate: string | null = null
       let anchorMessageId: string | null = null
 
-      const viewport = buildChatMediaViewport(dataRef.current, viewableItems)
-      setVisibleMessageIds(viewport.loadMessageIds)
-
-      if (!isBurstMode()) {
-        InteractionManager.runAfterInteractions(() => {
-          if (viewport.presignCandidates.length) {
-            void queueMediaPresignForMessages(queryClient, viewport.presignCandidates)
-          }
-          if (viewport.orderedMedia.length) syncVisibleMessageMedia(viewport.orderedMedia)
-        })
-      }
+      latestViewableItemsRef.current = viewableItems
+      if (mediaViewportTimerRef.current) clearTimeout(mediaViewportTimerRef.current)
+      mediaViewportTimerRef.current = setTimeout(() => {
+        mediaViewportTimerRef.current = null
+        flushMediaViewport()
+      }, MEDIA_VIEWPORT_THROTTLE_MS)
 
       for (const token of viewableItems) {
         const row = token.item as ChatListItem
@@ -284,7 +305,7 @@ function ChatMessagesListBase({
       stickyDateRef.current = label
       setStickyDateLabel(label)
     },
-    [onAnchorMessageChange, queryClient],
+    [flushMediaViewport, onAnchorMessageChange],
   )
 
   const onViewableItemsChangedRef = useRef(onViewableItemsChanged)
@@ -331,10 +352,13 @@ function ChatMessagesListBase({
     ],
   )
 
-  const maintainVisible = {
-    minIndexForVisible: 0,
-    autoscrollToTopThreshold: getBurstAutoscrollThreshold(),
-  }
+  const maintainVisible = useMemo(
+    () => ({
+      minIndexForVisible: 0,
+      autoscrollToTopThreshold: getBurstAutoscrollThreshold(),
+    }),
+    [],
+  )
 
   const handleScroll = useCallback(
     (offsetY: number) => {

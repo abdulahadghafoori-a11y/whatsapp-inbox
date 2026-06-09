@@ -130,6 +130,8 @@ import { ChatScrollFab } from '@/components/ChatScrollFab'
 import { estimateChatMessageRowHeight } from '@/lib/chatListItemLayout'
 import {
   buildChatListItems,
+  chatListStructureKey,
+  hydrateChatListItems,
   stabilizeChatListItems,
   type ChatListItem,
 } from '@/lib/chatListItems'
@@ -317,30 +319,17 @@ export default function ChatScreen() {
     void action()
   }
 
-  // Re-queue downloads that failed earlier (e.g. DNS issues on the server).
-  useEffect(() => {
-    if (!isFocused || !messagesData?.messages) return
-    for (const m of messagesData.messages) {
-      if (m.type === 'text' || m.mediaStatus !== 'failed') continue
-      if (retriedFailedMedia.current.has(m.id)) continue
-      retriedFailedMedia.current.add(m.id)
-      void api.post(`/messages/media/${m.id}/retry`).catch(() => undefined)
-    }
-  }, [isFocused, messagesData?.messages])
+  const WARM_DEFER_MS = 1500
+  const messagesForFocusRef = useRef<Message[]>([])
+  messagesForFocusRef.current = messagesData?.messages ?? []
 
   const setVoiceNoteRuns = useGlobalAudioStore((s) => s.setVoiceNoteRuns)
-
-  // Voice-note auto-advance: only consecutive voice notes (no text/media between).
-  useEffect(() => {
-    if (!isFocused) return
-    setVoiceNoteRuns(buildVoiceNoteRuns(messagesData?.messages ?? []))
-    return () => setVoiceNoteRuns([])
-  }, [isFocused, messagesData?.messages, setVoiceNoteRuns])
 
   useEffect(() => {
     if (isFocused) return
     useGlobalAudioStore.getState().pause()
-  }, [isFocused])
+    setVoiceNoteRuns([])
+  }, [isFocused, setVoiceNoteRuns])
 
   const markReadAsync = markRead.mutateAsync
   const markedReadForFocusRef = useRef<string | null>(null)
@@ -350,16 +339,50 @@ export default function ChatScreen() {
       markedReadForFocusRef.current = null
       return
     }
-    if (markedReadForFocusRef.current === conversationId) return
-    markedReadForFocusRef.current = conversationId
-    const task = InteractionManager.runAfterInteractions(() => {
+
+    const shouldMarkRead = markedReadForFocusRef.current !== conversationId
+    if (shouldMarkRead) markedReadForFocusRef.current = conversationId
+
+    let cancelled = false
+    const interactionTask = InteractionManager.runAfterInteractions(() => {
+      if (cancelled) return
+      if (shouldMarkRead) {
+        void markReadAsync(conversationId).catch(() => undefined)
+      }
+      warmMediaDisplayCacheFromMessages(messagesForFocusRef.current.slice(-20))
+    })
+
+    const warmTimer = setTimeout(() => {
+      if (cancelled) return
       void warmWaFeedbackSounds()
       void warmVoiceRecorder()
       void import('@/lib/postMediaMessage')
-      void markReadAsync(conversationId).catch(() => undefined)
-    })
-    return () => task.cancel()
-  }, [conversationId, isFocused, markReadAsync])
+      void ensureMediaIndexLoaded()
+      setVoiceNoteRuns(buildVoiceNoteRuns(messagesForFocusRef.current))
+
+      for (const m of messagesForFocusRef.current) {
+        if (m.type === 'text' || m.mediaStatus !== 'failed') continue
+        if (retriedFailedMedia.current.has(m.id)) continue
+        retriedFailedMedia.current.add(m.id)
+        void api.post(`/messages/media/${m.id}/retry`).catch(() => undefined)
+      }
+    }, WARM_DEFER_MS)
+
+    return () => {
+      cancelled = true
+      interactionTask.cancel()
+      clearTimeout(warmTimer)
+    }
+  }, [conversationId, isFocused, markReadAsync, setVoiceNoteRuns])
+
+  // Voice-note auto-advance: debounced so status ticks don't compete with scroll.
+  useEffect(() => {
+    if (!isFocused) return
+    const timer = setTimeout(() => {
+      setVoiceNoteRuns(buildVoiceNoteRuns(messagesData?.messages ?? []))
+    }, 800)
+    return () => clearTimeout(timer)
+  }, [isFocused, messagesData?.messages, setVoiceNoteRuns])
 
   useEffect(() => {
     return () => {
@@ -428,8 +451,16 @@ export default function ChatScreen() {
 
   const rawMessages = messagesData?.messages ?? []
   const searchActive = searchTerm.trim().length >= 2
+  const structureKey = chatListStructureKey(rawMessages)
 
   const chatListItemsRef = useRef<ChatListItem[]>([])
+  const structuredItems = useMemo(() => {
+    if (searchActive) return null
+    return buildChatListItems(rawMessages)
+    // Rebuild structure only when layout/order fields change, not status ticks.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [structureKey, searchActive])
+
   const displayChatListItems = useMemo((): ChatListItem[] => {
     const built = searchActive
       ? [...(searchHits ?? [])].reverse().map((message) => ({
@@ -438,28 +469,17 @@ export default function ChatScreen() {
           message,
           layoutHeight: estimateChatMessageRowHeight(message),
         }))
-      : buildChatListItems(rawMessages)
-    const stabilized = stabilizeChatListItems(chatListItemsRef.current, built)
+      : (structuredItems ?? [])
+    const hydrated = searchActive ? built : hydrateChatListItems(built, rawMessages)
+    const stabilized = stabilizeChatListItems(chatListItemsRef.current, hydrated)
     chatListItemsRef.current = stabilized
     return stabilized
-  }, [rawMessages, searchHits, searchActive])
+  }, [structuredItems, rawMessages, searchHits, searchActive])
 
   const chatListItems = displayChatListItems
 
   useEffect(() => {
     resetChatFab()
-  }, [conversationId])
-
-  useEffect(() => {
-    let cancelled = false
-    const snapshot = messagesData?.messages ?? []
-    void ensureMediaIndexLoaded().then(() => {
-      if (cancelled) return
-      warmMediaDisplayCacheFromMessages(snapshot)
-    })
-    return () => {
-      cancelled = true
-    }
   }, [conversationId])
 
   useEffect(() => {
@@ -512,6 +532,7 @@ export default function ChatScreen() {
                 animated: false,
                 viewPosition: 0.5,
                 maxRetries: 1,
+                items: chatListItemsRef.current,
               })
             })
             return
