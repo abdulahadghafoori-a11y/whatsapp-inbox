@@ -8,6 +8,7 @@
       "developmentClient": true,
       "distribution": "internal",
       "env": {
+        "APP_VARIANT": "development",
         "SENTRY_DISABLE_AUTO_UPLOAD": "true",
         "EXPO_PUBLIC_API_URL": "http://192.168.100.25:3001",
         "EXPO_PUBLIC_SOCKET_URL": "http://192.168.100.25:3001"
@@ -25,6 +26,7 @@
     "production": {
       "autoIncrement": true,
       "distribution": "internal",
+      "prebuildCommand": "npx expo prebuild --platform android --clean",
       "android": {
         "image": "latest",
         "buildType": "apk"
