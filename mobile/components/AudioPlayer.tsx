@@ -20,6 +20,7 @@ import { useGlobalAudioStore } from '@/stores/globalAudioStore'
 import { useAudioPlayerState } from '@/hooks/useAudioPlayerState'
 import { useAudioDuration } from '@/hooks/useAudioDuration'
 import { getAudioDuration } from '@/lib/audioDurationCache'
+import { mediaDisplayCache } from '@/lib/mediaDisplayCache'
 import { resolveUploadUri } from '@/lib/uploadUri'
 import { PlaybackSpeedButton } from '@/components/PlaybackSpeedButton'
 import { MessageMeta } from '@/components/MessageMeta'
@@ -152,7 +153,9 @@ function AudioPlayerBase({
   const registerTrackResolver = useGlobalAudioStore((s) => s.registerTrackResolver)
   const unregisterTrackResolver = useGlobalAudioStore((s) => s.unregisterTrackResolver)
 
-  const probedDurationMs = useAudioDuration(uri, messageId, !isActive)
+  const sessionAudio = mediaDisplayCache.get(messageId)
+  const sourceUri = sessionAudio?.type === 'audio' ? sessionAudio.uri : uri
+  const probedDurationMs = useAudioDuration(sourceUri, messageId, !isActive)
 
   const trackRef = useRef<View>(null)
   const trackWidthRef = useRef(0)
@@ -212,12 +215,25 @@ function AudioPlayerBase({
     variant: 'inbound' | 'outbound'
   } | null> {
     let playUri: string | null = null
+    const cached = mediaDisplayCache.get(messageId)
+    if (cached?.type === 'audio' && cached.uri) {
+      playUri = resolveUploadUri(cached.uri)
+    }
     if (resolvePlaybackUri) {
       const resolved = await resolvePlaybackUri()
       if (resolved) playUri = resolveUploadUri(resolved)
     }
-    if (!playUri && uri) playUri = resolveUploadUri(uri)
+    if (!playUri && sourceUri) playUri = resolveUploadUri(sourceUri)
     if (!playUri) return null
+    if (playUri.startsWith('file://') || playUri.startsWith('/')) {
+      mediaDisplayCache.set(messageId, {
+        uri: playUri,
+        width: 0,
+        height: 0,
+        type: 'audio',
+        durationMs: durationMsRef.current > 0 ? durationMsRef.current : undefined,
+      })
+    }
     return { uri: playUri, messageId, conversationId, variant }
   }
 

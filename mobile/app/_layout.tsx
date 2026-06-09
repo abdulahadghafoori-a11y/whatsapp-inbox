@@ -101,7 +101,10 @@ function AuthGate() {
         <Stack.Screen name="index" options={{ headerShown: false }} />
         <Stack.Screen name="(auth)" />
         <Stack.Screen name="(tabs)" options={{ animation: 'fade' }} />
-        <Stack.Screen name="conversation" options={stackTransitionOptions} />
+        <Stack.Screen
+          name="conversation"
+          options={{ ...stackTransitionOptions, detachInactiveScreens: false }}
+        />
         <Stack.Screen name="search" options={{ headerShown: false, ...stackTransitionOptions }} />
       </Stack>
     </>

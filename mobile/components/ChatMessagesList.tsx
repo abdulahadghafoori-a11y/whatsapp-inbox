@@ -119,6 +119,7 @@ export type ChatMessagesListProps = {
   onDismissSearch: () => void
   onStickyDateChange: (label: string) => void
   onScrollOffset: (offsetY: number) => void
+  onAnchorMessageChange?: (messageId: string | null) => void
   onReply: (m: Message) => void
   onReplyQuotePress: (messageId: string) => void
   onSwipeOpen: (messageId: string, ref: Swipeable | null) => void
@@ -141,6 +142,7 @@ function ChatMessagesListBase({
   onDismissSearch,
   onStickyDateChange,
   onScrollOffset,
+  onAnchorMessageChange,
   onReply,
   onReplyQuotePress,
   onSwipeOpen,
@@ -160,6 +162,7 @@ function ChatMessagesListBase({
     ({ viewableItems }: { viewableItems: ViewToken[] }) => {
       let topIndex = -1
       let topDate: string | null = null
+      let anchorMessageId: string | null = null
 
       // Defer media bookkeeping (presign batching, download sync) off the scroll
       // frame so fast flings stay at 60fps; the sticky-date update stays sync.
@@ -182,8 +185,11 @@ function ChatMessagesListBase({
         } else if (row.kind === 'message') {
           topIndex = token.index
           topDate = row.message.sentAt
+          anchorMessageId = row.message.id
         }
       }
+
+      onAnchorMessageChange?.(anchorMessageId)
 
       if (!topDate) return
       const label = formatDateLabel(topDate)
@@ -191,7 +197,7 @@ function ChatMessagesListBase({
       stickyDateRef.current = label
       onStickyDateChange(label)
     },
-    [onStickyDateChange, queryClient],
+    [onAnchorMessageChange, onStickyDateChange, queryClient],
   )
 
   const onViewableItemsChangedRef = useRef(onViewableItemsChanged)
@@ -312,6 +318,7 @@ function chatMessagesListEqual(prev: ChatMessagesListProps, next: ChatMessagesLi
     prev.onDismissSearch === next.onDismissSearch &&
     prev.onStickyDateChange === next.onStickyDateChange &&
     prev.onScrollOffset === next.onScrollOffset &&
+    prev.onAnchorMessageChange === next.onAnchorMessageChange &&
     prev.onReply === next.onReply &&
     prev.onReplyQuotePress === next.onReplyQuotePress &&
     prev.onSwipeOpen === next.onSwipeOpen &&

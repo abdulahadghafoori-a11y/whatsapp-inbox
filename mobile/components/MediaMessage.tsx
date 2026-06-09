@@ -221,7 +221,11 @@ function MediaMessageBase({
 
   useEffect(() => {
     if (!hookDisplayUrl) return
-    if (message.type !== 'image' && message.type !== 'sticker' && message.type !== 'video') {
+    if (
+      message.type !== 'image' &&
+      message.type !== 'sticker' &&
+      message.type !== 'video'
+    ) {
       return
     }
     mediaDisplayCache.set(message.id, {
@@ -241,6 +245,21 @@ function MediaMessageBase({
     sessionDisplay?.height,
     sessionDisplay?.thumbnailUri,
   ])
+
+  useEffect(() => {
+    if (message.type !== 'audio' || !effectivePlaybackUrl) return
+    const local =
+      effectivePlaybackUrl.startsWith('file://') ||
+      effectivePlaybackUrl.startsWith('/') ||
+      effectivePlaybackUrl.startsWith('content://')
+    if (!local) return
+    mediaDisplayCache.set(message.id, {
+      uri: effectivePlaybackUrl,
+      width: 0,
+      height: 0,
+      type: 'audio',
+    })
+  }, [effectivePlaybackUrl, message.id, message.type])
 
   const persistImageDimensions = useCallback(
     (width: number, height: number) => {

@@ -20,6 +20,7 @@ function AudioDurationProbeRunner({
     job.uri.startsWith('http://') || job.uri.startsWith('https://')
   const player = useAudioPlayer(job.uri, {
     updateInterval: 500,
+    // Local file:// probes must not call ExpoAsset.downloadAsync (R2 presign failures).
     downloadFirst: isRemote,
   })
   const status = useAudioPlayerStatus(player)

@@ -1,6 +1,7 @@
 import { resolveUploadUri } from '@/lib/uploadUri'
 import { getAudioDuration } from '@/lib/audioDurationCache'
-import { getCachedMediaUriSync } from '@/lib/messageMediaCache'
+import { mediaDisplayCache } from '@/lib/mediaDisplayCache'
+import { getCachedMediaUriSync, resolveCachedMediaUriSync } from '@/lib/messageMediaCache'
 
 type ProbeJob = { messageId: string; uri: string }
 
@@ -18,7 +19,11 @@ export function takeNextAudioDurationProbe(): ProbeJob | null {
     if (getAudioDuration(job.messageId) > 0) continue
     // Prefer the on-device blob if it's already cached so the probe never
     // re-downloads a copy that the media pipeline has (or will have) stored.
-    const cached = getCachedMediaUriSync(job.messageId)
+    const session = mediaDisplayCache.get(job.messageId)
+    const cached =
+      session?.type === 'audio'
+        ? session.uri
+        : resolveCachedMediaUriSync(job.messageId) ?? getCachedMediaUriSync(job.messageId)
     return { messageId: job.messageId, uri: resolveUploadUri(cached ?? job.uri) }
   }
   return null

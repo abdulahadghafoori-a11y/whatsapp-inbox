@@ -1,8 +1,11 @@
 /** Persists chat scroll + loaded window across screen unmounts (back navigation). */
 
 export type ChatState = {
-  scrollOffset: number
   messageLimit: number
+  /** Topmost visible message when leaving — stable across variable row heights. */
+  anchorMessageId: string | null
+  /** Pixel fallback when anchor row is not in the loaded window yet. */
+  scrollOffset: number
 }
 
 const chatStateMap = new Map<string, ChatState>()

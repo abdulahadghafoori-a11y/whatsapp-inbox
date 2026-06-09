@@ -105,7 +105,9 @@ import {
 import { formatDuration } from '@/lib/format'
 import { prepareMediaFileForUpload } from '@/lib/prepareUpload'
 import { cacheMediaFromLocalFile, ensureMediaIndexLoaded } from '@/lib/messageMediaCache'
+import { warmMediaDisplayCacheFromMessages } from '@/lib/mediaDisplayCache'
 import { chatStateCache } from '@/lib/chatStateCache'
+import { findMessageListIndex } from '@/lib/scrollToChatMessage'
 import { resolveUploadUri } from '@/lib/uploadUri'
 import { buildVoiceNoteRuns } from '@/lib/voiceNoteQueue'
 import {
@@ -214,6 +216,7 @@ export default function ChatScreen() {
   const voiceStartInFlight = useRef(false)
   const messagesListRef = useRef<FlatList<ChatListItem>>(null)
   const scrollOffsetRef = useRef(0)
+  const anchorMessageIdRef = useRef<string | null>(null)
   const scrollRestoredRef = useRef(false)
   const [stickyDateLabel, setStickyDateLabel] = useState('')
   const [showScrollFab, setShowScrollFab] = useState(false)
@@ -433,15 +436,24 @@ export default function ChatScreen() {
   }, [conversationId])
 
   useEffect(() => {
-    void ensureMediaIndexLoaded()
-  }, [conversationId])
+    let cancelled = false
+    void ensureMediaIndexLoaded().then(() => {
+      if (cancelled) return
+      warmMediaDisplayCacheFromMessages(messagesData?.messages ?? [])
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [conversationId, messagesData?.messages])
 
   useEffect(() => {
     scrollRestoredRef.current = false
+    anchorMessageIdRef.current = null
     return () => {
       chatStateCache.save(conversationId, {
-        scrollOffset: scrollOffsetRef.current,
         messageLimit: threadLimit,
+        anchorMessageId: anchorMessageIdRef.current,
+        scrollOffset: scrollOffsetRef.current,
       })
     }
   }, [conversationId, threadLimit])
@@ -449,13 +461,37 @@ export default function ChatScreen() {
   useEffect(() => {
     if (scrollRestoredRef.current || messagesPending) return
     const saved = chatStateCache.restore(conversationId)
-    if (!saved?.scrollOffset) return
-    scrollRestoredRef.current = true
-    const offset = saved.scrollOffset
-    requestAnimationFrame(() => {
-      messagesListRef.current?.scrollToOffset({ offset, animated: false })
-    })
-  }, [conversationId, messagesPending, chatListItems.length])
+    if (!saved) return
+
+    if (saved.anchorMessageId) {
+      const idx = findMessageListIndex(chatListItems, saved.anchorMessageId)
+      if (idx >= 0) {
+        scrollRestoredRef.current = true
+        requestAnimationFrame(() => {
+          messagesListRef.current?.scrollToIndex({
+            index: idx,
+            animated: false,
+            viewPosition: 0.5,
+          })
+        })
+        return
+      }
+    }
+
+    if (saved.scrollOffset > 0) {
+      scrollRestoredRef.current = true
+      requestAnimationFrame(() => {
+        messagesListRef.current?.scrollToOffset({
+          offset: saved.scrollOffset,
+          animated: false,
+        })
+      })
+    }
+  }, [conversationId, messagesPending, chatListItems])
+
+  const onAnchorMessageChange = useCallback((messageId: string | null) => {
+    anchorMessageIdRef.current = messageId
+  }, [])
 
   const onStickyDateChange = useCallback((label: string) => {
     if (label === stickyDateRef.current) return
@@ -1128,6 +1164,7 @@ export default function ChatScreen() {
               onDismissSearch={dismissChatSearchStable}
               onStickyDateChange={onStickyDateChange}
               onScrollOffset={onMessagesScroll}
+              onAnchorMessageChange={onAnchorMessageChange}
               onReply={onReplyToMessage}
               onReplyQuotePress={scrollToQuotedMessage}
               onSwipeOpen={onMessageSwipeOpen}

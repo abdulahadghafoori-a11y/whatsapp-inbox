@@ -3,5 +3,14 @@ import { stackTransitionOptions } from '@/lib/navigation'
 
 /** Full-screen chat over tabs — entire tab UI slides away as one card. */
 export default function ConversationLayout() {
-  return <Stack screenOptions={{ headerShown: false, ...stackTransitionOptions }} />
+  return (
+    <Stack
+      screenOptions={{
+        headerShown: false,
+        ...stackTransitionOptions,
+        // Keep chat screens mounted when navigating back — preserves list + media state.
+        detachInactiveScreens: false,
+      }}
+    />
+  )
 }
