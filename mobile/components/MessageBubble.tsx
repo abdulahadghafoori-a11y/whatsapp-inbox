@@ -14,6 +14,8 @@ import { outboundFailureLabel } from '@/lib/mediaSendErrors'
 import { messageRenderEqual } from '@/lib/messageRenderEqual'
 import { canForwardMediaMessage } from '@/lib/messageForward'
 import { MESSAGE_LONG_PRESS_MS } from '@/lib/chatLongPress'
+import { Avatar } from '@/components/Avatar'
+import type { MessageGroupPosition } from '@/lib/chatListItems'
 import type { Message } from '@/types'
 
 // App is portrait-locked, so the bubble max width is constant — avoid a
@@ -49,10 +51,16 @@ function MessageBubbleBase({
   onForward,
   onReplyQuotePress,
   highlight,
+  showAvatar,
+  showTail = true,
+  groupPosition,
 }: {
   message: Message
   contactName: string
   contactAvatarUrl?: string | null
+  showAvatar?: boolean
+  showTail?: boolean
+  groupPosition?: MessageGroupPosition
   onRetry?: (m: Message) => void
   onLongPress?: (m: Message) => void
   onForward?: (m: Message) => void
@@ -91,13 +99,19 @@ function MessageBubbleBase({
   const showForward = !!onForward && showMediaForwardArrow(message)
   const triggerLongPress = onLongPress ? () => onLongPress(message) : undefined
 
+  const groupedTop = groupPosition === 'middle' || groupPosition === 'last'
+  const rowMargin = groupedTop ? 'mt-0.5' : 'my-0.5'
+
+  const outboundTail = showTail ? 'rounded-br-sm' : 'rounded-r-2xl'
+  const inboundTail = showTail ? 'rounded-bl-sm' : 'rounded-l-2xl'
+
   const bubbleClass = failed || stalePending
-    ? 'rounded-2xl rounded-br-sm border border-[#e8b4b4] bg-[#f5d5d5] dark:border-[#7a3a3a] dark:bg-[#5a2a2a]'
+    ? `rounded-2xl ${outboundTail} border border-[#e8b4b4] bg-[#f5d5d5] dark:border-[#7a3a3a] dark:bg-[#5a2a2a]`
     : sending
-      ? 'rounded-2xl rounded-br-sm bg-wa-light/90 opacity-95 dark:bg-wa-bubbleOut/90'
+      ? `rounded-2xl ${outboundTail} bg-wa-light/90 opacity-95 dark:bg-wa-bubbleOut/90`
       : outbound
-        ? 'rounded-2xl rounded-br-sm bg-wa-light dark:bg-wa-bubbleOut'
-        : 'rounded-2xl rounded-bl-sm border border-black/[0.04] bg-white dark:border-transparent dark:bg-wa-bubbleIn'
+        ? `rounded-2xl ${outboundTail} bg-wa-light dark:bg-wa-bubbleOut`
+        : `rounded-2xl ${inboundTail} border border-black/[0.04] bg-white dark:border-transparent dark:bg-wa-bubbleIn`
 
   const echoFromWaApp =
     outbound &&
@@ -116,9 +130,18 @@ function MessageBubbleBase({
     />
   )
 
+  const avatarSlot =
+    !outbound && showAvatar ? (
+      <View className="mr-1.5 w-7 self-end">
+        <Avatar name={contactName} size={28} />
+      </View>
+    ) : !outbound ? (
+      <View className="mr-1.5 w-7" />
+    ) : null
+
   if (deleted) {
     return (
-      <View className={`my-0.5 px-1.5 ${outbound ? 'items-end' : 'items-start'}`}>
+      <View className={`${rowMargin} px-1.5 ${outbound ? 'items-end' : 'items-start'}`}>
         <View
           style={{ maxWidth: bubbleMaxW }}
           className="rounded-2xl bg-neutral-100 px-3 py-2 dark:bg-wa-bubbleIn"
@@ -131,8 +154,9 @@ function MessageBubbleBase({
 
   if (isSticker) {
     return (
-      <View className={`my-0.5 px-1.5 ${outbound ? 'items-end' : 'items-start'}`}>
+      <View className={`${rowMargin} px-1.5 ${outbound ? 'items-end' : 'items-start'}`}>
         <View className={`flex-row ${outbound ? 'justify-end' : 'justify-start'}`}>
+          {avatarSlot}
           {outbound && showForward ? (
             <MessageForwardButton onPress={() => onForward!(message)} />
           ) : null}
@@ -187,8 +211,9 @@ function MessageBubbleBase({
   }
 
   return (
-    <View className={`my-0.5 px-1.5 ${outbound ? 'items-end' : 'items-start'}`}>
+    <View className={`${rowMargin} px-1.5 ${outbound ? 'items-end' : 'items-start'}`}>
       <View className={`flex-row ${outbound ? 'justify-end' : 'justify-start'}`}>
+      {avatarSlot}
       {outbound && showForward ? (
         <MessageForwardButton onPress={() => onForward!(message)} />
       ) : null}
@@ -302,6 +327,9 @@ const styles = StyleSheet.create({
 
 export const MessageBubble = memo(MessageBubbleBase, (prev, next) =>
   prev.highlight === next.highlight &&
+  prev.showAvatar === next.showAvatar &&
+  prev.showTail === next.showTail &&
+  prev.groupPosition === next.groupPosition &&
   prev.contactName === next.contactName &&
   prev.contactAvatarUrl === next.contactAvatarUrl &&
   messageRenderEqual(prev.message, next.message) &&

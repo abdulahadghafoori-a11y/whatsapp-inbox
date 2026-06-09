@@ -3,6 +3,7 @@ import { api } from '@/services/api'
 import { captureError } from '@/lib/errorReporting'
 import { ensureDbReady } from '@/lib/db/client'
 import { getSyncValue, setSyncValue } from '@/lib/db/repo'
+import { noteInboundMessageSignal, pollBurstModeEnd } from '@/lib/chatBurstMode'
 import { applyChanges } from './applyChanges'
 import { SYNC_CURSOR_KEY, type SyncResponse } from './types'
 
@@ -25,6 +26,8 @@ let pulling = false
 let queued = false
 let boundSocket: Socket | null = null
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
+let statusDebounceTimer: ReturnType<typeof setTimeout> | null = null
+const STATUS_SYNC_DEBOUNCE_MS = 500
 const boundHandlers = new Map<string, () => void>()
 
 async function getCursor(): Promise<number> {
@@ -73,15 +76,24 @@ export async function syncNow(): Promise<void> {
     captureError(err, { scope: 'sync.pull' })
   } finally {
     pulling = false
+    pollBurstModeEnd()
   }
 }
 
-export function scheduleSync(delayMs = 150): void {
+export function scheduleSync(delayMs = 400): void {
   if (debounceTimer) clearTimeout(debounceTimer)
   debounceTimer = setTimeout(() => {
     debounceTimer = null
     void syncNow()
   }, delayMs)
+}
+
+function scheduleStatusSync(): void {
+  if (statusDebounceTimer) clearTimeout(statusDebounceTimer)
+  statusDebounceTimer = setTimeout(() => {
+    statusDebounceTimer = null
+    void syncNow()
+  }, STATUS_SYNC_DEBOUNCE_MS)
 }
 
 /**
@@ -98,12 +110,20 @@ export async function fastForwardCursorToHead(): Promise<void> {
 }
 
 /** Bind socket signals so any server change triggers a debounced pull. */
+function handlerForSignal(event: string): () => void {
+  return () => {
+    if (event === 'new_message') noteInboundMessageSignal()
+    if (event === 'message_status') scheduleStatusSync()
+    else scheduleSync()
+  }
+}
+
 export function bindSyncToSocket(socket: Socket): void {
   if (boundSocket === socket) return
   unbindSync()
   boundSocket = socket
   for (const event of PULL_SIGNALS) {
-    const handler = () => scheduleSync()
+    const handler = handlerForSignal(event)
     boundHandlers.set(event, handler)
     socket.on(event, handler)
   }
@@ -117,6 +137,10 @@ export function unbindSync(): void {
   if (debounceTimer) {
     clearTimeout(debounceTimer)
     debounceTimer = null
+  }
+  if (statusDebounceTimer) {
+    clearTimeout(statusDebounceTimer)
+    statusDebounceTimer = null
   }
   if (boundSocket) {
     // Remove only our own handlers so other socket consumers are untouched.

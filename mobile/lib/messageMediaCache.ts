@@ -104,30 +104,6 @@ async function storageDirForConversation(conversationId: string): Promise<string
   return ARCHIVE_DIR
 }
 
-async function persistMessageLocalCacheUri(
-  messageId: string,
-  localUri: string,
-): Promise<void> {
-  const { patchLocalMessage } = await import('@/lib/db/repo')
-  await patchLocalMessage(messageId, { localCacheUri: localUri })
-}
-
-async function clearMessageLocalCacheUri(messageId: string): Promise<void> {
-  const { patchLocalMessage } = await import('@/lib/db/repo')
-  await patchLocalMessage(messageId, { localCacheUri: null })
-}
-
-async function backfillLocalCacheUrisFromIndex(index: MediaIndexV2): Promise<void> {
-  const { getMessageById, patchLocalMessage } = await import('@/lib/db/repo')
-  for (const [messageId, blobId] of Object.entries(index.messageToBlob)) {
-    const uri = index.blobs[blobId]?.localUri
-    if (!uri) continue
-    const existing = await getMessageById(messageId)
-    if (existing?.localCacheUri) continue
-    await patchLocalMessage(messageId, { localCacheUri: uri })
-  }
-}
-
 async function loadIndex(): Promise<MediaIndexV2> {
   if (indexMem) return indexMem
   if (!indexLoad) {
@@ -223,9 +199,6 @@ async function reconcileStaleBlobs(index: MediaIndexV2) {
   if (changed) await saveIndex(index)
   if (removedMessageIds.length) {
     notifyMessageCacheListeners(removedMessageIds)
-    for (const messageId of removedMessageIds) {
-      void clearMessageLocalCacheUri(messageId)
-    }
   }
 }
 
@@ -234,7 +207,6 @@ export async function ensureMediaIndexLoaded(): Promise<MediaIndexV2> {
   if (!reconcilePromise) {
     reconcilePromise = reconcileStaleBlobs(index).then(async () => {
       await enforceMediaCacheBudget(index)
-      void backfillLocalCacheUrisFromIndex(index).catch(() => {})
       if (indexMem) notifyMessageCacheListeners(Object.keys(indexMem.messageToBlob))
     })
   }
@@ -253,7 +225,7 @@ async function fileSize(uri: string): Promise<number> {
 
 /**
  * Bound archive-tier media growth: permanent + legacy blobs are never evicted.
- * When archive exceeds budget, evict oldest archive blobs and clear SQLite paths.
+ * When archive exceeds budget, evict oldest archive blobs from the index.
  */
 export async function enforceMediaCacheBudget(index?: MediaIndexV2): Promise<void> {
   const idx = index ?? (await loadIndex())
@@ -295,9 +267,6 @@ export async function enforceMediaCacheBudget(index?: MediaIndexV2): Promise<voi
   if (changed) {
     await saveIndex(idx)
     notifyMessageCacheListeners(evictedMessageIds)
-    for (const messageId of evictedMessageIds) {
-      void clearMessageLocalCacheUri(messageId)
-    }
   }
 }
 
@@ -514,7 +483,6 @@ async function linkMessageToBlob(
   validatedBlobs.add(blobId)
   await saveIndex(index)
   notifyMessageCacheListeners([messageId])
-  void persistMessageLocalCacheUri(messageId, withThumb.localUri)
   return withThumb.localUri
 }
 
@@ -534,7 +502,6 @@ export async function getCachedMediaEntry(messageId: string) {
   validatedBlobs.delete(blobId)
   await saveIndex(index)
   notifyMessageCacheListeners([messageId])
-  void clearMessageLocalCacheUri(messageId)
   return null
 }
 
@@ -574,8 +541,6 @@ export async function transferMessageMediaCache(
   delete index.messageToBlob[fromMessageId]
   await saveIndex(index)
   notifyMessageCacheListeners([fromMessageId, toMessageId])
-  const uri = index.blobs[blobId]?.localUri
-  if (uri) void persistMessageLocalCacheUri(toMessageId, uri)
 }
 
 /** Point message at an existing blob (same S3 key / same file hash). */
@@ -591,7 +556,6 @@ export async function aliasMessageToBlob(
   validatedBlobs.add(blobId)
   await saveIndex(index)
   notifyMessageCacheListeners([messageId])
-  void persistMessageLocalCacheUri(messageId, record.localUri)
   return record.localUri
 }
 

@@ -66,6 +66,7 @@ export function ChatImageMedia({
     >
       <Image
         source={{ uri }}
+        cachePolicy="disk"
         style={[
           styles.image,
           {

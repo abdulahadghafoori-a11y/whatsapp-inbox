@@ -1,6 +1,7 @@
-import { InteractionManager } from 'react-native'
+import type { QueryClient } from '@tanstack/react-query'
 import { api } from '@/services/api'
 import { mediaApiPath } from '@/lib/mediaApi'
+import { presignViaBatch } from '@/lib/mediaPresignBatch'
 import { isOnline } from '@/lib/network'
 import { isAutoDownloadAllowed } from '@/lib/mediaAutoDownload'
 import {
@@ -14,7 +15,7 @@ import {
   resolveCachedMediaUriSync,
 } from '@/lib/messageMediaCache'
 import { hashMediaFile } from '@/lib/mediaContentHash'
-import { isHeavyMediaType, isStickerType } from '@/lib/messageMediaKind'
+import { needsFileCacheSync } from '@/lib/messageMediaKind'
 import { resolveMessageLocalMediaUri } from '@/lib/messageLocalMedia'
 import type { Message, MessageType } from '@/types'
 
@@ -38,6 +39,11 @@ const downloadingIds = new Set<string>()
 const downloadListeners = new Map<string, Set<() => void>>()
 let activeSyncs = 0
 const MAX_CONCURRENT_SYNCS = 2
+let mediaSyncQueryClient: QueryClient | null = null
+
+export function setMediaSyncQueryClient(qc: QueryClient | null): void {
+  mediaSyncQueryClient = qc
+}
 
 function inflightKey(message: SyncableMediaMessage) {
   return message.mediaUrl ?? `msg:${message.id}`
@@ -86,6 +92,14 @@ function isAlreadyCachedSync(message: SyncableMediaMessage): boolean {
 }
 
 async function presignedUrlForKey(s3Key: string, messageId: string): Promise<string | null> {
+  const qc = mediaSyncQueryClient
+  if (qc) {
+    try {
+      return await presignViaBatch(qc, s3Key, messageId)
+    } catch {
+      return null
+    }
+  }
   try {
     const res = await api.get<{ url: string }>(mediaApiPath(s3Key, messageId))
     return res.data.url
@@ -183,6 +197,7 @@ export function queueMessageMediaSync(
   opts?: { force?: boolean },
 ): void {
   if (!isCacheableMedia(message)) return
+  if (!needsFileCacheSync(message.type)) return
   if (!opts?.force && queuedIds.has(message.id)) return
 
   void ensureMediaIndexLoaded().then(() => {
@@ -199,6 +214,7 @@ export async function syncMessageMedia(
   opts?: { force?: boolean },
 ): Promise<string | null> {
   if (!isCacheableMedia(message)) return null
+  if (!opts?.force && !needsFileCacheSync(message.type)) return null
   if (!opts?.force && !(await isAutoDownloadAllowed(message))) return null
 
   await ensureMediaIndexLoaded()
@@ -219,28 +235,14 @@ export async function syncMessageMedia(
   return promise
 }
 
-/** Visible viewport order (WhatsApp-style) — no type-based priority. */
+/** Queue file-cache downloads for visible video/audio/document rows only. */
 export function syncVisibleMessageMedia(messages: SyncableMediaMessage[]) {
   const seen = new Set<string>()
   for (const message of messages) {
     if (seen.has(message.id)) continue
     if (!isCacheableMedia(message)) continue
-    if (!isHeavyMediaType(message.type) && !isStickerType(message.type)) continue
+    if (!needsFileCacheSync(message.type)) continue
     seen.add(message.id)
     queueMessageMediaSync(message)
   }
-}
-
-/** Small prefetch window around visible rows only. */
-export function syncConversationMedia(
-  messages: SyncableMediaMessage[],
-  opts?: { maxItems?: number },
-) {
-  const maxItems = opts?.maxItems ?? 6
-  const cacheable = messages.filter(isCacheableMedia).slice(0, maxItems)
-
-  const task = InteractionManager.runAfterInteractions(() => {
-    syncVisibleMessageMedia(cacheable)
-  })
-  return () => task.cancel()
 }

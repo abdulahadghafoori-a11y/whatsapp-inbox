@@ -8,8 +8,8 @@ type LocalMediaMessage = Pick<
 >
 
 /**
- * Synchronous best local URI for a message: optimistic preview → SQLite path → disk index.
- * The SQLite path is available on first render after download (no async index hydration).
+ * Synchronous best local URI: optimistic preview → legacy SQLite path → disk index.
+ * On-device blobs are indexed in messageMediaCache (not written back to SQLite).
  */
 export function resolveMessageLocalMediaUri(message: LocalMediaMessage): string | null {
   if (message.localPreviewUri) return resolveUploadUri(message.localPreviewUri)

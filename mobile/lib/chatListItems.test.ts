@@ -1,4 +1,8 @@
 import { describe, expect, it } from 'vitest'
+import {
+  CHAT_DATE_ROW_HEIGHT,
+  estimateChatMessageRowHeight,
+} from '@/lib/chatListItemLayout'
 import { stabilizeChatListItems, type ChatListItem } from '@/lib/chatListItems'
 import type { Message } from '@/types'
 
@@ -27,6 +31,7 @@ const messageRow = (m: Message): ChatListItem => ({
   kind: 'message',
   id: m.id,
   message: m,
+  layoutHeight: estimateChatMessageRowHeight(m),
 })
 
 const dateRow = (id: string, label: string): ChatListItem => ({
@@ -34,6 +39,7 @@ const dateRow = (id: string, label: string): ChatListItem => ({
   id,
   dateIso: '2026-01-01T12:00:00.000Z',
   label,
+  layoutHeight: CHAT_DATE_ROW_HEIGHT,
 })
 
 describe('stabilizeChatListItems', () => {
@@ -65,5 +71,15 @@ describe('stabilizeChatListItems', () => {
     const next = [messageRow(msg('a', { body: 'new' }))]
     const out = stabilizeChatListItems(prev, next)
     expect(out[0]).toBe(next[0])
+  })
+})
+
+describe('estimateChatMessageRowHeight', () => {
+  it('returns a taller row for images with intrinsic dimensions', () => {
+    const text = estimateChatMessageRowHeight(msg('t'))
+    const image = estimateChatMessageRowHeight(
+      msg('i', { type: 'image', mediaWidth: 800, mediaHeight: 600 }),
+    )
+    expect(image).toBeGreaterThan(text)
   })
 })

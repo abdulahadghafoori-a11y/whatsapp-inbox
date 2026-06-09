@@ -3,7 +3,7 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import axios from 'axios'
 import { api } from '@/services/api'
 import { isOnline } from '@/lib/network'
-import { enqueueTextSend } from '@/lib/offlineQueue'
+import { enqueueLocationSend, enqueueTextSend } from '@/lib/offlineQueue'
 import { enqueueMediaSend } from '@/lib/offlineMediaQueue'
 import { postMediaMessage } from '@/lib/postMediaMessage'
 import type { MediaSendPhase } from '@/lib/mediaSendPhase'
@@ -339,9 +339,11 @@ export function useSendText(conversationId: string) {
 }
 
 export function useSendLocation(conversationId: string) {
+  const optimisticIdRef = useRef('')
   return useMutation({
     onMutate: async (input: SendLocationInput) => {
       const optimisticId = newPendingId('location')
+      optimisticIdRef.current = optimisticId
       const metadata = {
         latitude: input.latitude,
         longitude: input.longitude,
@@ -372,22 +374,45 @@ export function useSendLocation(conversationId: string) {
       await applyMessageToConversation(optimistic)
       return { optimisticId }
     },
-    mutationFn: async (input: SendLocationInput) => {
-      const res = await api.post<{ message: Message }>(
-        `/conversations/${conversationId}/messages`,
-        {
-          type: 'location' as const,
+    mutationFn: async (input: SendLocationInput): Promise<Message> => {
+      const queueLocal = () =>
+        enqueueLocationSend({
+          id: optimisticIdRef.current,
+          conversationId,
           latitude: input.latitude,
           longitude: input.longitude,
-          ...(input.name ? { name: input.name } : {}),
-          ...(input.address ? { address: input.address } : {}),
-          ...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {}),
-        },
-        { headers: { 'Content-Type': 'application/json' } },
-      )
-      return normalizeMessage(res.data.message as Message & Record<string, unknown>)
+          name: input.name,
+          address: input.address,
+          replyToMessageId: input.replyToMessageId,
+        })
+
+      const online = await isOnline()
+      if (!online) return queueLocal()
+
+      try {
+        const res = await api.post<{ message: Message }>(
+          `/conversations/${conversationId}/messages`,
+          {
+            type: 'location' as const,
+            latitude: input.latitude,
+            longitude: input.longitude,
+            ...(input.name ? { name: input.name } : {}),
+            ...(input.address ? { address: input.address } : {}),
+            ...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {}),
+          },
+          { headers: { 'Content-Type': 'application/json' } },
+        )
+        return normalizeMessage(res.data.message as Message & Record<string, unknown>)
+      } catch (err) {
+        if (isNetworkError(err)) return queueLocal()
+        throw err
+      }
     },
     onSuccess: async (message, _input, ctx) => {
+      if (message.sendPhase === 'queued' || message.id.startsWith('pending-')) {
+        await putLocalMessage(message)
+        return
+      }
       await replaceLocalMessage(ctx?.optimisticId ?? '', message)
       await applyMessageToConversation(message)
       scheduleSync()
@@ -766,7 +791,40 @@ export function useResendMessage(conversationId: string) {
 }
 
 export function useSendTemplate(conversationId: string) {
+  const optimisticIdRef = useRef('')
   return useMutation({
+    onMutate: async (input: {
+      templateName: string
+      languageCode: string
+      components?: unknown[]
+    }) => {
+      const optimisticId = newPendingId('template')
+      optimisticIdRef.current = optimisticId
+      const optimistic: Message = {
+        id: optimisticId,
+        conversationId,
+        waMessageId: null,
+        sentBy: null,
+        direction: 'outbound',
+        type: 'text',
+        body: `Template: ${input.templateName}`,
+        mediaUrl: null,
+        mediaMimeType: null,
+        mediaFilename: null,
+        mediaStatus: null,
+        status: 'pending',
+        errorMessage: null,
+        sentAt: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+        metadata: {
+          templateName: input.templateName,
+          languageCode: input.languageCode,
+        },
+      }
+      await putLocalMessage(optimistic)
+      await applyMessageToConversation(optimistic)
+      return { optimisticId }
+    },
     mutationFn: async (input: {
       templateName: string
       languageCode: string
@@ -778,10 +836,15 @@ export function useSendTemplate(conversationId: string) {
       )
       return normalizeMessage(res.data.message as Message & Record<string, unknown>)
     },
-    onSuccess: async (message) => {
-      await putLocalMessage(message)
+    onSuccess: async (message, _input, ctx) => {
+      await replaceLocalMessage(ctx?.optimisticId ?? '', message)
       await applyMessageToConversation(message)
       scheduleSync()
+    },
+    onError: async (_err, _input, ctx) => {
+      if (ctx?.optimisticId) {
+        await patchLocalMessage(ctx.optimisticId, { status: 'failed' })
+      }
     },
   })
 }

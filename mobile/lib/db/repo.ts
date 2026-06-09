@@ -1,8 +1,16 @@
 import { useCallback, useEffect } from 'react'
-import type { ConversationListItem, Message } from '@/types'
+import { mergeMessageStatus } from '@/lib/messageStatus'
+import type { ConversationListItem, Message, MessageStatus } from '@/types'
 import type { InboxFilter } from '@/lib/inboxFilters'
 import { getRawDb, runExclusiveDb as runExclusiveDbWrite } from './client'
-import { clearLiveStores, useLiveStore } from './reactive'
+import { messageRenderEqual } from '@/lib/messageRenderEqual'
+import {
+  applyLiveStoreData,
+  clearLiveStores,
+  markThreadIncrementallyUpdated,
+  noteMessagesDirty,
+  useLiveStore,
+} from './reactive'
 
 const nowIso = () => new Date().toISOString()
 const bool = (v: boolean | undefined | null) => (v ? 1 : 0)
@@ -106,22 +114,68 @@ function messageValues(m: Message, seq?: number | null): (string | number | null
   ]
 }
 
+async function loadExistingMessagesForMerge(
+  db: ReturnType<typeof getRawDb>,
+  ids: string[],
+): Promise<Map<string, { status: string; payload: string }>> {
+  if (ids.length === 0) return new Map()
+  const placeholders = ids.map(() => '?').join(', ')
+  const existing = await db.getAllAsync<{ id: string; status: string; payload: string }>(
+    `SELECT id, status, payload FROM messages WHERE id IN (${placeholders})`,
+    ids,
+  )
+  return new Map(existing.map((row) => [row.id, row]))
+}
+
+function mergeIncomingMessage(existing: { status: string; payload: string } | undefined, m: Message): Message {
+  if (!existing) return m
+  let merged: Message = {
+    ...m,
+    status: mergeMessageStatus(existing.status as MessageStatus, m.status),
+  }
+  if (merged.direction !== 'outbound') return merged
+  try {
+    const prev = JSON.parse(existing.payload) as Message
+    if (prev.sendPhase && !merged.sendPhase && merged.status === 'pending') {
+      merged = { ...merged, sendPhase: prev.sendPhase }
+    }
+    if (prev.localPreviewUri && !merged.localPreviewUri) {
+      merged = { ...merged, localPreviewUri: prev.localPreviewUri }
+    }
+    if (prev.localCacheUri && !merged.localCacheUri) {
+      merged = { ...merged, localCacheUri: prev.localCacheUri }
+    }
+  } catch {
+    /* ignore corrupt payload */
+  }
+  return merged
+}
+
 async function upsertMessagesInTx(
   db: ReturnType<typeof getRawDb>,
   rows: Message[],
   seq?: number | null,
-): Promise<void> {
-  for (const m of rows) {
-    await db.runAsync(MESSAGE_UPSERT_SQL, messageValues(m, seq))
+): Promise<Message[]> {
+  const existingById = await loadExistingMessagesForMerge(
+    db,
+    rows.map((row) => row.id),
+  )
+  const mergedRows: Message[] = []
+  for (const row of rows) {
+    const merged = mergeIncomingMessage(existingById.get(row.id), row)
+    mergedRows.push(merged)
+    await db.runAsync(MESSAGE_UPSERT_SQL, messageValues(merged, seq))
   }
+  return mergedRows
 }
 
 /** Batched upsert of normalized messages (serialized — no nested transactions). */
 export async function upsertMessages(rows: Message[], seq?: number | null): Promise<void> {
   if (rows.length === 0) return
-  await runExclusiveDbWrite(async () => {
-    await upsertMessagesInTx(getRawDb(), rows, seq)
-  })
+  const merged = await runExclusiveDbWrite(async () =>
+    upsertMessagesInTx(getRawDb(), rows, seq),
+  )
+  noteMergedMessagesDirty(merged, { all: merged.length > 12 })
 }
 
 /* -------------------------------------------------------------------------- */
@@ -218,7 +272,8 @@ export async function applyChangeBatch(input: {
   const { messageUpserts, conversationUpserts, messageDeletes, conversationDeletes } = input
 
   for (const rows of chunk(messageUpserts, SYNC_CHUNK)) {
-    await runExclusiveDbWrite(() => upsertMessagesInTx(getRawDb(), rows))
+    const merged = await runExclusiveDbWrite(() => upsertMessagesInTx(getRawDb(), rows))
+    noteMergedMessagesDirty(merged, { all: merged.length > 12 })
   }
   for (const rows of chunk(conversationUpserts, SYNC_CHUNK)) {
     await runExclusiveDbWrite(() => upsertConversationsInTx(getRawDb(), rows))
@@ -229,6 +284,7 @@ export async function applyChangeBatch(input: {
       const placeholders = messageDeletes.map(() => '?').join(',')
       await db.runAsync(`DELETE FROM messages WHERE id IN (${placeholders})`, messageDeletes)
     })
+    noteMessagesDirty([], { all: true, starred: true })
   }
   if (conversationDeletes.length) {
     await runExclusiveDbWrite(async () => {
@@ -343,16 +399,23 @@ export async function patchLocalMessage(
   id: string,
   partial: Partial<Message>,
 ): Promise<void> {
-  await runExclusiveDbWrite(async () => {
+  const merged = await runExclusiveDbWrite(async () => {
     const db = getRawDb()
     const row = await db.getFirstAsync<{ payload: string }>(
       'SELECT payload FROM messages WHERE id = ?',
       [id],
     )
     const existing = parseMessagePayload(row?.payload)
-    if (!existing) return
-    await upsertMessagesInTx(db, [{ ...existing, ...partial }])
+    if (!existing) return null
+    const next = { ...existing, ...partial }
+    await upsertMessagesInTx(db, [next])
+    return next
   })
+  if (!merged) return
+  noteMessagesDirty([merged.conversationId], {
+    starred: 'starredAt' in partial,
+  })
+  tryIncrementalThreadPatch(merged.conversationId, merged)
 }
 
 /** Upsert a single normalized message (optimistic or server-confirmed). */
@@ -372,13 +435,15 @@ export async function replaceLocalMessage(
     const { transferMessageMediaCache } = await import('@/lib/messageMediaCache')
     await transferMessageMediaCache(optimisticId, message.id)
   }
-  await runExclusiveDbWrite(async () => {
+  const merged = await runExclusiveDbWrite(async () => {
     const db = getRawDb()
-    await upsertMessagesInTx(db, [message])
+    const rows = await upsertMessagesInTx(db, [message])
     if (optimisticId && optimisticId !== message.id) {
       await db.runAsync('DELETE FROM messages WHERE id = ?', [optimisticId])
     }
+    return rows
   })
+  noteMergedMessagesDirty(merged)
 }
 
 function parseConversationPayload(raw: string | null | undefined): ConversationListItem | null {
@@ -445,15 +510,15 @@ export async function applyMessageToConversation(message: Message): Promise<void
 
 /** Single write for optimistic outbound sends — message row + inbox preview together. */
 export async function putOptimisticOutboundMessage(message: Message): Promise<void> {
-  await runExclusiveDbWrite(async () => {
+  const merged = await runExclusiveDbWrite(async () => {
     const db = getRawDb()
-    await upsertMessagesInTx(db, [message])
+    const rows = await upsertMessagesInTx(db, [message])
     const row = await db.getFirstAsync<{ payload: string }>(
       'SELECT payload FROM conversations WHERE id = ?',
       [message.conversationId],
     )
     const conv = parseConversationPayload(row?.payload)
-    if (!conv) return
+    if (!conv) return rows
     await upsertConversationsInTx(db, [
       {
         ...conv,
@@ -465,7 +530,9 @@ export async function putOptimisticOutboundMessage(message: Message): Promise<vo
         lastMessageType: message.type,
       },
     ])
+    return rows
   })
+  noteMergedMessagesDirty(merged)
 }
 
 /** Hard-delete messages by id (tombstones already arrive as upserts with deletedAt). */
@@ -476,6 +543,7 @@ export async function deleteMessages(ids: string[]): Promise<void> {
     const placeholders = ids.map(() => '?').join(',')
     await db.runAsync(`DELETE FROM messages WHERE id IN (${placeholders})`, ids)
   })
+  noteMessagesDirty([], { all: true, starred: true })
 }
 
 /** Remove conversations (and their messages) from the device. */
@@ -598,6 +666,45 @@ const THREAD_CACHE_CAP = 60
 const INBOX_CACHE_CAP = 24
 
 const threadResultCache = new Map<string, Message[]>()
+
+function threadStoreKey(conversationId: string): string {
+  return `thread:${conversationId}`
+}
+
+/** Patch the in-memory thread window when the changed row is already visible. */
+function tryIncrementalThreadPatch(conversationId: string, message: Message): boolean {
+  const cached = threadResultCache.get(conversationId)
+  if (!cached) return false
+  const idx = cached.findIndex((m) => m.id === message.id)
+  if (idx < 0) return false
+
+  const prev = cached[idx]
+  if (messageRenderEqual(prev, message)) {
+    markThreadIncrementallyUpdated(conversationId)
+    return true
+  }
+
+  const next = cached.slice()
+  next[idx] = message
+  const stable = reuseArrayRef(cached, next)
+  threadResultCache.set(conversationId, stable)
+  applyLiveStoreData(threadStoreKey(conversationId), stable)
+  markThreadIncrementallyUpdated(conversationId)
+  return true
+}
+
+function noteMergedMessagesDirty(merged: Message[], opts?: { all?: boolean }): void {
+  noteMessagesDirty(
+    new Set(merged.map((m) => m.conversationId)),
+    {
+      all: opts?.all,
+      starred: merged.some((m) => m.starredAt != null),
+    },
+  )
+  for (const m of merged) {
+    tryIncrementalThreadPatch(m.conversationId, m)
+  }
+}
 
 async function readThreadMessages(conversationId: string, limit: number): Promise<Message[]> {
   const db = getRawDb()

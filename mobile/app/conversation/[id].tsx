@@ -77,7 +77,12 @@ import {
   useToggleMessageReaction,
   useToggleMessageStar,
 } from '@/hooks/useMessageFeatures'
-import { scrollToChatMessage } from '@/lib/scrollToChatMessage'
+import { flushOutboundQueue } from '@/lib/offlineQueue'
+import {
+  paginateUntilMessageVisible,
+  scrollToChatIndexWithRetry,
+  scrollToChatMessage,
+} from '@/lib/scrollToChatMessage'
 import {
   AssignSheet,
   AttributionSheet,
@@ -114,9 +119,15 @@ import {
   playWaFeedback,
   warmWaFeedbackSounds,
 } from '@/lib/waFeedbackSounds'
-import { ScrollToLatestButton } from '@/components/ScrollToLatestButton'
+import {
+  resetChatFab,
+  setChatFabUnread,
+  setChatFabVisible,
+} from '@/lib/chatFabState'
 import { useGlobalAudioStore } from '@/stores/globalAudioStore'
-import { ChatDatePill, ChatStickyDateBar } from '@/components/ChatDatePill'
+import { ChatDatePill } from '@/components/ChatDatePill'
+import { ChatScrollFab } from '@/components/ChatScrollFab'
+import { estimateChatMessageRowHeight } from '@/lib/chatListItemLayout'
 import {
   buildChatListItems,
   stabilizeChatListItems,
@@ -218,9 +229,15 @@ export default function ChatScreen() {
   const scrollOffsetRef = useRef(0)
   const anchorMessageIdRef = useRef<string | null>(null)
   const scrollRestoredRef = useRef(false)
-  const [stickyDateLabel, setStickyDateLabel] = useState('')
-  const [showScrollFab, setShowScrollFab] = useState(false)
-  const canLoadOlderRef = useRef(true)
+  const canLoadOlderRef = useRef(false)
+  const isAtBottomRef = useRef(true)
+  const fabUnreadRef = useRef(0)
+  const prevMessageCountRef = useRef(0)
+  const scrollRestoreInFlightRef = useRef(false)
+  const fetchOlderRef = useRef(fetchOlderMessages)
+  fetchOlderRef.current = fetchOlderMessages
+  const hasOlderRef = useRef(hasOlderMessages)
+  hasOlderRef.current = hasOlderMessages
   const [highlightMessageId, setHighlightMessageId] = useState<string | null>(null)
   const openMessageSwipeRef = useRef<Swipeable | null>(null)
   const retriedFailedMedia = useRef(new Set<string>())
@@ -409,42 +426,41 @@ export default function ChatScreen() {
     }
   }
 
+  const rawMessages = messagesData?.messages ?? []
+  const searchActive = searchTerm.trim().length >= 2
+
   const chatListItemsRef = useRef<ChatListItem[]>([])
-  const chatListItems = useMemo((): ChatListItem[] => {
-    const list =
-      searchTerm.trim().length >= 2
-        ? (searchHits ?? [])
-        : (messagesData?.messages ?? [])
-    const built =
-      searchTerm.trim().length >= 2
-        ? [...list].reverse().map((message) => ({
-            kind: 'message' as const,
-            id: message.id,
-            message,
-          }))
-        : buildChatListItems(list)
+  const displayChatListItems = useMemo((): ChatListItem[] => {
+    const built = searchActive
+      ? [...(searchHits ?? [])].reverse().map((message) => ({
+          kind: 'message' as const,
+          id: message.id,
+          message,
+          layoutHeight: estimateChatMessageRowHeight(message),
+        }))
+      : buildChatListItems(rawMessages)
     const stabilized = stabilizeChatListItems(chatListItemsRef.current, built)
     chatListItemsRef.current = stabilized
     return stabilized
-  }, [messagesData?.messages, searchHits, searchTerm])
+  }, [rawMessages, searchHits, searchActive])
 
-  const stickyDateRef = useRef('')
+  const chatListItems = displayChatListItems
 
   useEffect(() => {
-    stickyDateRef.current = ''
-    setStickyDateLabel('')
+    resetChatFab()
   }, [conversationId])
 
   useEffect(() => {
     let cancelled = false
+    const snapshot = messagesData?.messages ?? []
     void ensureMediaIndexLoaded().then(() => {
       if (cancelled) return
-      warmMediaDisplayCacheFromMessages(messagesData?.messages ?? [])
+      warmMediaDisplayCacheFromMessages(snapshot)
     })
     return () => {
       cancelled = true
     }
-  }, [conversationId, messagesData?.messages])
+  }, [conversationId])
 
   useEffect(() => {
     scrollRestoredRef.current = false
@@ -459,44 +475,73 @@ export default function ChatScreen() {
   }, [conversationId, threadLimit])
 
   useEffect(() => {
-    if (scrollRestoredRef.current || messagesPending) return
+    scrollRestoredRef.current = false
+    scrollRestoreInFlightRef.current = false
+  }, [conversationId])
+
+  useEffect(() => {
+    if (scrollRestoredRef.current || scrollRestoreInFlightRef.current || messagesPending) return
     const saved = chatStateCache.restore(conversationId)
-    if (!saved) return
-
-    if (saved.anchorMessageId) {
-      const idx = findMessageListIndex(chatListItems, saved.anchorMessageId)
-      if (idx >= 0) {
-        scrollRestoredRef.current = true
-        requestAnimationFrame(() => {
-          messagesListRef.current?.scrollToIndex({
-            index: idx,
-            animated: false,
-            viewPosition: 0.5,
-          })
-        })
-        return
-      }
-    }
-
-    if (saved.scrollOffset > 0) {
+    if (!saved) {
       scrollRestoredRef.current = true
-      requestAnimationFrame(() => {
-        messagesListRef.current?.scrollToOffset({
-          offset: saved.scrollOffset,
-          animated: false,
-        })
-      })
+      return
     }
-  }, [conversationId, messagesPending, chatListItems])
+
+    let cancelled = false
+    scrollRestoreInFlightRef.current = true
+
+    void (async () => {
+      try {
+        if (saved.anchorMessageId) {
+          const visible =
+            findMessageListIndex(chatListItemsRef.current, saved.anchorMessageId) >= 0
+          if (!visible) {
+            await paginateUntilMessageVisible({
+              messageId: saved.anchorMessageId,
+              getItems: () => chatListItemsRef.current,
+              hasOlder: () => !!hasOlderRef.current,
+              fetchOlder: () => fetchOlderRef.current(),
+            })
+          }
+          if (cancelled) return
+          const idx = findMessageListIndex(chatListItemsRef.current, saved.anchorMessageId)
+          if (idx >= 0) {
+            scrollRestoredRef.current = true
+            requestAnimationFrame(() => {
+              scrollToChatIndexWithRetry(messagesListRef, idx, {
+                animated: false,
+                viewPosition: 0.5,
+                maxRetries: 1,
+              })
+            })
+            return
+          }
+        }
+
+        if (saved.scrollOffset > 0) {
+          scrollRestoredRef.current = true
+          requestAnimationFrame(() => {
+            messagesListRef.current?.scrollToOffset({
+              offset: saved.scrollOffset,
+              animated: false,
+            })
+          })
+        } else {
+          scrollRestoredRef.current = true
+        }
+      } finally {
+        if (!cancelled) scrollRestoreInFlightRef.current = false
+      }
+    })()
+
+    return () => {
+      cancelled = true
+      scrollRestoreInFlightRef.current = false
+    }
+  }, [conversationId, messagesPending])
 
   const onAnchorMessageChange = useCallback((messageId: string | null) => {
     anchorMessageIdRef.current = messageId
-  }, [])
-
-  const onStickyDateChange = useCallback((label: string) => {
-    if (label === stickyDateRef.current) return
-    stickyDateRef.current = label
-    setStickyDateLabel(label)
   }, [])
 
   const showScrollFabRef = useRef(false)
@@ -506,22 +551,58 @@ export default function ChatScreen() {
     const show = showScrollFabRef.current
     if (!show && offsetY > 96) {
       showScrollFabRef.current = true
-      setShowScrollFab(true)
+      setChatFabVisible(true)
       return
     }
     if (show && offsetY < 20) {
       showScrollFabRef.current = false
-      setShowScrollFab(false)
+      setChatFabVisible(false)
     }
   }, [])
 
   const scrollToLatest = useCallback(() => {
     showScrollFabRef.current = false
-    setShowScrollFab(false)
+    resetChatFab()
     requestAnimationFrame(() => {
       messagesListRef.current?.scrollToOffset({ offset: 0, animated: true })
     })
   }, [])
+
+  const scrollToLatestIfNearBottom = useCallback(() => {
+    if (!showScrollFabRef.current) scrollToLatest()
+  }, [scrollToLatest])
+
+  const onAtBottomChange = useCallback((atBottom: boolean) => {
+    isAtBottomRef.current = atBottom
+    if (atBottom) {
+      fabUnreadRef.current = 0
+      setChatFabUnread(0)
+    }
+  }, [])
+
+  useEffect(() => {
+    const count = rawMessages.length
+    const prev = prevMessageCountRef.current
+    prevMessageCountRef.current = count
+    if (count <= prev || searchActive) return
+
+    const newest = rawMessages[rawMessages.length - 1]
+    if (!newest || newest.direction !== 'inbound') return
+
+    if (isAtBottomRef.current) return
+
+    fabUnreadRef.current += 1
+    setChatFabUnread(fabUnreadRef.current)
+    if (!showScrollFabRef.current) {
+      showScrollFabRef.current = true
+      setChatFabVisible(true)
+    }
+  }, [rawMessages, searchActive])
+
+  const onNeedsPrefill = useCallback(() => {
+    if (!hasOlderMessages || isFetchingOlder) return
+    void fetchOlderMessages()
+  }, [fetchOlderMessages, hasOlderMessages, isFetchingOlder])
 
   const scrollToQuotedMessage = useCallback(
     (messageId: string) => {
@@ -556,6 +637,17 @@ export default function ChatScreen() {
   const needsTemplate = conversation?.needsTemplateForReply ?? !canSendSession
   const contactName = conversation?.contact?.name || conversation?.contact?.waId || 'Chat'
 
+  const typingListHeader = useMemo(() => {
+    if (searchActive || typingPeers.length === 0) return null
+    return (
+      <View className="px-3 py-2">
+        <Text className="text-xs text-neutral-500 dark:text-wa-subDark">
+          {typingPeers.join(', ')} {typingPeers.length === 1 ? 'is' : 'are'} typing…
+        </Text>
+      </View>
+    )
+  }, [searchActive, typingPeers])
+
   function onSendText() {
     const body = draft.trim()
     if (!body) return
@@ -565,12 +657,13 @@ export default function ChatScreen() {
     setDraft('')
     void clearDraft(conversationId)
     setReplyTo(null)
-    scrollToLatest()
+    hapticLight()
+    scrollToLatestIfNearBottom()
     sendText.mutate(
       { body, replyToMessageId, replyToPreview },
       {
         onSuccess: (msg) => {
-          scrollToLatest()
+          scrollToLatestIfNearBottom()
           if (msg.id.startsWith('pending-text-')) {
             toast.show('Offline — message will send when you are back online')
           } else {
@@ -580,7 +673,7 @@ export default function ChatScreen() {
         onError: (err) => {
           if (isNetworkError(err)) {
             toast.show('Offline — message queued')
-            scrollToLatest()
+            scrollToLatestIfNearBottom()
           } else {
             toast.show(apiErrorMessage(err), 'error')
             setDraft(body)
@@ -629,7 +722,7 @@ export default function ChatScreen() {
     const replyToPreview = savedReply ? messageToReplyPreview(savedReply) : undefined
     setPendingLocation(null)
     if (replyToMessageId) setReplyTo(null)
-    scrollToLatest()
+    scrollToLatestIfNearBottom()
     sendLocation.mutate(
       {
         latitude: loc.latitude,
@@ -641,7 +734,7 @@ export default function ChatScreen() {
       },
       {
         onSuccess: () => {
-          scrollToLatest()
+          scrollToLatestIfNearBottom()
           void playWaFeedback('send')
         },
         onError: (err) => {
@@ -745,7 +838,7 @@ export default function ChatScreen() {
     const replyToMessageId = savedReply?.id
     const replyToPreview = savedReply ? messageToReplyPreview(savedReply) : undefined
     if (replyToMessageId) setReplyTo(null)
-    scrollToLatest()
+    scrollToLatestIfNearBottom()
     try {
       await sendMedia.mutateAsync({
         uri: resolveUploadUri(uri),
@@ -758,7 +851,7 @@ export default function ChatScreen() {
         clientMessageId: opts?.clientMessageId,
       })
       setPendingMedia(null)
-      scrollToLatest()
+      scrollToLatestIfNearBottom()
     } catch (err) {
       toast.show(apiErrorMessage(err), 'error')
       if (savedReply) setReplyTo(savedReply)
@@ -770,8 +863,14 @@ export default function ChatScreen() {
     const stalePending = isStalePendingMessage(m.status, m.sentAt, m.type, m.sendPhase)
     if (m.status === 'pending' && !stalePending) return
     if (m.status !== 'failed' && !stalePending) return
-    if (m.id.startsWith('pending-text-')) return
-    if (m.sendPhase === 'queued') return
+    if (m.id.startsWith('pending-text-') || m.id.startsWith('pending-location-')) {
+      void flushOutboundQueue().catch(() => undefined)
+      return
+    }
+    if (m.sendPhase === 'queued') {
+      void flushOutboundQueue().catch(() => undefined)
+      return
+    }
 
     const onError = (err: unknown) => {
       toast.show(mediaSendErrorMessage(err), 'error')
@@ -864,7 +963,7 @@ export default function ChatScreen() {
         clientMessageId,
       },
       {
-        onSuccess: () => scrollToLatest(),
+        onSuccess: () => scrollToLatestIfNearBottom(),
         onError: (err) => {
           if (err instanceof Error && err.message === 'QUEUED_OFFLINE') return
           toast.show(mediaSendErrorMessage(err), 'error')
@@ -894,7 +993,7 @@ export default function ChatScreen() {
     const replyToPreview = savedReply ? messageToReplyPreview(savedReply) : undefined
     setPendingMedia(null)
     if (replyToMessageId) setReplyTo(null)
-    scrollToLatest()
+    scrollToLatestIfNearBottom()
     const clientMessageId = newPendingId('media')
     const sendAsDocument = opts?.sendAsDocument ?? mediaType === 'document'
     sendMedia.mutate(
@@ -912,7 +1011,7 @@ export default function ChatScreen() {
         replyToPreview,
       },
       {
-        onSuccess: () => scrollToLatest(),
+        onSuccess: () => scrollToLatestIfNearBottom(),
         onError: (err) => {
           if (err instanceof Error && err.message === 'QUEUED_OFFLINE') return
           toast.show(mediaSendErrorMessage(err), 'error')
@@ -986,7 +1085,7 @@ export default function ChatScreen() {
     clearRecordingUi()
     playWaFeedback('send')
     await putOptimisticOutboundMessage(optimistic)
-    scrollToLatest()
+    scrollToLatestIfNearBottom()
 
     await new Promise<void>((resolve) => {
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
@@ -1020,7 +1119,7 @@ export default function ChatScreen() {
           replyToPreview,
         },
         {
-          onSuccess: () => scrollToLatest(),
+          onSuccess: () => scrollToLatestIfNearBottom(),
           onError: (err) => {
             if (err instanceof Error && err.message === 'QUEUED_OFFLINE') return
             toast.show(mediaSendErrorMessage(err), 'error')
@@ -1113,14 +1212,6 @@ export default function ChatScreen() {
         </View>
       ) : null}
 
-      {typingPeers.length > 0 ? (
-        <View className="bg-white/90 px-4 py-1 dark:bg-wa-panelDeep/90">
-          <Text className="text-xs text-neutral-500 dark:text-wa-subDark">
-            {typingPeers.join(', ')} {typingPeers.length === 1 ? 'is' : 'are'} typing…
-          </Text>
-        </View>
-      ) : null}
-
       {(() => {
         const windowState = conversation ? messagingWindowState(conversation) : null
         if (!windowState || !showUnderHeaderBar(windowState)) return null
@@ -1146,11 +1237,8 @@ export default function ChatScreen() {
             </View>
           ) : (
             <View className="min-h-0 flex-1">
-            <ChatStickyDateBar
-              label={stickyDateLabel}
-              visible={!searchOpen && stickyDateLabel.length > 0}
-            />
             <ChatMessagesList
+              conversationId={conversationId}
               listRef={messagesListRef}
               data={chatListItems}
               highlightMessageId={highlightMessageId}
@@ -1162,8 +1250,10 @@ export default function ChatScreen() {
               canLoadOlderRef={canLoadOlderRef}
               onFetchOlder={onFetchOlderMessages}
               onDismissSearch={dismissChatSearchStable}
-              onStickyDateChange={onStickyDateChange}
               onScrollOffset={onMessagesScroll}
+              onAtBottomChange={onAtBottomChange}
+              onNeedsPrefill={onNeedsPrefill}
+              listHeader={typingListHeader}
               onAnchorMessageChange={onAnchorMessageChange}
               onReply={onReplyToMessage}
               onReplyQuotePress={scrollToQuotedMessage}
@@ -1172,8 +1262,8 @@ export default function ChatScreen() {
               onLongPress={onMessageLongPress}
               onForward={onMessageForward}
             />
-            <ScrollToLatestButton
-              visible={showScrollFab && !recordingOpen}
+            <ChatScrollFab
+              recordingOpen={recordingOpen}
               onPress={scrollToLatest}
               bottomInset={12}
             />

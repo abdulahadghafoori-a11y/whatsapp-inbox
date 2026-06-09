@@ -23,8 +23,11 @@ export function useToggleMessageStar(_conversationId: string) {
         starredAt: starred ? new Date().toISOString() : null,
       })
     },
-    onSuccess: (message) => {
-      void patchLocalMessage(message.id, message)
+    onSuccess: async (message) => {
+      const existing = await getMessageById(message.id)
+      if (existing?.starredAt !== message.starredAt) {
+        void patchLocalMessage(message.id, { starredAt: message.starredAt })
+      }
       void qc.invalidateQueries({ queryKey: ['starred-messages'] })
       scheduleSync()
     },
@@ -51,8 +54,7 @@ export function useToggleMessageReaction(_conversationId: string) {
       await patchLocalMessage(messageId, { reactions })
       return { messageId, previous: existing?.reactions }
     },
-    onSuccess: (data) => {
-      void patchLocalMessage(data.messageId, { reactions: data.reactions })
+    onSuccess: () => {
       scheduleSync()
     },
     onError: async (_err, { messageId }, ctx) => {

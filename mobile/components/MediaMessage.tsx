@@ -13,9 +13,9 @@ import { api } from '@/services/api'
 import { useAuthStore } from '@/stores/authStore'
 import { openDocumentFromUrl } from '@/lib/openDocument'
 import { BUBBLE_MEDIA_MAX_WIDTH } from '@/lib/chatMediaLayout'
-import { useMessageMedia } from '@/hooks/useMessageMedia'
+import { useDisplayMediaUri } from '@/hooks/useDisplayMediaUri'
+import { useMediaUrl } from '@/hooks/useMedia'
 import { useMessageMediaActive } from '@/hooks/useMessageMediaActive'
-import { useResolvedCachedMediaUri } from '@/hooks/useCachedMediaUri'
 import { useMediaAutoDownload } from '@/hooks/useMediaAutoDownload'
 import { useMediaDownloadState } from '@/hooks/useMediaDownloadState'
 import { MediaShellPlaceholder } from '@/components/MediaShellPlaceholder'
@@ -28,14 +28,13 @@ import { formatMediaSize } from '@/lib/formatMediaSize'
 import { messageFileSizeBytes } from '@/lib/messageFileSize'
 import { AudioPlayer } from './AudioPlayer'
 import { ChatVideoMedia } from './ChatVideoMedia'
-import { ChatImageMedia } from './ChatImageMedia'
+import { ChatImageRenderer } from '@/components/chat/ChatImageRenderer'
 import { MediaFullscreenViewer } from './MediaFullscreenViewer'
 import { VideoFullscreenViewer } from './VideoFullscreenViewer'
 import { mediaSendOverlayLabel } from '@/lib/mediaSendPhase'
 import { MESSAGE_LONG_PRESS_MS } from '@/lib/chatLongPress'
 import { mediaDisplayCache } from '@/lib/mediaDisplayCache'
-import { resolveMessageLocalMediaUri } from '@/lib/messageLocalMedia'
-import { isStickerType } from '@/lib/messageMediaKind'
+import { isStickerType, isUrlFirstMediaType } from '@/lib/messageMediaKind'
 import { hasMessageMediaBeenActivated } from '@/lib/visibleMessageMedia'
 import { resolveUploadUri } from '@/lib/uploadUri'
 import { messageRenderEqual } from '@/lib/messageRenderEqual'
@@ -130,7 +129,60 @@ function DocumentBubble({
   )
 }
 
-function MediaMessageBase({
+function MediaMessageGate({
+  message,
+  variant = 'inbound',
+  contactName,
+  contactAvatarUrl,
+  onReplyQuotePress,
+  onLongPress,
+}: {
+  message: Message
+  variant?: 'inbound' | 'outbound'
+  contactName?: string
+  contactAvatarUrl?: string | null
+  onReplyQuotePress?: (messageId: string) => void
+  onLongPress?: () => void
+}) {
+  const outbound = variant === 'outbound'
+  const pending = message.mediaStatus === 'pending'
+  const mediaActive = useMessageMediaActive(message.id)
+  const shouldMountContent =
+    mediaActive ||
+    hasMessageMediaBeenActivated(message.id) ||
+    outbound ||
+    !!message.localPreviewUri ||
+    !!message.localCacheUri ||
+    pending ||
+    !!message.sendPhase
+
+  if (
+    !shouldMountContent &&
+    message.type !== 'text' &&
+    message.type !== 'location' &&
+    message.mediaUrl
+  ) {
+    return (
+      <MediaShellPlaceholder
+        type={message.type}
+        sticker={message.type === 'sticker'}
+      />
+    )
+  }
+
+  return (
+    <MediaMessageContent
+      message={message}
+      variant={variant}
+      contactName={contactName}
+      contactAvatarUrl={contactAvatarUrl}
+      onReplyQuotePress={onReplyQuotePress}
+      onLongPress={onLongPress}
+    />
+  )
+}
+
+function MediaMessageContent({
   message,
   variant = 'inbound',
   contactName,
@@ -158,15 +210,8 @@ function MediaMessageBase({
   const mediaLabel = MEDIA_LABEL[message.type] ?? 'Media'
 
   const mediaActive = useMessageMediaActive(message.id)
-  const sessionDisplay = mediaDisplayCache.get(message.id)
-  const cachedUri = useResolvedCachedMediaUri(message.id, message.mediaUrl)
-  const messageLocalUri = resolveMessageLocalMediaUri(message)
-  const diskUri = messageLocalUri ?? cachedUri ?? null
-  const seededLocalUri = messageLocalUri
-  const cachedOnDisk = !!diskUri
-  const hasLocalSource = !!diskUri
   const showMedia =
-    cachedOnDisk ||
+    mediaActive ||
     !!message.localPreviewUri ||
     !!message.localCacheUri ||
     (outbound && !pending && !uploading) ||
@@ -177,6 +222,41 @@ function MediaMessageBase({
     direction: message.direction,
   })
   const isDownloading = useMediaDownloadState(message.id)
+
+  const urlFirst = isUrlFirstMediaType(message.type)
+  const shouldLoadRemote =
+    showMedia &&
+    (urlFirst
+      ? !!message.mediaUrl || !!message.localPreviewUri || !!message.localCacheUri
+      : !!message.localPreviewUri ||
+        !!message.localCacheUri ||
+        outbound ||
+        manualDownload ||
+        autoAllowed === true ||
+        isSticker)
+
+  const {
+    localUri: messageLocalUri,
+    cachedUri,
+    effectiveDisplayUrl,
+    effectivePlaybackUrl,
+    remoteUrl,
+    sessionDisplay,
+    displayUrl: hookDisplayUrl,
+    isLoading,
+    isError,
+  } = useDisplayMediaUri(message, { loadRemote: shouldLoadRemote })
+
+  const diskUri = messageLocalUri ?? cachedUri ?? null
+  const seededLocalUri = messageLocalUri
+  const cachedOnDisk = !!diskUri
+  const hasLocalSource = !!diskUri
+
+  const { data: videoThumbUrl } = useMediaUrl(
+    message.type === 'video' && message.mediaThumbUrl ? message.mediaThumbUrl : null,
+    message.id,
+    { enabled: shouldLoadRemote },
+  )
 
   // Once a local image file exists and no ThumbHash is registered yet, generate
   // it off the render path and publish it so every device gets instant placeholders.
@@ -202,24 +282,6 @@ function MediaMessageBase({
       cancelled = true
     }
   }, [message.type, message.thumbhash, message.mediaUrl, message.id, thumbhashSource])
-
-  const shouldLoadRemote =
-    showMedia &&
-    (hasLocalSource || outbound || manualDownload || autoAllowed === true || isSticker)
-
-  const { displayUrl: hookDisplayUrl, playbackUrl, remoteUrl, isLoading, isError } =
-    useMessageMedia(message, {
-      loadRemote: shouldLoadRemote,
-    })
-
-  const effectiveDisplayUrl =
-    hookDisplayUrl ??
-    sessionDisplay?.uri ??
-    diskUri ??
-    seededLocalUri ??
-    null
-
-  const effectivePlaybackUrl = playbackUrl ?? effectiveDisplayUrl
 
   useEffect(() => {
     if (!hookDisplayUrl) return
@@ -291,7 +353,9 @@ function MediaMessageBase({
     if (!message.mediaUrl) return
     setManualDownload(true)
     queueMediaPresign(queryClient, message.mediaUrl, message.id, { force: true })
-    void syncMessageMedia(message, { force: true })
+    if (!isUrlFirstMediaType(message.type)) {
+      void syncMessageMedia(message, { force: true })
+    }
   }, [message, queryClient])
 
   async function retryDownload() {
@@ -440,7 +504,7 @@ function MediaMessageBase({
     const sticker = message.type === 'sticker'
     return (
       <>
-        <ChatImageMedia
+        <ChatImageRenderer
           uri={effectiveDisplayUrl}
           cacheKey={message.id}
           sticker={sticker}
@@ -493,6 +557,7 @@ function MediaMessageBase({
           messageId={message.id}
           active={showMedia}
           sizeBytes={fileSize}
+          remoteThumbUrl={videoThumbUrl}
           uploading={uploading}
           uploadLabel={sendOverlay ?? undefined}
           onPress={() => void openVideo()}
@@ -672,7 +737,7 @@ const styles = StyleSheet.create({
   },
 })
 
-export const MediaMessage = memo(MediaMessageBase, (prev, next) =>
+export const MediaMessage = memo(MediaMessageGate, (prev, next) =>
   prev.variant === next.variant &&
   prev.contactName === next.contactName &&
   prev.contactAvatarUrl === next.contactAvatarUrl &&

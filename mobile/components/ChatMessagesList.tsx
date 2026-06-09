@@ -1,12 +1,31 @@
-import { memo, useCallback, useEffect, useRef, type MutableRefObject, type RefObject } from 'react'
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MutableRefObject,
+  type ReactElement,
+  type RefObject,
+} from 'react'
 import { View, ActivityIndicator, InteractionManager, Platform } from 'react-native'
 import { useQueryClient } from '@tanstack/react-query'
 import { FlatList } from 'react-native-gesture-handler'
 import type Swipeable from 'react-native-gesture-handler/Swipeable'
 import type { ViewToken } from 'react-native'
 import { SwipeableMessageBubble } from '@/components/SwipeableMessageBubble'
-import { ChatDatePill } from '@/components/ChatDatePill'
+import { ChatDatePill, ChatStickyDateBar } from '@/components/ChatDatePill'
+import { buildChatListLayouts } from '@/lib/chatListItemLayout'
 import type { ChatListItem } from '@/lib/chatListItems'
+import {
+  markPaginationAtLength,
+  releasePaginationAtLength,
+  resetPaginationTracker,
+  shouldSkipPaginationAtLength,
+  type PaginationLengthTracker,
+} from '@/lib/chatListPagination'
+import { getBurstAutoscrollThreshold, isBurstMode } from '@/lib/chatBurstMode'
 import { formatDateLabel } from '@/lib/format'
 import { messageRenderEqual } from '@/lib/messageRenderEqual'
 import type { MessageAnchor } from '@/components/MessageActionsOverlay'
@@ -18,6 +37,10 @@ import {
   setVisibleMessageIds,
 } from '@/lib/visibleMessageMedia'
 import type { Message } from '@/types'
+
+const AT_BOTTOM_THRESHOLD = 48
+const PREFILL_DEBOUNCE_MS = 500
+const MAX_PREFILL_ATTEMPTS = 3
 
 type ChatListRowProps = {
   item: ChatListItem
@@ -53,6 +76,9 @@ function ChatListRowBase({
       message={msg}
       contactName={contactName}
       contactAvatarUrl={contactAvatarUrl}
+      showAvatar={item.showAvatar}
+      showTail={item.showTail}
+      groupPosition={item.groupPosition}
       onReply={onReply}
       onReplyQuotePress={onReplyQuotePress}
       highlight={highlightMessageId === msg.id}
@@ -106,6 +132,7 @@ function chatListRowEqual(prev: ChatListRowProps, next: ChatListRowProps): boole
 const ChatListRow = memo(ChatListRowBase, chatListRowEqual)
 
 export type ChatMessagesListProps = {
+  conversationId: string
   listRef: RefObject<FlatList<ChatListItem> | null>
   data: ChatListItem[]
   highlightMessageId: string | null
@@ -115,11 +142,14 @@ export type ChatMessagesListProps = {
   isFetchingOlder: boolean
   hasOlderMessages: boolean
   canLoadOlderRef: MutableRefObject<boolean>
-  onFetchOlder: () => void
+  onFetchOlder: () => void | Promise<unknown>
+  onFetchOlderFailed?: () => void
   onDismissSearch: () => void
-  onStickyDateChange: (label: string) => void
   onScrollOffset: (offsetY: number) => void
+  onAtBottomChange?: (atBottom: boolean) => void
+  onNeedsPrefill?: () => void
   onAnchorMessageChange?: (messageId: string | null) => void
+  listHeader?: ReactElement | null
   onReply: (m: Message) => void
   onReplyQuotePress: (messageId: string) => void
   onSwipeOpen: (messageId: string, ref: Swipeable | null) => void
@@ -129,6 +159,7 @@ export type ChatMessagesListProps = {
 }
 
 function ChatMessagesListBase({
+  conversationId,
   listRef,
   data,
   highlightMessageId,
@@ -139,10 +170,13 @@ function ChatMessagesListBase({
   hasOlderMessages,
   canLoadOlderRef,
   onFetchOlder,
+  onFetchOlderFailed,
   onDismissSearch,
-  onStickyDateChange,
   onScrollOffset,
+  onAtBottomChange,
+  onNeedsPrefill,
   onAnchorMessageChange,
+  listHeader,
   onReply,
   onReplyQuotePress,
   onSwipeOpen,
@@ -151,12 +185,64 @@ function ChatMessagesListBase({
   onForward,
 }: ChatMessagesListProps) {
   const stickyDateRef = useRef('')
+  const [stickyDateLabel, setStickyDateLabel] = useState('')
   const queryClient = useQueryClient()
+  const viewportHeightRef = useRef(0)
+  const contentHeightRef = useRef(0)
+  const atBottomRef = useRef(true)
+  const prefillTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const prefillAttemptsRef = useRef(0)
+  const endReachedTrackerRef = useRef<PaginationLengthTracker>({})
+  const fetchInFlightRef = useRef(false)
+  const onFetchOlderRef = useRef(onFetchOlder)
+  onFetchOlderRef.current = onFetchOlder
 
   useEffect(() => () => clearVisibleMessageMedia(), [])
 
+  useEffect(() => {
+    resetPaginationTracker(endReachedTrackerRef.current)
+    prefillAttemptsRef.current = 0
+    stickyDateRef.current = ''
+    setStickyDateLabel('')
+  }, [conversationId])
+
   const dataRef = useRef(data)
   dataRef.current = data
+
+  const schedulePrefillCheck = useCallback(() => {
+    if (!onNeedsPrefill || canLoadOlderRef.current) return
+    if (prefillAttemptsRef.current >= MAX_PREFILL_ATTEMPTS) return
+    if (prefillTimerRef.current) clearTimeout(prefillTimerRef.current)
+    prefillTimerRef.current = setTimeout(() => {
+      prefillTimerRef.current = null
+      if (
+        contentHeightRef.current > 0 &&
+        viewportHeightRef.current > 0 &&
+        contentHeightRef.current < viewportHeightRef.current
+      ) {
+        prefillAttemptsRef.current += 1
+        onNeedsPrefill()
+      }
+    }, PREFILL_DEBOUNCE_MS)
+  }, [canLoadOlderRef, onNeedsPrefill])
+
+  const maybeFetchOlder = useCallback(() => {
+    const len = dataRef.current.length
+    if (!hasOlderMessages || isFetchingOlder || fetchInFlightRef.current) return
+    if (shouldSkipPaginationAtLength(endReachedTrackerRef.current, len)) return
+    fetchInFlightRef.current = true
+    void Promise.resolve(onFetchOlderRef.current())
+      .then(() => {
+        markPaginationAtLength(endReachedTrackerRef.current, len)
+      })
+      .catch(() => {
+        releasePaginationAtLength(endReachedTrackerRef.current, len)
+        onFetchOlderFailed?.()
+      })
+      .finally(() => {
+        fetchInFlightRef.current = false
+      })
+  }, [hasOlderMessages, isFetchingOlder, onFetchOlderFailed])
 
   const onViewableItemsChanged = useCallback(
     ({ viewableItems }: { viewableItems: ViewToken[] }) => {
@@ -164,17 +250,17 @@ function ChatMessagesListBase({
       let topDate: string | null = null
       let anchorMessageId: string | null = null
 
-      // Defer media bookkeeping (presign batching, download sync) off the scroll
-      // frame so fast flings stay at 60fps; the sticky-date update stays sync.
       const viewport = buildChatMediaViewport(dataRef.current, viewableItems)
       setVisibleMessageIds(viewport.loadMessageIds)
 
-      InteractionManager.runAfterInteractions(() => {
-        if (viewport.presignCandidates.length) {
-          void queueMediaPresignForMessages(queryClient, viewport.presignCandidates)
-        }
-        if (viewport.orderedMedia.length) syncVisibleMessageMedia(viewport.orderedMedia)
-      })
+      if (!isBurstMode()) {
+        InteractionManager.runAfterInteractions(() => {
+          if (viewport.presignCandidates.length) {
+            void queueMediaPresignForMessages(queryClient, viewport.presignCandidates)
+          }
+          if (viewport.orderedMedia.length) syncVisibleMessageMedia(viewport.orderedMedia)
+        })
+      }
 
       for (const token of viewableItems) {
         const row = token.item as ChatListItem
@@ -183,6 +269,7 @@ function ChatMessagesListBase({
           topIndex = token.index
           topDate = row.dateIso
         } else if (row.kind === 'message') {
+          if (row.message.deletedAt) continue
           topIndex = token.index
           topDate = row.message.sentAt
           anchorMessageId = row.message.id
@@ -195,9 +282,9 @@ function ChatMessagesListBase({
       const label = formatDateLabel(topDate)
       if (label === stickyDateRef.current) return
       stickyDateRef.current = label
-      onStickyDateChange(label)
+      setStickyDateLabel(label)
     },
-    [onAnchorMessageChange, onStickyDateChange, queryClient],
+    [onAnchorMessageChange, queryClient],
   )
 
   const onViewableItemsChangedRef = useRef(onViewableItemsChanged)
@@ -244,67 +331,114 @@ function ChatMessagesListBase({
     ],
   )
 
-  return (
-    <FlatList
-      ref={listRef}
-      data={data}
-      extraData={highlightMessageId}
-      inverted
-      initialNumToRender={40}
-      maxToRenderPerBatch={20}
-      updateCellsBatchingPeriod={16}
-      windowSize={25}
-      // Android inverted lists with media bubbles blank out / flicker with this
-      // enabled (known RN issue); keep the memory win only on iOS.
-      removeClippedSubviews={false}
-      keyExtractor={(row) => row.id}
-      showsVerticalScrollIndicator
-      persistentScrollbar={Platform.OS === 'android'}
-      overScrollMode={Platform.OS === 'android' ? 'never' : undefined}
-      viewabilityConfigCallbackPairs={viewabilityPairs}
-      maintainVisibleContentPosition={{
-        minIndexForVisible: 0,
-        autoscrollToTopThreshold: 10,
-      }}
-      onScrollBeginDrag={() => {
-        canLoadOlderRef.current = true
-        if (searchOpen) onDismissSearch()
-      }}
-      onTouchEnd={() => {
-        if (searchOpen) onDismissSearch()
-      }}
-      onMomentumScrollBegin={() => {
-        canLoadOlderRef.current = true
-      }}
-      onEndReachedThreshold={0.3}
-      onEndReached={() => {
-        if (!canLoadOlderRef.current) return
-        if (hasOlderMessages && !isFetchingOlder) onFetchOlder()
-      }}
-      ListFooterComponent={
-        isFetchingOlder ? (
-          <View className="items-center py-4">
-            <ActivityIndicator color="#00A884" />
-          </View>
-        ) : null
+  const maintainVisible = {
+    minIndexForVisible: 0,
+    autoscrollToTopThreshold: getBurstAutoscrollThreshold(),
+  }
+
+  const handleScroll = useCallback(
+    (offsetY: number) => {
+      onScrollOffset(offsetY)
+      const atBottom = offsetY <= AT_BOTTOM_THRESHOLD
+      if (atBottom !== atBottomRef.current) {
+        atBottomRef.current = atBottom
+        onAtBottomChange?.(atBottom)
       }
-      keyboardShouldPersistTaps="handled"
-      onScroll={(e) => onScrollOffset(e.nativeEvent.contentOffset.y)}
-      scrollEventThrottle={16}
-      onScrollToIndexFailed={({ index }: { index: number }) => {
-        listRef.current?.scrollToOffset({
-          offset: Math.max(0, index * 72),
-          animated: true,
-        })
-      }}
-      renderItem={renderItem}
-      contentContainerStyle={{ paddingVertical: 6, paddingHorizontal: 6 }}
-    />
+    },
+    [onAtBottomChange, onScrollOffset],
+  )
+
+  const listLayouts = useMemo(() => buildChatListLayouts(data), [data])
+  const listLayoutsRef = useRef(listLayouts)
+  listLayoutsRef.current = listLayouts
+
+  const getItemLayout = useCallback(
+    (_data: ChatListItem[] | null | undefined, index: number) => {
+      const entry = listLayoutsRef.current[index]
+      return entry ?? { length: 72, offset: index * 72, index }
+    },
+    [],
+  )
+
+  const listFooter = useMemo(
+    () =>
+      isFetchingOlder ? (
+        <View className="items-center py-4">
+          <ActivityIndicator color="#00A884" />
+        </View>
+      ) : null,
+    [isFetchingOlder],
+  )
+
+  return (
+    <View className="min-h-0 flex-1">
+      <ChatStickyDateBar
+        label={stickyDateLabel}
+        visible={!searchOpen && stickyDateLabel.length > 0}
+      />
+      <FlatList
+        ref={listRef}
+        data={data}
+        extraData={highlightMessageId}
+        inverted
+        getItemLayout={getItemLayout}
+        getItemType={(item) => item.kind}
+        initialNumToRender={28}
+        maxToRenderPerBatch={12}
+        updateCellsBatchingPeriod={16}
+        windowSize={15}
+        removeClippedSubviews={false}
+        keyExtractor={(row) => row.id}
+        showsVerticalScrollIndicator
+        persistentScrollbar={Platform.OS === 'android'}
+        overScrollMode={Platform.OS === 'android' ? 'never' : undefined}
+        viewabilityConfigCallbackPairs={viewabilityPairs}
+        maintainVisibleContentPosition={maintainVisible}
+        onLayout={(e) => {
+          viewportHeightRef.current = e.nativeEvent.layout.height
+          schedulePrefillCheck()
+        }}
+        onContentSizeChange={(_w, h) => {
+          contentHeightRef.current = h
+          schedulePrefillCheck()
+        }}
+        onScrollBeginDrag={() => {
+          canLoadOlderRef.current = true
+          if (searchOpen) onDismissSearch()
+        }}
+        onTouchEnd={() => {
+          if (searchOpen) onDismissSearch()
+        }}
+        onMomentumScrollBegin={() => {
+          canLoadOlderRef.current = true
+        }}
+        onEndReachedThreshold={0.3}
+        onEndReached={() => {
+          if (!canLoadOlderRef.current) return
+          maybeFetchOlder()
+        }}
+        ListHeaderComponent={listHeader ?? undefined}
+        ListFooterComponent={listFooter}
+        keyboardShouldPersistTaps="handled"
+        onScroll={(e) => handleScroll(e.nativeEvent.contentOffset.y)}
+        scrollEventThrottle={16}
+        onScrollToIndexFailed={({ index }: { index: number }) => {
+          const entry = listLayoutsRef.current[index]
+          listRef.current?.scrollToOffset({
+            offset: Math.max(0, entry?.offset ?? index * 72),
+            animated: true,
+          })
+        }}
+        renderItem={renderItem}
+        contentContainerStyle={{ paddingVertical: 6, paddingHorizontal: 6 }}
+      />
+    </View>
   )
 }
 
 function chatMessagesListEqual(prev: ChatMessagesListProps, next: ChatMessagesListProps) {
   return (
+    prev.conversationId === next.conversationId &&
     prev.data === next.data &&
     prev.highlightMessageId === next.highlightMessageId &&
     prev.contactName === next.contactName &&
@@ -314,9 +448,11 @@ function chatMessagesListEqual(prev: ChatMessagesListProps, next: ChatMessagesLi
     prev.hasOlderMessages === next.hasOlderMessages &&
     prev.onFetchOlder === next.onFetchOlder &&
     prev.onDismissSearch === next.onDismissSearch &&
-    prev.onStickyDateChange === next.onStickyDateChange &&
     prev.onScrollOffset === next.onScrollOffset &&
+    prev.onAtBottomChange === next.onAtBottomChange &&
+    prev.onNeedsPrefill === next.onNeedsPrefill &&
     prev.onAnchorMessageChange === next.onAnchorMessageChange &&
+    prev.listHeader === next.listHeader &&
     prev.onReply === next.onReply &&
     prev.onReplyQuotePress === next.onReplyQuotePress &&
     prev.onSwipeOpen === next.onSwipeOpen &&

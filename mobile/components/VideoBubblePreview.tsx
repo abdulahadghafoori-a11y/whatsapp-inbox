@@ -14,6 +14,8 @@ type VideoBubblePreviewProps = {
   sizeBytes?: number | null
   /** When set, skips regenerating a thumbnail (from useVideoDimensions). */
   thumbUri?: string
+  /** Presigned server thumbnail — shown before local file download completes. */
+  remoteThumbUrl?: string | null
   /** Off-screen rows skip remote video decode entirely. */
   active?: boolean
 }
@@ -34,13 +36,17 @@ export function VideoBubblePreview({
   uploading = false,
   uploadLabel,
   thumbUri: thumbUriProp,
+  remoteThumbUrl,
   sizeBytes,
   active = true,
 }: VideoBubblePreviewProps) {
   const sizeLabel = formatMediaSize(sizeBytes ?? null)
   // Seed from the prop or the shared cache so re-entering the viewport never
   // re-decodes a thumbnail we already generated this session.
-  const initialThumb = thumbUriProp ?? (isLocalUri(uri) ? getVideoThumbnailSync(uri) : null)
+  const initialThumb =
+    thumbUriProp ??
+    remoteThumbUrl ??
+    (isLocalUri(uri) ? getVideoThumbnailSync(uri) : null)
   const [thumbUri, setThumbUri] = useState<string | null>(initialThumb)
   const [loading, setLoading] = useState(
     active && !initialThumb && isLocalUri(uri),
@@ -54,6 +60,11 @@ export function VideoBubblePreview({
     }
 
     if (!isLocalUri(uri)) {
+      if (remoteThumbUrl) {
+        setThumbUri(remoteThumbUrl)
+        setLoading(false)
+        return
+      }
       setThumbUri(null)
       setLoading(false)
       return
@@ -92,7 +103,7 @@ export function VideoBubblePreview({
       cancelled = true
       task.cancel()
     }
-  }, [uri, thumbUriProp, active])
+  }, [uri, thumbUriProp, remoteThumbUrl, active])
 
   return (
     <View style={[styles.wrap, { width, height }, uploading && styles.uploading]}>
@@ -101,6 +112,7 @@ export function VideoBubblePreview({
           source={{ uri: thumbUri }}
           style={{ width, height }}
           contentFit="cover"
+          cachePolicy="disk"
           transition={120}
           recyclingKey={thumbUri}
         />

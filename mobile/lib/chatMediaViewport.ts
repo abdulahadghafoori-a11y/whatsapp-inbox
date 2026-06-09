@@ -1,4 +1,4 @@
-import { isHeavyMediaType, isStickerType } from '@/lib/messageMediaKind'
+import { needsFileCacheSync } from '@/lib/messageMediaKind'
 import type { ChatListItem } from '@/lib/chatListItems'
 import type { Message } from '@/types'
 import type { ViewToken } from 'react-native'
@@ -50,7 +50,7 @@ export function buildChatMediaViewport(
     seen.add(msg.id)
     loadMessageIds.push(msg.id)
 
-    if (isHeavyMediaType(msg.type) || isStickerType(msg.type)) {
+    if (needsFileCacheSync(msg.type)) {
       orderedMedia.push(msg)
     }
 

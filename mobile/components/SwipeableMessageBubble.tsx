@@ -5,6 +5,7 @@ import { Ionicons } from '@expo/vector-icons'
 import { MessageBubble } from '@/components/MessageBubble'
 import type { MessageAnchor } from '@/components/MessageActionsOverlay'
 import { messageRenderEqual } from '@/lib/messageRenderEqual'
+import type { MessageGroupPosition } from '@/lib/chatListItems'
 import type { Message } from '@/types'
 
 const REPLY_ACTION_WIDTH = 56
@@ -21,6 +22,9 @@ type SwipeableMessageBubbleProps = {
   onReplyQuotePress?: (messageId: string) => void
   onSwipeOpen?: (id: string, ref: Swipeable | null) => void
   highlight?: boolean
+  showAvatar?: boolean
+  showTail?: boolean
+  groupPosition?: MessageGroupPosition
 }
 
 function SwipeableMessageBubbleBase({
@@ -34,6 +38,9 @@ function SwipeableMessageBubbleBase({
   onReplyQuotePress,
   onSwipeOpen,
   highlight,
+  showAvatar,
+  showTail,
+  groupPosition,
 }: SwipeableMessageBubbleProps) {
   const swipeRef = useRef<Swipeable>(null)
   const rowRef = useRef<View>(null)
@@ -107,6 +114,9 @@ function SwipeableMessageBubbleBase({
       message={message}
       contactName={contactName}
       contactAvatarUrl={contactAvatarUrl}
+      showAvatar={showAvatar}
+      showTail={showTail}
+      groupPosition={groupPosition}
       onRetry={onRetry}
       onLongPress={onLongPress ? handleLongPress : undefined}
       onForward={onForward}
@@ -145,6 +155,9 @@ function SwipeableMessageBubbleBase({
 
 export const SwipeableMessageBubble = memo(SwipeableMessageBubbleBase, (prev, next) =>
   prev.highlight === next.highlight &&
+  prev.showAvatar === next.showAvatar &&
+  prev.showTail === next.showTail &&
+  prev.groupPosition === next.groupPosition &&
   prev.contactName === next.contactName &&
   prev.contactAvatarUrl === next.contactAvatarUrl &&
   messageRenderEqual(prev.message, next.message) &&

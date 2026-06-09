@@ -12,6 +12,7 @@ import { runExclusiveDbRead } from './client'
  *  - reactive READs use `runExclusiveDbRead` so they don't queue behind writes,
  *  - each store caches its last result in memory and survives unmount for a
  *    short TTL, so reopening a chat/inbox renders synchronously (no loader).
+ *  - message writes scope thread refreshes to dirty conversation ids only.
  */
 
 export interface StoreState<T> {
@@ -39,9 +40,83 @@ const EVICT_TTL_MS = 120_000
 /** Coalesce DB change notifications into a single refresh pass. */
 const CHANGE_DEBOUNCE_MS = 60
 
+const THREAD_KEY_PREFIX = 'thread:'
+
 let listenerAttached = false
 const pendingTables = new Set<string>()
 let flushTimer: ReturnType<typeof setTimeout> | null = null
+
+/** Conversations whose messages table rows changed since the last flush. */
+let dirtyConversationIds = new Set<string>()
+/** Bulk or unknown-scope message writes — refresh every thread + starred. */
+let dirtyAllMessages = false
+/** Starred list may have changed (star toggle or bulk sync). */
+let dirtyStarred = false
+/** Thread stores already patched in-memory — skip full SELECT on flush. */
+const threadRefreshSatisfied = new Set<string>()
+
+export type NoteMessagesDirtyOpts = {
+  all?: boolean
+  starred?: boolean
+}
+
+/** Call before/after message writes so reactive flush can scope thread refreshes. */
+export function noteMessagesDirty(
+  conversationIds: Iterable<string>,
+  opts?: NoteMessagesDirtyOpts,
+): void {
+  if (opts?.all) dirtyAllMessages = true
+  else for (const id of conversationIds) dirtyConversationIds.add(id)
+  if (opts?.starred) dirtyStarred = true
+}
+
+export function markThreadIncrementallyUpdated(conversationId: string): void {
+  threadRefreshSatisfied.add(conversationId)
+}
+
+/** Push an in-memory snapshot to subscribers without a SQLite read. */
+export function applyLiveStoreData<T>(key: string, data: T): void {
+  const store = registry.get(key) as InternalStore<T> | undefined
+  if (!store || store.listeners.size === 0) return
+  if (data === store.state.data && store.state.status === 'ready' && !store.state.error) {
+    return
+  }
+  store.state = { data, status: 'ready', error: null }
+  store.dirty = false
+  emit(store as InternalStore<unknown>)
+}
+
+function clearDirtyFlags(): void {
+  dirtyConversationIds = new Set()
+  dirtyAllMessages = false
+  dirtyStarred = false
+  threadRefreshSatisfied.clear()
+}
+
+function shouldRefreshStore(store: InternalStore<unknown>, tables: Set<string>): boolean {
+  let needsRefresh = false
+  for (const t of tables) {
+    if (store.tables.has(t)) {
+      needsRefresh = true
+      break
+    }
+  }
+  if (!needsRefresh) return false
+
+  if (!tables.has('messages')) return true
+
+  if (store.key === 'starred') {
+    return dirtyAllMessages || dirtyStarred
+  }
+
+  if (store.key.startsWith(THREAD_KEY_PREFIX)) {
+    const conversationId = store.key.slice(THREAD_KEY_PREFIX.length)
+    if (threadRefreshSatisfied.has(conversationId)) return false
+    return dirtyAllMessages || dirtyConversationIds.has(conversationId)
+  }
+
+  return true
+}
 
 function ensureGlobalListener(): void {
   if (listenerAttached) return
@@ -54,13 +129,11 @@ function ensureGlobalListener(): void {
       const tables = new Set(pendingTables)
       pendingTables.clear()
       for (const store of registry.values()) {
-        for (const t of tables) {
-          if (store.tables.has(t)) {
-            refreshStore(store)
-            break
-          }
+        if (shouldRefreshStore(store, tables)) {
+          refreshStore(store)
         }
       }
+      clearDirtyFlags()
     }, CHANGE_DEBOUNCE_MS)
   })
 }
@@ -195,5 +268,6 @@ export function clearLiveStores(): void {
     flushTimer = null
   }
   pendingTables.clear()
+  clearDirtyFlags()
   registry.clear()
 }

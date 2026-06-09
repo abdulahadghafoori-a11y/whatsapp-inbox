@@ -3,6 +3,8 @@ import {
   isStickerType,
   isTextLikeType,
   isHeavyMediaType,
+  isUrlFirstMediaType,
+  needsFileCacheSync,
 } from '@/lib/messageMediaKind'
 
 describe('messageMediaKind', () => {
@@ -25,5 +27,14 @@ describe('messageMediaKind', () => {
     for (const t of ['text', 'location', 'sticker', 'contacts', 'interactive', 'button'] as const) {
       expect(isHeavyMediaType(t)).toBe(false)
     }
+  })
+
+  it('loads images and stickers from URL, not file-cache sync', () => {
+    expect(isUrlFirstMediaType('image')).toBe(true)
+    expect(isUrlFirstMediaType('sticker')).toBe(true)
+    expect(isUrlFirstMediaType('video')).toBe(false)
+    expect(needsFileCacheSync('video')).toBe(true)
+    expect(needsFileCacheSync('image')).toBe(false)
+    expect(needsFileCacheSync('sticker')).toBe(false)
   })
 })

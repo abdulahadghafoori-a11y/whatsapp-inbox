@@ -14,6 +14,24 @@ const inboxRowStyle = StyleSheet.create({
   },
 })
 
+function lastMessageMediaIcon(type: MessageType | null | undefined): keyof typeof Ionicons.glyphMap | null {
+  switch (type) {
+    case 'image':
+    case 'sticker':
+      return 'image-outline'
+    case 'video':
+      return 'videocam-outline'
+    case 'audio':
+      return 'mic-outline'
+    case 'document':
+      return 'document-outline'
+    case 'location':
+      return 'location-outline'
+    default:
+      return null
+  }
+}
+
 function ConversationItemBase({
   conversation,
   onPress,
@@ -34,6 +52,7 @@ function ConversationItemBase({
   const showTicks =
     conversation.lastMessageDirection === 'outbound' &&
     conversation.lastMessageStatus != null
+  const mediaIcon = lastMessageMediaIcon(conversation.lastMessageType)
 
   return (
     <Pressable
@@ -83,6 +102,14 @@ function ConversationItemBase({
                 messageType={conversation.lastMessageType as MessageType | undefined}
               />
             </View>
+          ) : null}
+          {mediaIcon ? (
+            <Ionicons
+              name={mediaIcon}
+              size={16}
+              color="#8696a0"
+              style={{ marginRight: 2 }}
+            />
           ) : null}
           <Text
             numberOfLines={1}

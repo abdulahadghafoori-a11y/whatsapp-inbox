@@ -1,11 +1,29 @@
 import { formatDateLabel } from '@/lib/format'
+import {
+  CHAT_DATE_ROW_HEIGHT,
+  estimateChatMessageRowHeight,
+} from '@/lib/chatListItemLayout'
+import { enrichChatListWithGroups } from '@/lib/chatListNeighbors'
+
+/** Grouping iterates the full list on every update — disabled for scroll perf. */
+const ENABLE_MESSAGE_GROUPING = false
 import { messageListKey } from '@/lib/messageListKey'
 import { messageRenderEqual } from '@/lib/messageRenderEqual'
 import type { Message } from '@/types'
 
+export type MessageGroupPosition = 'single' | 'first' | 'middle' | 'last'
+
 export type ChatListItem =
-  | { kind: 'message'; id: string; message: Message }
-  | { kind: 'date'; id: string; dateIso: string; label: string }
+  | {
+      kind: 'message'
+      id: string
+      message: Message
+      layoutHeight: number
+      groupPosition?: MessageGroupPosition
+      showAvatar?: boolean
+      showTail?: boolean
+    }
+  | { kind: 'date'; id: string; dateIso: string; label: string; layoutHeight: number }
 
 export function dayKey(iso: string | null): string {
   if (!iso) return ''
@@ -20,7 +38,12 @@ export function buildChatListItems(messages: Message[]): ChatListItem[] {
 
   for (let i = 0; i < reversed.length; i++) {
     const msg = reversed[i]
-    items.push({ kind: 'message', id: messageListKey(msg), message: msg })
+    items.push({
+      kind: 'message',
+      id: messageListKey(msg),
+      message: msg,
+      layoutHeight: estimateChatMessageRowHeight(msg),
+    })
     const older = reversed[i + 1]
     if (!older || dayKey(msg.sentAt) !== dayKey(older.sentAt)) {
       items.push({
@@ -30,21 +53,30 @@ export function buildChatListItems(messages: Message[]): ChatListItem[] {
         id: `date-${dayKey(msg.sentAt)}`,
         dateIso: msg.sentAt,
         label: formatDateLabel(msg.sentAt),
+        layoutHeight: CHAT_DATE_ROW_HEIGHT,
       })
     }
   }
 
-  return items
+  return ENABLE_MESSAGE_GROUPING ? enrichChatListWithGroups(items) : items
 }
 
 function chatListItemStable(old: ChatListItem, row: ChatListItem): boolean {
   if (old.id !== row.id || old.kind !== row.kind) return false
   if (row.kind === 'date') {
-    return old.kind === 'date' && old.label === row.label
+    return (
+      old.kind === 'date' &&
+      old.label === row.label &&
+      old.layoutHeight === row.layoutHeight
+    )
   }
   return (
     old.kind === 'message' &&
     row.kind === 'message' &&
+    old.layoutHeight === row.layoutHeight &&
+    old.groupPosition === row.groupPosition &&
+    old.showAvatar === row.showAvatar &&
+    old.showTail === row.showTail &&
     (old.message === row.message || messageRenderEqual(old.message, row.message))
   )
 }

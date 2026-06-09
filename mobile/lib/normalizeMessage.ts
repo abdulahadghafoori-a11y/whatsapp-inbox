@@ -83,6 +83,7 @@ export function normalizeMessage(raw: Message & Record<string, unknown>): Messag
     localCacheUri: (raw.localCacheUri ?? raw.media_local_path ?? undefined) as
       | string
       | undefined,
+    sendPhase: (raw.sendPhase ?? raw.send_phase ?? undefined) as Message['sendPhase'],
     metadata: (raw.metadata ?? null) as Record<string, unknown> | null,
   }
 }

@@ -13,6 +13,7 @@ type ChatVideoMediaProps = {
   messageId: string
   active?: boolean
   sizeBytes?: number | null
+  remoteThumbUrl?: string | null
   uploading?: boolean
   uploadLabel?: string
   onPress?: () => void
@@ -24,6 +25,7 @@ export function ChatVideoMedia({
   messageId,
   active = true,
   sizeBytes,
+  remoteThumbUrl,
   uploading = false,
   uploadLabel,
   onPress,
@@ -57,6 +59,7 @@ export function ChatVideoMedia({
         uploading={uploading}
         uploadLabel={uploadLabel}
         thumbUri={videoMeta?.thumbUri}
+        remoteThumbUrl={remoteThumbUrl}
       />
     </Pressable>
   )

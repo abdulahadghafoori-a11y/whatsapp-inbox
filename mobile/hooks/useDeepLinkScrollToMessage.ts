@@ -2,7 +2,11 @@ import { useEffect, useRef } from 'react'
 import type { RefObject } from 'react'
 import type { FlatList } from 'react-native-gesture-handler'
 import type { ChatListItem } from '@/lib/chatListItems'
-import { findMessageListIndex, scrollToChatMessage } from '@/lib/scrollToChatMessage'
+import {
+  findMessageListIndex,
+  paginateUntilMessageVisible,
+  scrollToChatMessage,
+} from '@/lib/scrollToChatMessage'
 
 type Options = {
   messageId: string | undefined
@@ -53,15 +57,17 @@ export function useDeepLinkScrollToMessage({
     void (async () => {
       if (tryScroll()) return
 
-      let attempts = 0
-      while (hasOlderRef.current && attempts < 40 && !cancelled) {
-        attempts += 1
-        await fetchOlderMessages()
-        await new Promise((r) => setTimeout(r, 50))
-        if (tryScroll()) return
-      }
+      const found = await paginateUntilMessageVisible({
+        messageId: target,
+        getItems: () => chatListItemsRef.current,
+        hasOlder: () => hasOlderRef.current,
+        fetchOlder: fetchOlderMessages,
+      })
 
-      if (!cancelled && consumedRef.current !== target) {
+      if (cancelled) return
+      if (found && tryScroll()) return
+
+      if (consumedRef.current !== target) {
         consumedRef.current = target
         onNotFound()
       }
