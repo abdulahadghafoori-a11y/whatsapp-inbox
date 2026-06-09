@@ -74,6 +74,8 @@ export const messages = sqliteTable(
     createdAt: text('created_at').notNull(),
     /** Optimistic local file path shown before the upload/download resolves. */
     localPreviewUri: text('local_preview_uri'),
+    /** Permanent on-device path after inbound/outbound media is stored locally. */
+    mediaLocalPath: text('media_local_path'),
     /** Server change-feed cursor; null for not-yet-synced optimistic rows. */
     seq: integer('seq'),
     /** Full Message JSON (reactions, replyTo, metadata) for fields not promoted. */

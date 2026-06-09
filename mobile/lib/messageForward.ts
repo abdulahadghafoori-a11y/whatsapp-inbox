@@ -1,4 +1,4 @@
-import { getCachedMediaUriSync } from '@/lib/messageMediaCache'
+import { resolveMessageLocalMediaUri } from '@/lib/messageLocalMedia'
 import type { Message, MessageType } from '@/types'
 
 const FORWARDABLE_MEDIA_TYPES = new Set<MessageType>([
@@ -11,8 +11,7 @@ const FORWARDABLE_MEDIA_TYPES = new Set<MessageType>([
 
 /** True when media bytes are on-device (or outbound was sent with a stored key). */
 export function isMessageMediaLocallyPresent(message: Message): boolean {
-  if (message.localPreviewUri) return true
-  if (getCachedMediaUriSync(message.id)) return true
+  if (resolveMessageLocalMediaUri(message)) return true
   if (
     message.direction === 'outbound' &&
     message.mediaUrl &&

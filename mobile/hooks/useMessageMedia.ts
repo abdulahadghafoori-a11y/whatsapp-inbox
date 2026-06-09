@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import { useMediaUrl } from '@/hooks/useMedia'
 import { useCachedMedia } from '@/hooks/useCachedMediaUri'
-import { resolveUploadUri } from '@/lib/uploadUri'
+import { resolveMessageLocalMediaUri } from '@/lib/messageLocalMedia'
 import type { Message } from '@/types'
 
 type MessageMediaInput = Pick<
@@ -13,6 +13,7 @@ type MessageMediaInput = Pick<
   | 'mediaThumbUrl'
   | 'mediaStatus'
   | 'localPreviewUri'
+  | 'localCacheUri'
   | 'mediaMimeType'
   | 'mediaFilename'
 >
@@ -36,6 +37,10 @@ export function useMessageMedia(
   const loadRemote = opts?.loadRemote !== false
   const pending = message.mediaStatus === 'pending'
   const hasRemoteKey = !!message.mediaUrl && !pending
+  const messageLocalUri = useMemo(
+    () => resolveMessageLocalMediaUri(message),
+    [message.id, message.mediaUrl, message.localPreviewUri, message.localCacheUri],
+  )
   const { uri: cachedUri, thumbUri: cachedThumbUri } = useCachedMedia(
     message.id,
     message.mediaUrl,
@@ -47,7 +52,7 @@ export function useMessageMedia(
       : null
 
   const { data: thumbUrl } = useMediaUrl(
-    thumbKey && loadRemote && !cachedUri && !message.localPreviewUri ? thumbKey : null,
+    thumbKey && loadRemote && !messageLocalUri ? thumbKey : null,
     // Use the real message id (not a ":thumb" suffix) so the presign batch can
     // authorize it (server validates messageId as a UUID against the thumb key).
     // React Query keys stay distinct because the s3Key differs from the full media.
@@ -55,18 +60,16 @@ export function useMessageMedia(
   )
 
   const { data: remoteUrl, isLoading: remoteLoading, isError: remoteError } = useMediaUrl(
-    hasRemoteKey && loadRemote && !cachedUri && !message.localPreviewUri
-      ? message.mediaUrl
-      : null,
+    hasRemoteKey && loadRemote && !messageLocalUri ? message.mediaUrl : null,
     message.id,
   )
 
   const displayUrl = useMemo(() => {
+    if (messageLocalUri) return messageLocalUri
     if (cachedUri) return cachedUri
-    if (message.localPreviewUri) return resolveUploadUri(message.localPreviewUri)
     if (cachedThumbUri) return cachedThumbUri
     return thumbUrl ?? remoteUrl ?? null
-  }, [cachedUri, cachedThumbUri, message.localPreviewUri, thumbUrl, remoteUrl])
+  }, [messageLocalUri, cachedUri, cachedThumbUri, thumbUrl, remoteUrl])
 
   const playbackUrl = useMemo(
     () => (displayUrl && isLocalUri(displayUrl) ? displayUrl : displayUrl),
@@ -75,13 +78,11 @@ export function useMessageMedia(
 
   const waitingForRemote =
     hasRemoteKey &&
-    !cachedUri &&
+    !messageLocalUri &&
     !cachedThumbUri &&
-    !message.localPreviewUri &&
     remoteLoading &&
     !thumbUrl
-  const failedRemote =
-    hasRemoteKey && !cachedUri && !message.localPreviewUri && remoteError
+  const failedRemote = hasRemoteKey && !messageLocalUri && remoteError
 
   return {
     displayUrl,

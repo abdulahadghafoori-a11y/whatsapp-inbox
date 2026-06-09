@@ -1,4 +1,12 @@
-import { memo, useCallback, useMemo, useRef, type ReactElement, type RefObject } from 'react'
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  type ReactElement,
+  type RefObject,
+} from 'react'
 import { View, ActivityIndicator, Platform, RefreshControl } from 'react-native'
 import { FlashList, type FlashListRef } from '@shopify/flash-list'
 import { ScrollView } from 'react-native-gesture-handler'
@@ -51,6 +59,8 @@ export const InboxConversationList = memo(function InboxConversationList({
   empty,
 }: InboxConversationListProps) {
   const canLoadMore = useRef(false)
+  const scrollOffsetRef = useRef(0)
+  const restoreOffsetRef = useRef<number | null>(null)
   // Track the single currently-open swipe row so opening another closes it
   // (matches WhatsApp — only one chat reveals its actions at a time).
   const openRef = useRef<{ id: string; ref: Swipeable | null } | null>(null)
@@ -79,8 +89,18 @@ export const InboxConversationList = memo(function InboxConversationList({
 
   const handleEndReached = useCallback(() => {
     if (!canLoadMore.current || !hasNextPage || loadingMore) return
+    restoreOffsetRef.current = scrollOffsetRef.current
     onLoadMore()
   }, [hasNextPage, loadingMore, onLoadMore])
+
+  useEffect(() => {
+    if (loadingMore || restoreOffsetRef.current == null) return
+    const offset = restoreOffsetRef.current
+    restoreOffsetRef.current = null
+    requestAnimationFrame(() => {
+      listRef.current?.scrollToOffset({ offset, animated: false })
+    })
+  }, [loadingMore, listRef, conversations.length])
 
   const closeOpenSwipe = useCallback(() => {
     openRef.current?.ref?.close()
@@ -97,9 +117,15 @@ export const InboxConversationList = memo(function InboxConversationList({
       ref={listRef}
       style={{ flex: 1 }}
       data={conversations}
+      extraData={conversations.length}
       keyExtractor={(item) => item.id}
+      getItemType={() => 'conversation'}
       renderItem={renderItem}
       renderScrollComponent={ScrollView}
+      onScroll={(e) => {
+        scrollOffsetRef.current = e.nativeEvent.contentOffset.y
+      }}
+      scrollEventThrottle={16}
       keyboardShouldPersistTaps="handled"
       showsVerticalScrollIndicator
       persistentScrollbar={Platform.OS === 'android'}

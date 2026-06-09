@@ -37,11 +37,12 @@ const MESSAGE_COLUMNS = [
   'sent_at',
   'created_at',
   'local_preview_uri',
+  'media_local_path',
   'seq',
   'payload',
 ] as const
 
-const MESSAGE_UPSERT_SQL = buildUpsertSql('messages', MESSAGE_COLUMNS, 'id')
+const MESSAGE_UPSERT_SQL = buildMessageUpsertSql()
 
 function messageValues(m: Message, seq?: number | null): (string | number | null)[] {
   return [
@@ -70,6 +71,7 @@ function messageValues(m: Message, seq?: number | null): (string | number | null
     m.sentAt,
     m.createdAt,
     m.localPreviewUri ?? null,
+    m.localCacheUri ?? null,
     seq ?? null,
     JSON.stringify(m),
   ]
@@ -263,6 +265,13 @@ export async function searchLocalMessages(
   }))
 }
 
+type MessageRow = {
+  id: string
+  payload: string
+  local_preview_uri?: string | null
+  media_local_path?: string | null
+}
+
 function parseMessagePayload(raw: string | null | undefined): Message | null {
   if (!raw) return null
   try {
@@ -272,14 +281,29 @@ function parseMessagePayload(raw: string | null | undefined): Message | null {
   }
 }
 
+/** Merge promoted SQLite columns into the JSON payload (client-only fields). */
+function mergeMessageRow(row: MessageRow): Message | null {
+  const parsed = parseMessageCached(row.id, row.payload)
+  if (!parsed) return null
+  const preview = row.local_preview_uri ?? parsed.localPreviewUri
+  const cache = row.media_local_path ?? parsed.localCacheUri
+  if (preview === parsed.localPreviewUri && cache === parsed.localCacheUri) return parsed
+  return {
+    ...parsed,
+    ...(preview ? { localPreviewUri: preview } : {}),
+    ...(cache ? { localCacheUri: cache } : {}),
+  }
+}
+
 /** Read a single message's full payload from the device DB. */
 export async function getMessageById(id: string): Promise<Message | null> {
   const db = getRawDb()
-  const row = await db.getFirstAsync<{ payload: string }>(
-    'SELECT payload FROM messages WHERE id = ?',
+  const row = await db.getFirstAsync<MessageRow>(
+    `SELECT id, payload, local_preview_uri, media_local_path FROM messages WHERE id = ?`,
     [id],
   )
-  return parseMessagePayload(row?.payload)
+  if (!row) return null
+  return mergeMessageRow(row)
 }
 
 /**
@@ -548,8 +572,8 @@ const threadResultCache = new Map<string, Message[]>()
 
 async function readThreadMessages(conversationId: string, limit: number): Promise<Message[]> {
   const db = getRawDb()
-  const rows = await db.getAllAsync<{ id: string; payload: string }>(
-    `SELECT id, payload FROM messages
+  const rows = await db.getAllAsync<MessageRow>(
+    `SELECT id, payload, local_preview_uri, media_local_path FROM messages
        WHERE conversation_id = ? AND deleted_at IS NULL
        ORDER BY sent_at DESC, created_at DESC
        LIMIT ?`,
@@ -559,7 +583,7 @@ async function readThreadMessages(conversationId: string, limit: number): Promis
   const out: Message[] = []
   for (let i = 0; i < rows.length; i++) {
     const r = rows[rows.length - 1 - i]
-    const parsed = parseMessageCached(r.id, r.payload)
+    const parsed = mergeMessageRow(r)
     if (parsed) out.push(parsed)
   }
   const stable = reuseArrayRef(threadResultCache.get(conversationId), out)
@@ -618,14 +642,14 @@ const starredResultCache = { current: undefined as Message[] | undefined }
 
 async function readStarredMessages(): Promise<Message[]> {
   const db = getRawDb()
-  const rows = await db.getAllAsync<{ id: string; payload: string }>(
-    `SELECT id, payload FROM messages
+  const rows = await db.getAllAsync<MessageRow>(
+    `SELECT id, payload, local_preview_uri, media_local_path FROM messages
        WHERE starred_at IS NOT NULL
        ORDER BY starred_at DESC`,
   )
   const out: Message[] = []
   for (const r of rows) {
-    const parsed = parseMessageCached(r.id, r.payload)
+    const parsed = mergeMessageRow(r)
     if (parsed) out.push(parsed)
   }
   const stable = reuseArrayRef(starredResultCache.current, out)
@@ -697,4 +721,19 @@ function buildUpsertSql(
     .map((c) => `${c}=excluded.${c}`)
     .join(', ')
   return `INSERT INTO ${table} (${cols}) VALUES (${placeholders}) ON CONFLICT(${pk}) DO UPDATE SET ${updates}`
+}
+
+/** Preserve client-only media paths when server sync omits them. */
+function buildMessageUpsertSql(): string {
+  const cols = MESSAGE_COLUMNS.join(', ')
+  const placeholders = MESSAGE_COLUMNS.map(() => '?').join(', ')
+  const preserve = new Set(['local_preview_uri', 'media_local_path'])
+  const updates = MESSAGE_COLUMNS.filter((c) => c !== 'id')
+    .map((c) =>
+      preserve.has(c)
+        ? `${c}=COALESCE(excluded.${c}, messages.${c})`
+        : `${c}=excluded.${c}`,
+    )
+    .join(', ')
+  return `INSERT INTO messages (${cols}) VALUES (${placeholders}) ON CONFLICT(id) DO UPDATE SET ${updates}`
 }

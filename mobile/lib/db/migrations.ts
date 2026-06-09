@@ -103,6 +103,12 @@ const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 2,
+    up: `
+      ALTER TABLE messages ADD COLUMN media_local_path TEXT;
+    `,
+  },
 ]
 
 /** Apply any pending migrations. Safe to call on every app start. */

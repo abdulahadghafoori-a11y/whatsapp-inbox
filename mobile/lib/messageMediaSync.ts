@@ -15,6 +15,7 @@ import {
 } from '@/lib/messageMediaCache'
 import { hashMediaFile } from '@/lib/mediaContentHash'
 import { isHeavyMediaType, isStickerType } from '@/lib/messageMediaKind'
+import { resolveMessageLocalMediaUri } from '@/lib/messageLocalMedia'
 import type { Message, MessageType } from '@/types'
 
 export type SyncableMediaMessage = {
@@ -25,6 +26,7 @@ export type SyncableMediaMessage = {
   mediaUrl: string | null
   mediaStatus: Message['mediaStatus']
   localPreviewUri?: string | null
+  localCacheUri?: string | null
   mediaMimeType: string | null
   mediaFilename: string | null
 }
@@ -80,7 +82,7 @@ function isCacheableMedia(message: SyncableMediaMessage): boolean {
 }
 
 function isAlreadyCachedSync(message: SyncableMediaMessage): boolean {
-  return !!resolveCachedMediaUriSync(message.id, message.mediaUrl)
+  return !!resolveMessageLocalMediaUri(message)
 }
 
 async function presignedUrlForKey(s3Key: string, messageId: string): Promise<string | null> {

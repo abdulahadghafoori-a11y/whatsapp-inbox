@@ -33,8 +33,8 @@ import { MediaFullscreenViewer } from './MediaFullscreenViewer'
 import { VideoFullscreenViewer } from './VideoFullscreenViewer'
 import { mediaSendOverlayLabel } from '@/lib/mediaSendPhase'
 import { MESSAGE_LONG_PRESS_MS } from '@/lib/chatLongPress'
-import { getCachedMediaUriSync } from '@/lib/messageMediaCache'
 import { mediaDisplayCache } from '@/lib/mediaDisplayCache'
+import { resolveMessageLocalMediaUri } from '@/lib/messageLocalMedia'
 import { isStickerType } from '@/lib/messageMediaKind'
 import { hasMessageMediaBeenActivated } from '@/lib/visibleMessageMedia'
 import { resolveUploadUri } from '@/lib/uploadUri'
@@ -159,15 +159,15 @@ function MediaMessageBase({
   const mediaActive = useMessageMediaActive(message.id)
   const sessionDisplay = mediaDisplayCache.get(message.id)
   const cachedUri = useResolvedCachedMediaUri(message.id, message.mediaUrl)
-  const diskUri = cachedUri ?? getCachedMediaUriSync(message.id) ?? null
-  const seededLocalUri = message.localPreviewUri
-    ? resolveUploadUri(message.localPreviewUri)
-    : null
-  const cachedOnDisk = !!(diskUri || message.localPreviewUri)
-  const hasLocalSource = !!(cachedOnDisk || message.localPreviewUri)
+  const messageLocalUri = resolveMessageLocalMediaUri(message)
+  const diskUri = messageLocalUri ?? cachedUri ?? null
+  const seededLocalUri = messageLocalUri
+  const cachedOnDisk = !!diskUri
+  const hasLocalSource = !!diskUri
   const showMedia =
     cachedOnDisk ||
     !!message.localPreviewUri ||
+    !!message.localCacheUri ||
     (outbound && !pending && !uploading) ||
     hasMessageMediaBeenActivated(message.id)
   const [manualDownload, setManualDownload] = useState(false)
@@ -180,7 +180,7 @@ function MediaMessageBase({
   // Once a local image file exists and no ThumbHash is registered yet, generate
   // it off the render path and publish it so every device gets instant placeholders.
   const thumbhashSource =
-    message.type === 'image' ? (cachedUri ?? message.localPreviewUri ?? null) : null
+    message.type === 'image' ? (diskUri ?? message.localPreviewUri ?? null) : null
   useEffect(() => {
     if (message.type !== 'image' || message.thumbhash || !thumbhashSource) return
     if (!sha256FromStorageKey(message.mediaUrl)) return

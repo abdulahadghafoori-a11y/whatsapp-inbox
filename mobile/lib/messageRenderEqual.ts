@@ -44,6 +44,7 @@ export function messageRenderEqual(a: Message, b: Message): boolean {
     a.mediaFilename === b.mediaFilename &&
     a.deletedAt === b.deletedAt &&
     a.localPreviewUri === b.localPreviewUri &&
+    a.localCacheUri === b.localCacheUri &&
     a.errorMessage === b.errorMessage &&
     a.type === b.type &&
     a.sentAt === b.sentAt &&

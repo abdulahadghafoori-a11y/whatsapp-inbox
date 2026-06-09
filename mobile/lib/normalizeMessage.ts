@@ -77,7 +77,12 @@ export function normalizeMessage(raw: Message & Record<string, unknown>): Messag
     replyTo: normalizeReplyPreview(raw.replyTo),
     sentAt,
     createdAt,
-    localPreviewUri: raw.localPreviewUri,
+    localPreviewUri: (raw.localPreviewUri ?? raw.local_preview_uri ?? undefined) as
+      | string
+      | undefined,
+    localCacheUri: (raw.localCacheUri ?? raw.media_local_path ?? undefined) as
+      | string
+      | undefined,
     metadata: (raw.metadata ?? null) as Record<string, unknown> | null,
   }
 }

@@ -1,7 +1,6 @@
 /** Session cache of resolved media display state — survives row unmounts. */
 
-import { resolveCachedMediaUriSync } from '@/lib/messageMediaCache'
-import { resolveUploadUri } from '@/lib/uploadUri'
+import { resolveMessageLocalMediaUri } from '@/lib/messageLocalMedia'
 import type { Message } from '@/types'
 
 export type CachedMediaDisplay = {
@@ -51,9 +50,7 @@ export function warmMediaDisplayCacheFromMessages(messages: Message[]): void {
     const displayType = displayTypeForMessage(msg.type)
     if (!displayType) continue
 
-    const diskUri =
-      resolveCachedMediaUriSync(msg.id, msg.mediaUrl) ??
-      (msg.localPreviewUri ? resolveUploadUri(msg.localPreviewUri) : null)
+    const diskUri = resolveMessageLocalMediaUri(msg)
     if (!diskUri) continue
 
     mediaDisplayCache.set(msg.id, {

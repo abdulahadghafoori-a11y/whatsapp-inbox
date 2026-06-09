@@ -3,14 +3,13 @@ import {
   ensureMediaIndexLoaded,
   getCachedMediaUri,
   getCachedMediaUriSync,
-  resolveCachedMediaUriSync,
 } from '@/lib/messageMediaCache'
+import { resolveMessageLocalMediaUri } from '@/lib/messageLocalMedia'
 import {
   queueMessageMediaSync,
   syncMessageMedia,
   type SyncableMediaMessage,
 } from '@/lib/messageMediaSync'
-import { resolveUploadUri } from '@/lib/uploadUri'
 
 /** Best URI for playback: on-device file first, then stream URL (cache fills in background). */
 export async function resolvePlaybackUri(
@@ -19,17 +18,11 @@ export async function resolvePlaybackUri(
 ): Promise<string | null> {
   await ensureMediaIndexLoaded()
 
-  const cached = resolveCachedMediaUriSync(message.id, message.mediaUrl)
-  if (cached) {
+  const local = resolveMessageLocalMediaUri(message)
+  if (local) {
     if (!getCachedMediaUriSync(message.id) && message.mediaUrl?.startsWith('media/')) {
       void aliasMessageToBlob(message.id, message.mediaUrl)
     }
-    return cached
-  }
-
-  if (message.localPreviewUri) {
-    const local = resolveUploadUri(message.localPreviewUri)
-    queueMessageMediaSync(message)
     return local
   }
 
@@ -44,14 +37,14 @@ export async function resolvePlaybackUri(
 
 /** Fast path when the file is already on disk (no network). */
 export function resolvePlaybackUriSync(
-  messageId: string,
-  localPreviewUri?: string | null,
+  message: Pick<
+    SyncableMediaMessage,
+    'id' | 'mediaUrl' | 'localPreviewUri' | 'localCacheUri'
+  >,
   remoteUrl?: string | null,
-  mediaUrl?: string | null,
 ): string | null {
-  const cached = resolveCachedMediaUriSync(messageId, mediaUrl)
-  if (cached) return cached
-  if (localPreviewUri) return resolveUploadUri(localPreviewUri)
+  const local = resolveMessageLocalMediaUri(message)
+  if (local) return local
   return remoteUrl ?? null
 }
 
@@ -59,12 +52,7 @@ export async function warmPlaybackCache(
   message: SyncableMediaMessage,
   remoteUrl?: string | null,
 ): Promise<string | null> {
-  const sync = resolvePlaybackUriSync(
-    message.id,
-    message.localPreviewUri,
-    remoteUrl,
-    message.mediaUrl,
-  )
+  const sync = resolvePlaybackUriSync(message, remoteUrl)
   if (sync && !sync.startsWith('http')) return sync
 
   const cached = await getCachedMediaUri(message.id)

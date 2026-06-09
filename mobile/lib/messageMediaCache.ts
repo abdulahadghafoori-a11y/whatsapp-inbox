@@ -9,10 +9,17 @@ const INDEX_KEY = 'wa-message-media-v2'
 const LEGACY_INDEX_KEY = 'wa-message-media-v1'
 const UPLOAD_HASH_INDEX_KEY = 'wa-media-hash-to-s3-v1'
 const MEDIA_DIR = `${FileSystem.documentDirectory ?? ''}wa-media/`
+/** Legacy path — treated as permanent (never evicted). */
 const BLOB_DIR = `${MEDIA_DIR}blobs/`
+/** Active conversations (recent activity) — never evicted. */
+const PERMANENT_DIR = `${MEDIA_DIR}permanent/`
+/** Older conversations — LRU-evictable archive. */
+const ARCHIVE_DIR = `${MEDIA_DIR}archive/`
 
-/** Max on-device media cache before oldest blobs are evicted (LRU by cachedAt). */
-const MEDIA_CACHE_BUDGET_BYTES = 250 * 1024 * 1024
+/** LRU budget for archive-tier blobs only. */
+const ARCHIVE_CACHE_BUDGET_BYTES = 500 * 1024 * 1024
+/** Conversations with activity within this window store media in permanent/. */
+const ACTIVE_CONVERSATION_MS = 30 * 24 * 60 * 60 * 1000
 /** Delete leftover upload temp files older than this. */
 const UPLOAD_TEMP_MAX_AGE_MS = 60 * 60 * 1000
 
@@ -72,9 +79,53 @@ function emptyIndex(): MediaIndexV2 {
   return { messageToBlob: {}, blobs: {} }
 }
 
-function blobPath(blobId: string, ext: string) {
+function blobPath(dir: string, blobId: string, ext: string) {
   const safe = blobId.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 180)
-  return `${BLOB_DIR}${safe}${ext}`
+  return `${dir}${safe}${ext}`
+}
+
+function isArchiveUri(uri: string): boolean {
+  return uri.includes('/archive/')
+}
+
+async function storageDirForConversation(conversationId: string): Promise<string> {
+  try {
+    const { ensureDbReady, getRawDb } = await import('@/lib/db/client')
+    await ensureDbReady()
+    const row = await getRawDb().getFirstAsync<{ last_message_at: string | null }>(
+      'SELECT last_message_at FROM conversations WHERE id = ?',
+      [conversationId],
+    )
+    const lastAt = row?.last_message_at ? Date.parse(row.last_message_at) : Date.now()
+    if (Date.now() - lastAt < ACTIVE_CONVERSATION_MS) return PERMANENT_DIR
+  } catch {
+    // Default to permanent when conversation metadata is unavailable.
+  }
+  return ARCHIVE_DIR
+}
+
+async function persistMessageLocalCacheUri(
+  messageId: string,
+  localUri: string,
+): Promise<void> {
+  const { patchLocalMessage } = await import('@/lib/db/repo')
+  await patchLocalMessage(messageId, { localCacheUri: localUri })
+}
+
+async function clearMessageLocalCacheUri(messageId: string): Promise<void> {
+  const { patchLocalMessage } = await import('@/lib/db/repo')
+  await patchLocalMessage(messageId, { localCacheUri: null })
+}
+
+async function backfillLocalCacheUrisFromIndex(index: MediaIndexV2): Promise<void> {
+  const { getMessageById, patchLocalMessage } = await import('@/lib/db/repo')
+  for (const [messageId, blobId] of Object.entries(index.messageToBlob)) {
+    const uri = index.blobs[blobId]?.localUri
+    if (!uri) continue
+    const existing = await getMessageById(messageId)
+    if (existing?.localCacheUri) continue
+    await patchLocalMessage(messageId, { localCacheUri: uri })
+  }
 }
 
 async function loadIndex(): Promise<MediaIndexV2> {
@@ -170,7 +221,12 @@ async function reconcileStaleBlobs(index: MediaIndexV2) {
   }
 
   if (changed) await saveIndex(index)
-  if (removedMessageIds.length) notifyMessageCacheListeners(removedMessageIds)
+  if (removedMessageIds.length) {
+    notifyMessageCacheListeners(removedMessageIds)
+    for (const messageId of removedMessageIds) {
+      void clearMessageLocalCacheUri(messageId)
+    }
+  }
 }
 
 export async function ensureMediaIndexLoaded(): Promise<MediaIndexV2> {
@@ -178,6 +234,7 @@ export async function ensureMediaIndexLoaded(): Promise<MediaIndexV2> {
   if (!reconcilePromise) {
     reconcilePromise = reconcileStaleBlobs(index).then(async () => {
       await enforceMediaCacheBudget(index)
+      void backfillLocalCacheUrisFromIndex(index).catch(() => {})
       if (indexMem) notifyMessageCacheListeners(Object.keys(indexMem.messageToBlob))
     })
   }
@@ -195,23 +252,25 @@ async function fileSize(uri: string): Promise<number> {
 }
 
 /**
- * Bound on-device media growth: if total blob size exceeds the budget, evict the
- * oldest blobs (by cachedAt) until under 90% of budget. Was: cache grew forever.
+ * Bound archive-tier media growth: permanent + legacy blobs are never evicted.
+ * When archive exceeds budget, evict oldest archive blobs and clear SQLite paths.
  */
 export async function enforceMediaCacheBudget(index?: MediaIndexV2): Promise<void> {
   const idx = index ?? (await loadIndex())
   const entries = await Promise.all(
-    Object.entries(idx.blobs).map(async ([blobId, record]) => ({
-      blobId,
-      record,
-      size: await fileSize(record.localUri),
-      ts: Date.parse(record.cachedAt) || 0,
-    })),
+    Object.entries(idx.blobs)
+      .filter(([, record]) => isArchiveUri(record.localUri))
+      .map(async ([blobId, record]) => ({
+        blobId,
+        record,
+        size: await fileSize(record.localUri),
+        ts: Date.parse(record.cachedAt) || 0,
+      })),
   )
   let total = entries.reduce((sum, e) => sum + e.size, 0)
-  if (total <= MEDIA_CACHE_BUDGET_BYTES) return
+  if (total <= ARCHIVE_CACHE_BUDGET_BYTES) return
 
-  const target = MEDIA_CACHE_BUDGET_BYTES * 0.9
+  const target = ARCHIVE_CACHE_BUDGET_BYTES * 0.9
   entries.sort((a, b) => a.ts - b.ts) // oldest first
   let changed = false
   const evictedMessageIds: string[] = []
@@ -236,6 +295,9 @@ export async function enforceMediaCacheBudget(index?: MediaIndexV2): Promise<voi
   if (changed) {
     await saveIndex(idx)
     notifyMessageCacheListeners(evictedMessageIds)
+    for (const messageId of evictedMessageIds) {
+      void clearMessageLocalCacheUri(messageId)
+    }
   }
 }
 
@@ -391,6 +453,8 @@ export async function ensureMediaDir() {
   if (!FileSystem.documentDirectory) return false
   try {
     await FileSystem.makeDirectoryAsync(BLOB_DIR, { intermediates: true })
+    await FileSystem.makeDirectoryAsync(PERMANENT_DIR, { intermediates: true })
+    await FileSystem.makeDirectoryAsync(ARCHIVE_DIR, { intermediates: true })
     return true
   } catch {
     return false
@@ -450,6 +514,7 @@ async function linkMessageToBlob(
   validatedBlobs.add(blobId)
   await saveIndex(index)
   notifyMessageCacheListeners([messageId])
+  void persistMessageLocalCacheUri(messageId, withThumb.localUri)
   return withThumb.localUri
 }
 
@@ -469,6 +534,7 @@ export async function getCachedMediaEntry(messageId: string) {
   validatedBlobs.delete(blobId)
   await saveIndex(index)
   notifyMessageCacheListeners([messageId])
+  void clearMessageLocalCacheUri(messageId)
   return null
 }
 
@@ -508,6 +574,8 @@ export async function transferMessageMediaCache(
   delete index.messageToBlob[fromMessageId]
   await saveIndex(index)
   notifyMessageCacheListeners([fromMessageId, toMessageId])
+  const uri = index.blobs[blobId]?.localUri
+  if (uri) void persistMessageLocalCacheUri(toMessageId, uri)
 }
 
 /** Point message at an existing blob (same S3 key / same file hash). */
@@ -523,13 +591,14 @@ export async function aliasMessageToBlob(
   validatedBlobs.add(blobId)
   await saveIndex(index)
   notifyMessageCacheListeners([messageId])
+  void persistMessageLocalCacheUri(messageId, record.localUri)
   return record.localUri
 }
 
 /** Copy local picker/recording file into shared blob storage (deduped by content hash). */
 export async function cacheMediaFromLocalFile(
   messageId: string,
-  _conversationId: string,
+  conversationId: string,
   localUri: string,
   mimeType: string,
   filename?: string | null,
@@ -553,7 +622,8 @@ export async function cacheMediaFromLocalFile(
 
   const ext = extForMime(mimeType, filename)
   const id = blobId ?? `local:${messageId}`
-  const dest = blobPath(id, ext)
+  const dir = await storageDirForConversation(conversationId)
+  const dest = blobPath(dir, id, ext)
 
   if (!index.blobs[id]) {
     try {
@@ -577,7 +647,7 @@ export async function cacheMediaFromLocalFile(
 /** Download S3 media once per key; further messages with the same mediaUrl reuse the file. */
 export async function cacheMediaFromRemoteUrl(
   messageId: string,
-  _conversationId: string,
+  conversationId: string,
   downloadUrl: string,
   mimeType: string,
   filename?: string | null,
@@ -607,7 +677,8 @@ export async function cacheMediaFromRemoteUrl(
 
   const ext = extForMime(mimeType, filename)
   const id = blobId ?? `remote:${messageId}`
-  const dest = blobPath(id, ext)
+  const dir = await storageDirForConversation(conversationId)
+  const dest = blobPath(dir, id, ext)
 
   if (!index.blobs[id]) {
     try {

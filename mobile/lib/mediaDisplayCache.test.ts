@@ -2,14 +2,12 @@ import { describe, expect, it, vi } from 'vitest'
 import { warmMediaDisplayCacheFromMessages, mediaDisplayCache } from '@/lib/mediaDisplayCache'
 import type { Message } from '@/types'
 
-vi.mock('@/lib/messageMediaCache', () => ({
-  resolveCachedMediaUriSync: vi.fn((id: string) =>
-    id === 'm1' ? 'file:///cache/photo.jpg' : null,
-  ),
-}))
-
-vi.mock('@/lib/uploadUri', () => ({
-  resolveUploadUri: (u: string) => u,
+vi.mock('@/lib/messageLocalMedia', () => ({
+  resolveMessageLocalMediaUri: vi.fn((msg: Message) => {
+    if (msg.localCacheUri) return msg.localCacheUri
+    if (msg.id === 'm1') return 'file:///cache/photo.jpg'
+    return null
+  }),
 }))
 
 function msg(overrides: Partial<Message> = {}): Message {
@@ -44,8 +42,15 @@ describe('warmMediaDisplayCacheFromMessages', () => {
     expect(hit?.type).toBe('image')
   })
 
+  it('seeds from SQLite local cache path', () => {
+    warmMediaDisplayCacheFromMessages([
+      msg({ id: 'm2', localCacheUri: 'file:///sqlite/photo.jpg' }),
+    ])
+    expect(mediaDisplayCache.get('m2')?.uri).toBe('file:///sqlite/photo.jpg')
+  })
+
   it('skips messages without disk cache', () => {
-    warmMediaDisplayCacheFromMessages([msg({ id: 'm2' })])
-    expect(mediaDisplayCache.has('m2')).toBe(false)
+    warmMediaDisplayCacheFromMessages([msg({ id: 'm3' })])
+    expect(mediaDisplayCache.has('m3')).toBe(false)
   })
 })
