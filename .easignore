@@ -1,0 +1,3 @@
+# Keep local android/ in git for Windows dev builds, but never upload it to EAS.
+# Otherwise EAS skips prebuild and both dev + prod APKs share com.salesinbox.app.
+mobile/android/
