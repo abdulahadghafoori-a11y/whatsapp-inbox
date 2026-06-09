@@ -1,9 +1,8 @@
 name: Production Android Build
 
+# Manual only — run from Expo dashboard or: eas workflow:run production-android.yml
 on:
-  push:
-    branches: ['main']
-    paths: ['mobile/**']
+  workflow_dispatch: {}
 
 jobs:
   build_android:
