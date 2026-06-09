@@ -42,6 +42,35 @@ const MESSAGE_COLUMNS = [
   'payload',
 ] as const
 
+function buildUpsertSql(
+  table: string,
+  columns: readonly string[],
+  pk: string,
+): string {
+  const cols = columns.join(', ')
+  const placeholders = columns.map(() => '?').join(', ')
+  const updates = columns
+    .filter((c) => c !== pk)
+    .map((c) => `${c}=excluded.${c}`)
+    .join(', ')
+  return `INSERT INTO ${table} (${cols}) VALUES (${placeholders}) ON CONFLICT(${pk}) DO UPDATE SET ${updates}`
+}
+
+/** Preserve client-only media paths when server sync omits them. */
+function buildMessageUpsertSql(): string {
+  const cols = MESSAGE_COLUMNS.join(', ')
+  const placeholders = MESSAGE_COLUMNS.map(() => '?').join(', ')
+  const preserve = new Set(['local_preview_uri', 'media_local_path'])
+  const updates = MESSAGE_COLUMNS.filter((c) => c !== 'id')
+    .map((c) =>
+      preserve.has(c)
+        ? `${c}=COALESCE(excluded.${c}, messages.${c})`
+        : `${c}=excluded.${c}`,
+    )
+    .join(', ')
+  return `INSERT INTO messages (${cols}) VALUES (${placeholders}) ON CONFLICT(id) DO UPDATE SET ${updates}`
+}
+
 const MESSAGE_UPSERT_SQL = buildMessageUpsertSql()
 
 function messageValues(m: Message, seq?: number | null): (string | number | null)[] {
@@ -700,40 +729,3 @@ export function useStarredMessages() {
   return { messages: live.data, status: live.status, error: live.error }
 }
 
-/* -------------------------------------------------------------------------- */
-/*  Helpers                                                                   */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Build an `INSERT ... ON CONFLICT(pk) DO UPDATE SET ...` statement for the
- * given columns. Every non-PK column is overwritten from the incoming row so a
- * re-sync always wins over stale local data.
- */
-function buildUpsertSql(
-  table: string,
-  columns: readonly string[],
-  pk: string,
-): string {
-  const cols = columns.join(', ')
-  const placeholders = columns.map(() => '?').join(', ')
-  const updates = columns
-    .filter((c) => c !== pk)
-    .map((c) => `${c}=excluded.${c}`)
-    .join(', ')
-  return `INSERT INTO ${table} (${cols}) VALUES (${placeholders}) ON CONFLICT(${pk}) DO UPDATE SET ${updates}`
-}
-
-/** Preserve client-only media paths when server sync omits them. */
-function buildMessageUpsertSql(): string {
-  const cols = MESSAGE_COLUMNS.join(', ')
-  const placeholders = MESSAGE_COLUMNS.map(() => '?').join(', ')
-  const preserve = new Set(['local_preview_uri', 'media_local_path'])
-  const updates = MESSAGE_COLUMNS.filter((c) => c !== 'id')
-    .map((c) =>
-      preserve.has(c)
-        ? `${c}=COALESCE(excluded.${c}, messages.${c})`
-        : `${c}=excluded.${c}`,
-    )
-    .join(', ')
-  return `INSERT INTO messages (${cols}) VALUES (${placeholders}) ON CONFLICT(id) DO UPDATE SET ${updates}`
-}

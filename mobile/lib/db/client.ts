@@ -35,11 +35,11 @@ export function getRawDb(): SQLite.SQLiteDatabase {
 }
 
 /**
- * Serialize every mutating DB call. expo-sqlite allows only one
- * `withTransactionAsync` at a time; concurrent sync + seed + optimistic sends
- * were tripping "cannot start a transaction within a transaction".
+ * Serialize writes and reads on separate tails. WAL allows concurrent read
+ * during write; reads must not queue behind large sync write batches.
  */
 let writeTail: Promise<void> = Promise.resolve()
+let readTail: Promise<void> = Promise.resolve()
 
 const SQLITE_BUSY_RE = /database is locked|SQLITE_BUSY|Error code 5/i
 
@@ -58,14 +58,8 @@ async function withBusyRetry<T>(fn: () => Promise<T>, attempts = 6): Promise<T> 
   throw last
 }
 
-/**
- * Serialize every DB access (reads and writes) on the single expo-sqlite
- * connection. Our reactive reads go through this too, so a live read can never
- * overlap a write batch — which is what produced "database is locked" /
- * "transaction within a transaction" when Drizzle's useLiveQuery prepared
- * statements raced raw writes.
- */
-export function runExclusiveDb<T>(fn: () => Promise<T>): Promise<T> {
+/** Serialize mutating DB calls (sync, seed, optimistic sends). */
+export function runExclusiveDbWrite<T>(fn: () => Promise<T>): Promise<T> {
   const task = writeTail.then(() => withBusyRetry(fn))
   writeTail = task.then(
     () => undefined,
@@ -74,8 +68,18 @@ export function runExclusiveDb<T>(fn: () => Promise<T>): Promise<T> {
   return task
 }
 
-/** @deprecated Use `runExclusiveDb` — kept as an alias for existing call sites. */
-export const runExclusiveDbWrite = runExclusiveDb
+/** Serialize reactive reads — does not wait on the write queue. */
+export function runExclusiveDbRead<T>(fn: () => Promise<T>): Promise<T> {
+  const task = readTail.then(() => withBusyRetry(fn))
+  readTail = task.then(
+    () => undefined,
+    () => undefined,
+  )
+  return task
+}
+
+/** @deprecated Use `runExclusiveDbWrite` for writes or `runExclusiveDbRead` for reads. */
+export const runExclusiveDb = runExclusiveDbWrite
 
 /** Idempotent: opens the DB and applies pending migrations exactly once per launch. */
 export function ensureDbReady(): Promise<void> {

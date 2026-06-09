@@ -261,8 +261,6 @@ function ChatMessagesListBase({
       showsVerticalScrollIndicator
       persistentScrollbar={Platform.OS === 'android'}
       overScrollMode={Platform.OS === 'android' ? 'never' : undefined}
-      decelerationRate="fast"
-      disableIntervalMomentum
       viewabilityConfigCallbackPairs={viewabilityPairs}
       maintainVisibleContentPosition={{
         minIndexForVisible: 0,

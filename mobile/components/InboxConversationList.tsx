@@ -9,7 +9,6 @@ import {
 } from 'react'
 import { View, ActivityIndicator, Platform, RefreshControl } from 'react-native'
 import { FlashList, type FlashListRef } from '@shopify/flash-list'
-import { ScrollView } from 'react-native-gesture-handler'
 import type Swipeable from 'react-native-gesture-handler/Swipeable'
 import { SwipeableConversationItem } from '@/components/SwipeableConversationItem'
 import type { ConversationListItem } from '@/types'
@@ -117,11 +116,9 @@ export const InboxConversationList = memo(function InboxConversationList({
       ref={listRef}
       style={{ flex: 1 }}
       data={conversations}
-      extraData={conversations.length}
       keyExtractor={(item) => item.id}
       getItemType={() => 'conversation'}
       renderItem={renderItem}
-      renderScrollComponent={ScrollView}
       onScroll={(e) => {
         scrollOffsetRef.current = e.nativeEvent.contentOffset.y
       }}

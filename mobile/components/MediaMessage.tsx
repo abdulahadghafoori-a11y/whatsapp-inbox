@@ -40,6 +40,7 @@ import { hasMessageMediaBeenActivated } from '@/lib/visibleMessageMedia'
 import { resolveUploadUri } from '@/lib/uploadUri'
 import { messageRenderEqual } from '@/lib/messageRenderEqual'
 import { computeThumbhashFromUri } from '@/lib/thumbhashGen'
+import { scheduleThumbhashGeneration } from '@/lib/thumbhashScheduler'
 import { sha256FromStorageKey, uploadThumbhash } from '@/lib/thumbhashUpload'
 import type { Message } from '@/types'
 
@@ -185,17 +186,18 @@ function MediaMessageBase({
     if (message.type !== 'image' || message.thumbhash || !thumbhashSource) return
     if (!sha256FromStorageKey(message.mediaUrl)) return
     let cancelled = false
-    void (async () => {
+    scheduleThumbhashGeneration(async () => {
+      if (cancelled) return
       const gen = await computeThumbhashFromUri(thumbhashSource)
       if (cancelled || !gen) return
       await uploadThumbhash({
-        storageKey: message.mediaUrl,
+        storageKey: message.mediaUrl!,
         messageId: message.id,
         thumbhash: gen.thumbhash,
         width: gen.width,
         height: gen.height,
       })
-    })()
+    })
     return () => {
       cancelled = true
     }

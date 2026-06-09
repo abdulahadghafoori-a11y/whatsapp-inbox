@@ -9,7 +9,10 @@ import type { SQLiteDatabase } from 'expo-sqlite'
  * `lib/db/schema.ts`.
  */
 
-type Migration = { version: number; up: string }
+type Migration = {
+  version: number
+  up: string | ((db: SQLiteDatabase) => Promise<void>)
+}
 
 const MIGRATIONS: Migration[] = [
   {
@@ -105,9 +108,12 @@ const MIGRATIONS: Migration[] = [
   },
   {
     version: 2,
-    up: `
-      ALTER TABLE messages ADD COLUMN media_local_path TEXT;
-    `,
+    up: async (db) => {
+      const cols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(messages)')
+      if (!cols.some((c) => c.name === 'media_local_path')) {
+        await db.execAsync('ALTER TABLE messages ADD COLUMN media_local_path TEXT')
+      }
+    },
   },
 ]
 
@@ -119,7 +125,11 @@ export async function runMigrations(db: SQLiteDatabase): Promise<void> {
   for (const migration of MIGRATIONS) {
     if (migration.version <= current) continue
     await db.withExclusiveTransactionAsync(async (tx) => {
-      await tx.execAsync(migration.up)
+      if (typeof migration.up === 'function') {
+        await migration.up(tx)
+      } else {
+        await tx.execAsync(migration.up)
+      }
     })
     // PRAGMA cannot be parameterised; the version is a trusted integer literal.
     await db.execAsync(`PRAGMA user_version = ${migration.version}`)

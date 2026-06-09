@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useSyncExternalStore } from 'react'
 import { addDatabaseChangeListener } from 'expo-sqlite'
-import { runExclusiveDb } from './client'
+import { runExclusiveDbRead } from './client'
 
 /**
  * Lightweight reactive layer over the device SQLite connection.
@@ -9,8 +9,7 @@ import { runExclusiveDb } from './client'
  * write batches and produced "database is locked" / "transaction within a
  * transaction"). Here:
  *  - a single `addDatabaseChangeListener` fans out debounced change events,
- *  - every reactive READ runs through the same `runExclusiveDb` serialization
- *    queue as writes (so reads never overlap a write batch),
+ *  - reactive READs use `runExclusiveDbRead` so they don't queue behind writes,
  *  - each store caches its last result in memory and survives unmount for a
  *    short TTL, so reopening a chat/inbox renders synchronously (no loader).
  */
@@ -84,7 +83,7 @@ function refreshStore<T>(store: InternalStore<T>): void {
   store.dirty = false
   void (async () => {
     try {
-      const data = await runExclusiveDb(() => store.reader())
+      const data = await runExclusiveDbRead(() => store.reader())
       if (data !== store.state.data || store.state.status !== 'ready' || store.state.error) {
         store.state = { data, status: 'ready', error: null }
         emit(store)
