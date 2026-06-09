@@ -6,6 +6,7 @@ const insert = vi.fn()
 const getMediaInfo = vi.fn()
 const downloadMedia = vi.fn()
 const uploadToS3IfMissing = vi.fn()
+const objectExists = vi.fn()
 const emitMediaReady = vi.fn()
 
 vi.mock('../db/index.js', () => ({
@@ -49,7 +50,10 @@ vi.mock('./media-blobs.js', () => ({
 import { getBlobBySha256, getBlobByWaMediaId } from './media-blobs.js'
 import { processDownloadMedia } from './media-processor.js'
 
-const s3 = { uploadToS3IfMissing: (...a: unknown[]) => uploadToS3IfMissing(...a) }
+const s3 = {
+  uploadToS3IfMissing: (...a: unknown[]) => uploadToS3IfMissing(...a),
+  objectExists: (...a: unknown[]) => objectExists(...a),
+}
 const io = {} as never
 const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
 
@@ -65,6 +69,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   update.mockResolvedValue(undefined)
   insert.mockResolvedValue(undefined)
+  objectExists.mockResolvedValue(true)
 })
 
 describe('processDownloadMedia', () => {
@@ -76,9 +81,28 @@ describe('processDownloadMedia', () => {
 
     await processDownloadMedia(s3 as never, io, log, payload)
 
+    expect(objectExists).toHaveBeenCalledWith('media/blobs/abc.jpg')
     expect(getMediaInfo).not.toHaveBeenCalled()
     expect(uploadToS3IfMissing).not.toHaveBeenCalled()
     expect(emitMediaReady).toHaveBeenCalledWith(io, 'conv-1', 'msg-1', 'media/blobs/abc.jpg')
+  })
+
+  it('re-downloads when message is uploaded but storage object is missing', async () => {
+    findFirst.mockResolvedValue({
+      mediaUrl: 'media/blobs/missing.jpg',
+      mediaStatus: 'uploaded',
+    })
+    objectExists.mockResolvedValue(false)
+    vi.mocked(getBlobByWaMediaId).mockResolvedValue(undefined)
+    vi.mocked(getBlobBySha256).mockResolvedValue(undefined)
+    getMediaInfo.mockResolvedValue({ url: 'https://cdn.example/file', sha256: undefined })
+    downloadMedia.mockResolvedValue(Buffer.from('jpeg-bytes'))
+    uploadToS3IfMissing.mockResolvedValue('media/blobs/new.jpg')
+
+    await processDownloadMedia(s3 as never, io, log, payload)
+
+    expect(downloadMedia).toHaveBeenCalled()
+    expect(uploadToS3IfMissing).toHaveBeenCalled()
   })
 
   it('reuses storage when wa_media_id was seen before', async () => {
@@ -102,6 +126,26 @@ describe('processDownloadMedia', () => {
       'msg-1',
       'media/blobs/reused.jpg',
     )
+  })
+
+  it('downloads when blob reuse points at missing storage object', async () => {
+    findFirst.mockResolvedValue({ mediaUrl: null, mediaStatus: 'pending' })
+    objectExists.mockResolvedValue(false)
+    vi.mocked(getBlobByWaMediaId).mockResolvedValue({
+      storageKey: 'media/blobs/stale.jpg',
+      mimeType: 'image/jpeg',
+      sizeBytes: 1234,
+      sha256: 'aa'.repeat(32),
+    } as never)
+    vi.mocked(getBlobBySha256).mockResolvedValue(undefined)
+    getMediaInfo.mockResolvedValue({ url: 'https://cdn.example/file', sha256: undefined })
+    downloadMedia.mockResolvedValue(Buffer.from('jpeg-bytes'))
+    uploadToS3IfMissing.mockResolvedValue('media/blobs/fresh.jpg')
+
+    await processDownloadMedia(s3 as never, io, log, payload)
+
+    expect(downloadMedia).toHaveBeenCalled()
+    expect(uploadToS3IfMissing).toHaveBeenCalled()
   })
 
   it('reuses storage when webhook sha256 matches an existing blob', async () => {

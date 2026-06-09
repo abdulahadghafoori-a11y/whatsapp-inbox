@@ -65,6 +65,26 @@ async function assignMessageToExistingBlob(
   emitMediaReady(io, payload.conversationId, payload.messageId, blob.storageKey)
 }
 
+/** Reuse a known blob only when the object still exists (e.g. after S3 → R2 migration). */
+async function tryReuseExistingBlob(
+  s3: S3Service,
+  payload: { messageId: string; conversationId: string; waMediaId: string },
+  blob: Pick<MediaBlob, 'storageKey' | 'mimeType' | 'sizeBytes' | 'sha256'>,
+  log: FastifyBaseLogger,
+  io: SocketIOServer,
+  reason: string,
+): Promise<boolean> {
+  if (!(await s3.objectExists(blob.storageKey))) {
+    log.warn(
+      { messageId: payload.messageId, key: blob.storageKey, reason },
+      'inbound media reuse skipped: object missing in storage',
+    )
+    return false
+  }
+  await assignMessageToExistingBlob(payload, blob, log, io, reason)
+  return true
+}
+
 /** Documents resent with the same name + byte size when WhatsApp hash differs. */
 async function findDocumentStorageKey(
   filename: string,
@@ -108,22 +128,26 @@ export async function processDownloadMedia(
     columns: { mediaUrl: true, mediaStatus: true },
   })
   if (existing?.mediaStatus === 'uploaded' && existing.mediaUrl) {
-    log.info({ messageId: payload.messageId, key: existing.mediaUrl }, 'inbound media already uploaded')
-    emitMediaReady(io, payload.conversationId, payload.messageId, existing.mediaUrl)
-    return
+    if (await s3.objectExists(existing.mediaUrl)) {
+      log.info({ messageId: payload.messageId, key: existing.mediaUrl }, 'inbound media already uploaded')
+      emitMediaReady(io, payload.conversationId, payload.messageId, existing.mediaUrl)
+      return
+    }
+    log.warn(
+      { messageId: payload.messageId, key: existing.mediaUrl },
+      'uploaded media missing in storage; re-downloading',
+    )
   }
 
   const knownBlob = await getBlobByWaMediaId(payload.waMediaId)
   if (knownBlob) {
-    await assignMessageToExistingBlob(payload, knownBlob, log, io, 'wa_media_id')
-    return
+    if (await tryReuseExistingBlob(s3, payload, knownBlob, log, io, 'wa_media_id')) return
   }
 
   if (payload.waContentSha256) {
     const byHash = await getBlobBySha256(payload.waContentSha256)
     if (byHash) {
-      await assignMessageToExistingBlob(payload, byHash, log, io, 'webhook_sha256')
-      return
+      if (await tryReuseExistingBlob(s3, payload, byHash, log, io, 'webhook_sha256')) return
     }
   }
 
@@ -132,8 +156,7 @@ export async function processDownloadMedia(
   if (mediaInfo.sha256) {
     const byHash = await getBlobBySha256(mediaInfo.sha256)
     if (byHash) {
-      await assignMessageToExistingBlob(payload, byHash, log, io, 'media_api_sha256')
-      return
+      if (await tryReuseExistingBlob(s3, payload, byHash, log, io, 'media_api_sha256')) return
     }
   }
 
@@ -151,25 +174,25 @@ export async function processDownloadMedia(
     if (docKey) {
       const blob = await getBlobByStorageKey(docKey)
       if (blob) {
-        await assignMessageToExistingBlob(payload, blob, log, io, 'document_name_size')
+        if (await tryReuseExistingBlob(s3, payload, blob, log, io, 'document_name_size')) return
+      } else if (await s3.objectExists(docKey)) {
+        await db
+          .update(messages)
+          .set({
+            mediaUrl: docKey,
+            mediaMimeType: mimeType,
+            mediaFileSize: fileSize,
+            mediaFilename: payload.filename,
+            mediaStatus: 'uploaded',
+          })
+          .where(eq(messages.id, payload.messageId))
+        log.info(
+          { messageId: payload.messageId, key: docKey },
+          'inbound document reused by filename+size',
+        )
+        emitMediaReady(io, payload.conversationId, payload.messageId, docKey)
         return
       }
-      await db
-        .update(messages)
-        .set({
-          mediaUrl: docKey,
-          mediaMimeType: mimeType,
-          mediaFileSize: fileSize,
-          mediaFilename: payload.filename,
-          mediaStatus: 'uploaded',
-        })
-        .where(eq(messages.id, payload.messageId))
-      log.info(
-        { messageId: payload.messageId, key: docKey },
-        'inbound document reused by filename+size',
-      )
-      emitMediaReady(io, payload.conversationId, payload.messageId, docKey)
-      return
     }
   }
 
